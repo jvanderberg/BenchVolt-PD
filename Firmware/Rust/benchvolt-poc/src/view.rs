@@ -1,0 +1,923 @@
+use core::fmt::Write as _;
+
+use embedded_graphics::{
+    mono_font::{
+        ascii::{FONT_10X20, FONT_6X10, FONT_8X13_BOLD, FONT_9X18_BOLD},
+        MonoTextStyle,
+    },
+    pixelcolor::Rgb565,
+    prelude::*,
+    primitives::{
+        Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle,
+    },
+    text::{Baseline, Text},
+};
+use heapless::String;
+use reducto::View;
+
+use benchvolt_poc::app::{
+    AppState, ChannelSnapshot, ControlFocus, Fault, OutputTransition, RegulationMode, Screen,
+};
+
+const TABLE_TOP: i32 = 24;
+const HEADER_BOTTOM: i32 = 45;
+const ROW_HEIGHT: i32 = 24;
+const TABLE_BOTTOM: i32 = HEADER_BOTTOM + 5 * ROW_HEIGHT;
+const COLUMN_EDGES: [i32; 7] = [0, 25, 78, 131, 184, 237, 319];
+const COLUMN_TEXT_X: [i32; 6] = [9, 32, 85, 138, 191, 246];
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TemperatureProjection {
+    Invalid,
+    TenthsCelsius(i32),
+}
+
+fn temperature_projection(state: &AppState) -> TemperatureProjection {
+    if !state.temp_valid {
+        return TemperatureProjection::Invalid;
+    }
+    TemperatureProjection::TenthsCelsius(i32::from(state.temp_sixteenths_c) * 10 / 16)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StatusProjection {
+    Fault,
+    On,
+    Wait,
+    Off,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct ChannelProjection {
+    setpoint_centivolts: u16,
+    limit_centiamps: u16,
+    measured_centivolts: Option<u16>,
+    measured_centiamps: Option<u16>,
+    status: StatusProjection,
+    regulation_mode: RegulationMode,
+    regulating_current: bool,
+}
+
+fn channel_projection(channel: &ChannelSnapshot) -> ChannelProjection {
+    let status = match channel.fault {
+        Fault::None if channel.transition != OutputTransition::Stable => StatusProjection::Wait,
+        Fault::None if channel.physical_enabled => StatusProjection::On,
+        Fault::None if channel.requested_enabled => StatusProjection::Wait,
+        Fault::None => StatusProjection::Off,
+        _ => StatusProjection::Fault,
+    };
+    ChannelProjection {
+        setpoint_centivolts: channel.setpoint_mv / 10,
+        limit_centiamps: channel.current_limit_ma / 10,
+        measured_centivolts: channel
+            .measurement
+            .valid
+            .then_some(channel.measurement.millivolts / 10),
+        measured_centiamps: channel
+            .measurement
+            .valid
+            .then_some(channel.measurement.milliamps / 10),
+        status,
+        regulation_mode: channel.regulation_mode,
+        regulating_current: channel.regulation_mode == RegulationMode::Cc
+            && channel.physical_enabled
+            && channel.drive_mv < channel.setpoint_mv,
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct DetailProjection {
+    voltage_centivolts: Option<u16>,
+    current_centiamps: Option<u16>,
+    power_centiwatts: Option<u32>,
+    setpoint_centivolts: u16,
+    limit_centiamps: u16,
+    status: StatusProjection,
+    focus: ControlFocus,
+    regulation_mode: RegulationMode,
+    regulating_current: bool,
+}
+
+fn detail_projection(channel: &ChannelSnapshot, focus: ControlFocus) -> DetailProjection {
+    let row = channel_projection(channel);
+    DetailProjection {
+        voltage_centivolts: row.measured_centivolts,
+        current_centiamps: row.measured_centiamps,
+        power_centiwatts: channel.measurement.valid.then_some(
+            u32::from(channel.measurement.millivolts) * u32::from(channel.measurement.milliamps)
+                / 10_000,
+        ),
+        setpoint_centivolts: row.setpoint_centivolts,
+        limit_centiamps: row.limit_centiamps,
+        status: row.status,
+        focus,
+        regulation_mode: channel.regulation_mode,
+        regulating_current: row.regulating_current,
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct SinkProjection {
+    voltage_centivolts: Option<u16>,
+    current_centiamps: Option<u16>,
+    power_centiwatts: Option<u32>,
+    limit_centiamps: u16,
+    focused: bool,
+    over_limit: bool,
+}
+
+fn sink_projection(state: &AppState) -> SinkProjection {
+    SinkProjection {
+        voltage_centivolts: state.sink.valid.then_some(state.sink.millivolts / 10),
+        current_centiamps: state.sink.valid.then_some(state.sink.milliamps / 10),
+        power_centiwatts: state
+            .sink
+            .valid
+            .then_some(u32::from(state.sink.millivolts) * u32::from(state.sink.milliamps) / 10_000),
+        limit_centiamps: state.sink_current_limit_ma / 10,
+        focused: state.focus == ControlFocus::CurrentLimit,
+        over_limit: state.sink.valid && state.sink.milliamps > state.sink_current_limit_ma,
+    }
+}
+
+pub struct BenchVoltView<D> {
+    display: D,
+}
+
+impl<D> BenchVoltView<D>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    pub fn new(display: D) -> Self {
+        Self { display }
+    }
+
+    fn draw_temperature(&mut self, state: &AppState) {
+        let mut text: String<20> = String::new();
+        match temperature_projection(state) {
+            TemperatureProjection::Invalid => {
+                text.push_str("T:--.-C").ok();
+            }
+            TemperatureProjection::TenthsCelsius(value) if value < 0 => {
+                let magnitude = value.abs();
+                write!(&mut text, "T:-{}.{:01}C", magnitude / 10, magnitude % 10).ok();
+            }
+            TemperatureProjection::TenthsCelsius(value) => {
+                write!(&mut text, "T:{}.{:01}C", value / 10, value % 10).ok();
+            }
+        }
+
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(226, 2), Size::new(94, 20)),
+                Rgb565::BLACK,
+            )
+            .ok();
+        Text::with_baseline(
+            text.as_str(),
+            Point::new(226, 1),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn channel_row_top(index: usize) -> i32 {
+        HEADER_BOTTOM + index as i32 * ROW_HEIGHT
+    }
+
+    // Clear only the interior. The table dividers are never erased by updates.
+    fn clear_channel_cell(&mut self, column: usize, index: usize) {
+        let left = COLUMN_EDGES[column];
+        let right = COLUMN_EDGES[column + 1];
+        let top = Self::channel_row_top(index);
+        self.display
+            .fill_solid(
+                &Rectangle::new(
+                    Point::new(left + 1, top + 1),
+                    Size::new((right - left - 1) as u32, (ROW_HEIGHT - 1) as u32),
+                ),
+                Rgb565::BLACK,
+            )
+            .ok();
+    }
+
+    fn draw_channel_text(&mut self, text: &str, column: usize, index: usize, color: Rgb565) {
+        Text::with_baseline(
+            text,
+            Point::new(COLUMN_TEXT_X[column], Self::channel_row_top(index) + 5),
+            MonoTextStyle::new(&FONT_8X13_BOLD, color),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn draw_channel_number(&mut self, index: usize) {
+        let mut text: String<2> = String::new();
+        write!(&mut text, "{}", index + 1).ok();
+        self.clear_channel_cell(0, index);
+        self.draw_channel_text(text.as_str(), 0, index, Rgb565::WHITE);
+    }
+
+    fn draw_fixed_value(&mut self, value: u16, column: usize, index: usize) {
+        let mut text: String<8> = String::new();
+        write!(&mut text, "{}.{:02}", value / 100, value % 100).ok();
+        self.clear_channel_cell(column, index);
+        self.draw_channel_text(text.as_str(), column, index, Rgb565::WHITE);
+    }
+
+    fn draw_measured_value(&mut self, value: Option<u16>, column: usize, index: usize) {
+        match value {
+            Some(value) => self.draw_fixed_value(value, column, index),
+            None => {
+                self.clear_channel_cell(column, index);
+                self.draw_channel_text("--.--", column, index, Rgb565::WHITE);
+            }
+        }
+    }
+
+    fn draw_setpoint(&mut self, index: usize, projection: ChannelProjection) {
+        self.draw_fixed_value(projection.setpoint_centivolts, 1, index);
+    }
+
+    fn draw_limit(&mut self, index: usize, projection: ChannelProjection) {
+        self.draw_fixed_value(projection.limit_centiamps, 2, index);
+    }
+
+    fn draw_voltage(&mut self, index: usize, projection: ChannelProjection) {
+        self.draw_measured_value(projection.measured_centivolts, 3, index);
+    }
+
+    fn draw_current(&mut self, index: usize, projection: ChannelProjection) {
+        self.draw_measured_value(projection.measured_centiamps, 4, index);
+    }
+
+    fn draw_status(&mut self, index: usize, projection: ChannelProjection, focused: bool) {
+        self.clear_channel_cell(5, index);
+        let track_color = match projection.status {
+            StatusProjection::On => Rgb565::new(4, 42, 10),
+            StatusProjection::Wait => Rgb565::new(24, 38, 4),
+            StatusProjection::Off => Rgb565::new(16, 16, 16),
+            StatusProjection::Fault => Rgb565::RED,
+        };
+        let top = Self::channel_row_top(index);
+        RoundedRectangle::with_equal_corners(
+            Rectangle::new(Point::new(248, top + 6), Size::new(27, 13)),
+            Size::new(6, 6),
+        )
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .fill_color(track_color)
+                .stroke_color(if focused { Rgb565::CYAN } else { track_color })
+                .stroke_width(if focused { 1 } else { 0 })
+                .build(),
+        )
+        .draw(&mut self.display)
+        .ok();
+        let knob_x = match projection.status {
+            StatusProjection::On => 264,
+            StatusProjection::Wait => 257,
+            StatusProjection::Off | StatusProjection::Fault => 250,
+        };
+        Circle::new(Point::new(knob_x, top + 8), 9)
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(&mut self.display)
+            .ok();
+        if projection.regulation_mode == RegulationMode::Cc {
+            Text::with_baseline(
+                "CC",
+                Point::new(298, Self::channel_row_top(index) + 5),
+                MonoTextStyle::new(
+                    &FONT_8X13_BOLD,
+                    if projection.regulating_current {
+                        Rgb565::GREEN
+                    } else {
+                        Rgb565::CYAN
+                    },
+                ),
+                Baseline::Top,
+            )
+            .draw(&mut self.display)
+            .ok();
+        }
+    }
+
+    fn draw_channel(&mut self, index: usize, channel: &ChannelSnapshot, focused: bool) {
+        let projection = channel_projection(channel);
+        self.draw_channel_number(index);
+        self.draw_setpoint(index, projection);
+        self.draw_limit(index, projection);
+        self.draw_voltage(index, projection);
+        self.draw_current(index, projection);
+        self.draw_status(index, projection, focused);
+    }
+
+    fn draw_channels(&mut self, state: &AppState) {
+        for (index, channel) in state.channels.iter().enumerate() {
+            self.draw_channel(
+                index,
+                channel,
+                state.focus == ControlFocus::OverviewOutput(index as u8),
+            );
+        }
+    }
+
+    fn draw_table_grid(&mut self) {
+        let style = PrimitiveStyle::with_stroke(Rgb565::new(8, 16, 16), 1);
+        for x in COLUMN_EDGES {
+            Line::new(Point::new(x, TABLE_TOP), Point::new(x, TABLE_BOTTOM))
+                .into_styled(style)
+                .draw(&mut self.display)
+                .ok();
+        }
+        for row in 0..=5 {
+            let y = HEADER_BOTTOM + row * ROW_HEIGHT;
+            Line::new(Point::new(0, y), Point::new(319, y))
+                .into_styled(style)
+                .draw(&mut self.display)
+                .ok();
+        }
+    }
+
+    fn clear_detail_region(&mut self, x: i32, y: i32, width: u32, height: u32) {
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(x, y), Size::new(width, height)),
+                Rgb565::BLACK,
+            )
+            .ok();
+    }
+
+    fn draw_hero_digit(&mut self, digit: char, origin: Point, color: Rgb565) {
+        const SEGMENTS: [[bool; 7]; 10] = [
+            [true, true, true, false, true, true, true],
+            [false, false, true, false, false, true, false],
+            [true, false, true, true, true, false, true],
+            [true, false, true, true, false, true, true],
+            [false, true, true, true, false, true, false],
+            [true, true, false, true, false, true, true],
+            [true, true, false, true, true, true, true],
+            [true, false, true, false, false, true, false],
+            [true, true, true, true, true, true, true],
+            [true, true, true, true, false, true, true],
+        ];
+        const RECTS: [(i32, i32, u32, u32); 7] = [
+            (4, 0, 14, 4),
+            (0, 4, 4, 13),
+            (18, 4, 4, 13),
+            (4, 17, 14, 4),
+            (0, 21, 4, 13),
+            (18, 21, 4, 13),
+            (4, 34, 14, 4),
+        ];
+
+        if digit == '-' {
+            let (x, y, width, height) = RECTS[3];
+            Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
+                .into_styled(PrimitiveStyle::with_fill(color))
+                .draw(&mut self.display)
+                .ok();
+            return;
+        }
+        let Some(index) = digit.to_digit(10).map(|value| value as usize) else {
+            return;
+        };
+        for (enabled, &(x, y, width, height)) in SEGMENTS[index].iter().zip(RECTS.iter()) {
+            if *enabled {
+                Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
+                    .into_styled(PrimitiveStyle::with_fill(color))
+                    .draw(&mut self.display)
+                    .ok();
+            }
+        }
+    }
+
+    fn draw_hero(&mut self, value: Option<u32>, x: i32, suffix: &str) {
+        let mut text: String<8> = String::new();
+        match value {
+            Some(value) => write!(&mut text, "{}.{:02}", value / 100, value % 100).ok(),
+            None => text.push_str("--.--").ok(),
+        };
+        self.clear_detail_region(x - 7, 29, 151, 42);
+
+        let mut cursor = x;
+        for character in text.chars() {
+            if character == '.' {
+                Circle::new(Point::new(cursor + 1, 34 + 29), 5)
+                    .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                    .draw(&mut self.display)
+                    .ok();
+                cursor += 7;
+            } else {
+                self.draw_hero_digit(character, Point::new(cursor, 31), Rgb565::WHITE);
+                cursor += 25;
+            }
+        }
+        Text::with_baseline(
+            suffix,
+            Point::new(cursor + 2, 48),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn draw_detail_voltage(&mut self, projection: DetailProjection) {
+        self.draw_hero(projection.voltage_centivolts.map(u32::from), 5, "V");
+    }
+
+    fn draw_detail_current(&mut self, projection: DetailProjection) {
+        self.draw_hero(projection.current_centiamps.map(u32::from), 164, "A");
+    }
+
+    fn draw_detail_power(&mut self, projection: DetailProjection) {
+        self.draw_power(projection.power_centiwatts);
+    }
+
+    fn draw_power_digit(&mut self, digit: char, origin: Point) {
+        const SEGMENTS: [[bool; 7]; 10] = [
+            [true, true, true, false, true, true, true],
+            [false, false, true, false, false, true, false],
+            [true, false, true, true, true, false, true],
+            [true, false, true, true, false, true, true],
+            [false, true, true, true, false, true, false],
+            [true, true, false, true, false, true, true],
+            [true, true, false, true, true, true, true],
+            [true, false, true, false, false, true, false],
+            [true, true, true, true, true, true, true],
+            [true, true, true, true, false, true, true],
+        ];
+        const RECTS: [(i32, i32, u32, u32); 7] = [
+            (3, 0, 9, 3),
+            (0, 3, 3, 9),
+            (12, 3, 3, 9),
+            (3, 12, 9, 3),
+            (0, 15, 3, 9),
+            (12, 15, 3, 9),
+            (3, 24, 9, 3),
+        ];
+
+        if digit == '-' {
+            let (x, y, width, height) = RECTS[3];
+            Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                .draw(&mut self.display)
+                .ok();
+            return;
+        }
+        let Some(index) = digit.to_digit(10).map(|value| value as usize) else {
+            return;
+        };
+        for (enabled, &(x, y, width, height)) in SEGMENTS[index].iter().zip(RECTS.iter()) {
+            if *enabled {
+                Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
+                    .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                    .draw(&mut self.display)
+                    .ok();
+            }
+        }
+    }
+
+    fn draw_power(&mut self, power_centiwatts: Option<u32>) {
+        let mut text: String<16> = String::new();
+        match power_centiwatts {
+            Some(value) => write!(&mut text, "{}.{:02} W", value / 100, value % 100).ok(),
+            None => text.push_str("--.-- W").ok(),
+        };
+        self.clear_detail_region(90, 88, 150, 35);
+        let mut cursor = 100;
+        for character in text.chars() {
+            match character {
+                '0'..='9' | '-' => {
+                    self.draw_power_digit(character, Point::new(cursor, 91));
+                    cursor += 17;
+                }
+                '.' => {
+                    Circle::new(Point::new(cursor, 114), 4)
+                        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                        .draw(&mut self.display)
+                        .ok();
+                    cursor += 6;
+                }
+                'W' => {
+                    Text::with_baseline(
+                        "W",
+                        Point::new(cursor, 95),
+                        MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+                        Baseline::Top,
+                    )
+                    .draw(&mut self.display)
+                    .ok();
+                    cursor += 10;
+                }
+                _ => cursor += 5,
+            }
+        }
+    }
+
+    fn draw_detail_setting_frame(&mut self, x: i32, width: u32, focused: bool) {
+        self.clear_detail_region(x, 126, width, 37);
+        if focused {
+            RoundedRectangle::with_equal_corners(
+                Rectangle::new(Point::new(x, 128), Size::new(width, 31)),
+                Size::new(5, 5),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::CYAN, 1))
+            .draw(&mut self.display)
+            .ok();
+        }
+    }
+
+    fn draw_detail_setting_value(
+        &mut self,
+        value: u16,
+        x: i32,
+        width: u32,
+        suffix: &str,
+        focused: bool,
+    ) {
+        let mut text: String<12> = String::new();
+        write!(&mut text, "{}.{:02}{}", value / 100, value % 100, suffix).ok();
+        // Preserve the focus frame; value edits repaint only its interior.
+        self.clear_detail_region(x + 2, 130, width - 4, 27);
+        Text::with_baseline(
+            text.as_str(),
+            Point::new(x + 8, 135),
+            MonoTextStyle::new(
+                &FONT_9X18_BOLD,
+                if focused { Rgb565::CYAN } else { Rgb565::WHITE },
+            ),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn draw_detail_setpoint(&mut self, projection: DetailProjection) {
+        let focused = projection.focus == ControlFocus::Voltage;
+        self.draw_detail_setting_frame(4, 84, focused);
+        self.draw_detail_setting_value(projection.setpoint_centivolts, 4, 84, "V", focused);
+    }
+
+    fn draw_detail_setpoint_value(&mut self, projection: DetailProjection) {
+        self.draw_detail_setting_value(
+            projection.setpoint_centivolts,
+            4,
+            84,
+            "V",
+            projection.focus == ControlFocus::Voltage,
+        );
+    }
+
+    fn draw_detail_limit(&mut self, projection: DetailProjection) {
+        let focused = projection.focus == ControlFocus::CurrentLimit;
+        self.draw_detail_setting_frame(144, 84, focused);
+        self.draw_detail_setting_value(projection.limit_centiamps, 144, 84, "A", focused);
+    }
+
+    fn draw_detail_limit_value(&mut self, projection: DetailProjection) {
+        self.draw_detail_setting_value(
+            projection.limit_centiamps,
+            144,
+            84,
+            "A",
+            projection.focus == ControlFocus::CurrentLimit,
+        );
+    }
+
+    fn draw_detail_status(&mut self, status: StatusProjection, focused: bool) {
+        self.clear_detail_region(238, 125, 82, 39);
+        let track_color = match status {
+            StatusProjection::On => Rgb565::new(4, 42, 10),
+            StatusProjection::Wait => Rgb565::new(24, 38, 4),
+            StatusProjection::Off | StatusProjection::Fault => Rgb565::new(24, 5, 5),
+        };
+        RoundedRectangle::with_equal_corners(
+            Rectangle::new(Point::new(249, 130), Size::new(58, 28)),
+            Size::new(14, 14),
+        )
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .fill_color(track_color)
+                .stroke_color(if focused { Rgb565::CYAN } else { track_color })
+                .stroke_width(if focused { 2 } else { 0 })
+                .build(),
+        )
+        .draw(&mut self.display)
+        .ok();
+        let knob_x = if matches!(status, StatusProjection::On) {
+            282
+        } else {
+            252
+        };
+        Circle::new(Point::new(knob_x, 132), 22)
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .draw(&mut self.display)
+            .ok();
+    }
+
+    fn draw_detail_mode(&mut self, projection: DetailProjection) {
+        let focused = projection.focus == ControlFocus::RegulationMode;
+        self.clear_detail_region(94, 126, 44, 37);
+        if focused {
+            RoundedRectangle::with_equal_corners(
+                Rectangle::new(Point::new(94, 128), Size::new(44, 31)),
+                Size::new(5, 5),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::CYAN, 1))
+            .draw(&mut self.display)
+            .ok();
+        }
+        Text::with_baseline(
+            match projection.regulation_mode {
+                RegulationMode::Cv => "CV",
+                RegulationMode::Cc => "CC",
+            },
+            Point::new(107, 135),
+            MonoTextStyle::new(
+                &FONT_9X18_BOLD,
+                if projection.regulating_current {
+                    Rgb565::GREEN
+                } else if focused {
+                    Rgb565::CYAN
+                } else {
+                    Rgb565::WHITE
+                },
+            ),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn draw_detail_screen(&mut self, state: &AppState, index: usize) {
+        let channel = &state.channels[index];
+        let projection = detail_projection(channel, state.focus);
+        self.display.clear(Rgb565::BLACK).ok();
+
+        let mut title: String<12> = String::new();
+        write!(&mut title, "Channel {}", index + 1).ok();
+        Text::with_baseline(
+            title.as_str(),
+            Point::new(4, 1),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        self.draw_temperature(state);
+        if index >= 3 {
+            self.draw_detail_mode(projection);
+        }
+        self.draw_detail_voltage(projection);
+        self.draw_detail_current(projection);
+        self.draw_detail_power(projection);
+        self.draw_detail_setpoint(projection);
+        self.draw_detail_limit(projection);
+        self.draw_detail_status(projection.status, projection.focus == ControlFocus::Output);
+    }
+
+    fn draw_sink_voltage(&mut self, projection: SinkProjection) {
+        self.draw_hero(projection.voltage_centivolts.map(u32::from), 5, "V");
+    }
+
+    fn draw_sink_current(&mut self, projection: SinkProjection) {
+        self.draw_hero(projection.current_centiamps.map(u32::from), 164, "A");
+    }
+
+    fn draw_sink_power(&mut self, projection: SinkProjection) {
+        self.draw_power(projection.power_centiwatts);
+    }
+
+    fn draw_sink_limit_frame(&mut self, projection: SinkProjection) {
+        self.draw_detail_setting_frame(110, 102, projection.focused);
+        self.draw_sink_limit_value(projection);
+    }
+
+    fn draw_sink_limit_value(&mut self, projection: SinkProjection) {
+        self.clear_detail_region(112, 130, 98, 27);
+        let mut text: String<12> = String::new();
+        write!(
+            &mut text,
+            "{}.{:02}A",
+            projection.limit_centiamps / 100,
+            projection.limit_centiamps % 100
+        )
+        .ok();
+        Text::with_baseline(
+            text.as_str(),
+            Point::new(118, 135),
+            MonoTextStyle::new(
+                &FONT_9X18_BOLD,
+                if projection.over_limit {
+                    Rgb565::RED
+                } else if projection.focused {
+                    Rgb565::CYAN
+                } else {
+                    Rgb565::WHITE
+                },
+            ),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn draw_usb_pd_input(&mut self, state: &AppState) {
+        let projection = sink_projection(state);
+        self.display.clear(Rgb565::BLACK).ok();
+        Text::with_baseline(
+            "USB PD Input",
+            Point::new(4, 1),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        self.draw_temperature(state);
+        self.draw_sink_voltage(projection);
+        self.draw_sink_current(projection);
+        self.draw_sink_power(projection);
+        self.draw_sink_limit_frame(projection);
+    }
+
+    fn draw_recovery_status(&mut self, state: &AppState) {
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(112, 2), Size::new(108, 20)),
+                Rgb565::BLACK,
+            )
+            .ok();
+        Text::with_baseline(
+            if state.recovery_armed {
+                "SAFE"
+            } else {
+                "RECOVERY!"
+            },
+            Point::new(112, 6),
+            MonoTextStyle::new(
+                &FONT_6X10,
+                if state.recovery_armed {
+                    Rgb565::GREEN
+                } else {
+                    Rgb565::RED
+                },
+            ),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn draw_overview(&mut self, state: &AppState) {
+        self.display.clear(Rgb565::BLACK).ok();
+        Text::with_baseline(
+            "BenchVolt",
+            Point::new(4, 1),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        self.draw_recovery_status(state);
+        self.draw_temperature(state);
+        Line::new(Point::new(0, TABLE_TOP), Point::new(319, TABLE_TOP))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
+            .draw(&mut self.display)
+            .ok();
+        for (column, label) in ["CH", "SET", "LIM", "VOLTS", "AMPS", "STATE"]
+            .iter()
+            .enumerate()
+        {
+            Text::with_baseline(
+                label,
+                Point::new(COLUMN_TEXT_X[column], 29),
+                MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::CYAN),
+                Baseline::Top,
+            )
+            .draw(&mut self.display)
+            .ok();
+        }
+        self.draw_table_grid();
+        self.draw_channels(state);
+    }
+}
+
+impl<D> View for BenchVoltView<D>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    type State = AppState;
+
+    fn render(&mut self, state: &Self::State) {
+        match state.screen {
+            Screen::Overview => self.draw_overview(state),
+            Screen::Channel(index) => self.draw_detail_screen(state, usize::from(index)),
+            Screen::UsbPdInput => self.draw_usb_pd_input(state),
+        }
+    }
+
+    fn render_transition(&mut self, old: &Self::State, new: &Self::State) {
+        if old.screen != new.screen {
+            self.render(new);
+            return;
+        }
+        if old.recovery_armed != new.recovery_armed {
+            self.draw_recovery_status(new);
+        }
+        if temperature_projection(old) != temperature_projection(new) {
+            self.draw_temperature(new);
+        }
+        match new.screen {
+            Screen::Overview => {
+                for index in 0..new.channels.len() {
+                    let old_focused = old.focus == ControlFocus::OverviewOutput(index as u8);
+                    let new_focused = new.focus == ControlFocus::OverviewOutput(index as u8);
+                    let old = channel_projection(&old.channels[index]);
+                    let new = channel_projection(&new.channels[index]);
+                    if old.setpoint_centivolts != new.setpoint_centivolts {
+                        self.draw_setpoint(index, new);
+                    }
+                    if old.limit_centiamps != new.limit_centiamps {
+                        self.draw_limit(index, new);
+                    }
+                    if old.measured_centivolts != new.measured_centivolts {
+                        self.draw_voltage(index, new);
+                    }
+                    if old.measured_centiamps != new.measured_centiamps {
+                        self.draw_current(index, new);
+                    }
+                    if old.status != new.status
+                        || old.regulation_mode != new.regulation_mode
+                        || old.regulating_current != new.regulating_current
+                        || old_focused != new_focused
+                    {
+                        self.draw_status(index, new, new_focused);
+                    }
+                }
+            }
+            Screen::Channel(index) => {
+                let index = usize::from(index);
+                let old = detail_projection(&old.channels[index], old.focus);
+                let new = detail_projection(&new.channels[index], new.focus);
+                if old.voltage_centivolts != new.voltage_centivolts {
+                    self.draw_detail_voltage(new);
+                }
+                if old.current_centiamps != new.current_centiamps {
+                    self.draw_detail_current(new);
+                }
+                if old.power_centiwatts != new.power_centiwatts {
+                    self.draw_detail_power(new);
+                }
+                if (old.focus == ControlFocus::Voltage) != (new.focus == ControlFocus::Voltage) {
+                    self.draw_detail_setpoint(new);
+                } else if old.setpoint_centivolts != new.setpoint_centivolts {
+                    self.draw_detail_setpoint_value(new);
+                }
+                if (old.focus == ControlFocus::CurrentLimit)
+                    != (new.focus == ControlFocus::CurrentLimit)
+                {
+                    self.draw_detail_limit(new);
+                } else if old.limit_centiamps != new.limit_centiamps {
+                    self.draw_detail_limit_value(new);
+                }
+                if old.status != new.status
+                    || (old.focus == ControlFocus::Output) != (new.focus == ControlFocus::Output)
+                {
+                    self.draw_detail_status(new.status, new.focus == ControlFocus::Output);
+                }
+                if index >= 3
+                    && (old.regulation_mode != new.regulation_mode
+                        || old.regulating_current != new.regulating_current
+                        || (old.focus == ControlFocus::RegulationMode)
+                            != (new.focus == ControlFocus::RegulationMode))
+                {
+                    self.draw_detail_mode(new);
+                }
+            }
+            Screen::UsbPdInput => {
+                let old = sink_projection(old);
+                let new = sink_projection(new);
+                if old.voltage_centivolts != new.voltage_centivolts {
+                    self.draw_sink_voltage(new);
+                }
+                if old.current_centiamps != new.current_centiamps {
+                    self.draw_sink_current(new);
+                }
+                if old.power_centiwatts != new.power_centiwatts {
+                    self.draw_sink_power(new);
+                }
+                if old.focused != new.focused {
+                    self.draw_sink_limit_frame(new);
+                } else if old.limit_centiamps != new.limit_centiamps
+                    || old.over_limit != new.over_limit
+                {
+                    self.draw_sink_limit_value(new);
+                }
+            }
+        }
+    }
+}

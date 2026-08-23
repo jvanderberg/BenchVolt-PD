@@ -1,0 +1,1206 @@
+use crate::app::{
+    Action, AppState, ChannelSnapshot, Fault, Measurement, OutputTransition, RegulationMode,
+};
+
+const STARTUP_GRACE_SAMPLES: u8 = 10;
+const FAULT_CONFIRM_SAMPLES: u8 = 3;
+const VOLTAGE_SETTING_SETTLE_SAMPLES: u8 = 25;
+// Board tests show IOUT_LIMIT is not a usable CH5 regulation loop. Keep this
+// fixed; user CC is implemented only by ADC feedback and voltage side effects.
+const CH5_TPS_CONFIGURATION_LIMIT_MA: u16 = 3_000;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ProtectionSnapshot {
+    pub active: bool,
+    pub last: Measurement,
+    pub peak_milliamps: u16,
+    pub grace_remaining: u8,
+    pub overcurrent_samples: u8,
+    pub voltage_samples: u8,
+    pub samples_since_enable: u16,
+    pub trip: Measurement,
+}
+
+#[derive(Clone, Copy)]
+pub struct ProtectionMonitor {
+    active: bool,
+    last: Measurement,
+    peak_milliamps: u16,
+    grace_remaining: u8,
+    overcurrent_samples: u8,
+    voltage_samples: u8,
+    tracked_drive_mv: u16,
+    voltage_settle_remaining: u8,
+    samples_since_enable: u16,
+    trip: Measurement,
+}
+
+impl Default for ProtectionMonitor {
+    fn default() -> Self {
+        Self {
+            active: false,
+            last: Measurement {
+                millivolts: 0,
+                milliamps: 0,
+                valid: false,
+            },
+            peak_milliamps: 0,
+            grace_remaining: 0,
+            overcurrent_samples: 0,
+            voltage_samples: 0,
+            tracked_drive_mv: 0,
+            voltage_settle_remaining: 0,
+            samples_since_enable: 0,
+            trip: Measurement {
+                millivolts: 0,
+                milliamps: 0,
+                valid: false,
+            },
+        }
+    }
+}
+
+impl ProtectionMonitor {
+    pub fn snapshot(&self) -> ProtectionSnapshot {
+        ProtectionSnapshot {
+            active: self.active,
+            last: self.last,
+            peak_milliamps: self.peak_milliamps,
+            grace_remaining: self.grace_remaining,
+            overcurrent_samples: self.overcurrent_samples,
+            voltage_samples: self.voltage_samples,
+            samples_since_enable: self.samples_since_enable,
+            trip: self.trip,
+        }
+    }
+
+    pub fn observe(&mut self, output: &ChannelSnapshot, measurement: Measurement) -> Option<Fault> {
+        if !output.physical_enabled {
+            self.active = false;
+            self.grace_remaining = 0;
+            self.overcurrent_samples = 0;
+            self.voltage_samples = 0;
+            self.samples_since_enable = 0;
+            return None;
+        }
+        if !measurement.valid {
+            self.last = measurement;
+            self.trip = measurement;
+            return Some(Fault::Sensor);
+        }
+        if !self.active {
+            self.active = true;
+            self.peak_milliamps = 0;
+            self.grace_remaining = STARTUP_GRACE_SAMPLES;
+            self.overcurrent_samples = 0;
+            self.voltage_samples = 0;
+            self.tracked_drive_mv = output.drive_mv;
+            self.voltage_settle_remaining = 0;
+            self.samples_since_enable = 0;
+        }
+        self.last = measurement;
+        self.peak_milliamps = self.peak_milliamps.max(measurement.milliamps);
+        self.samples_since_enable = self.samples_since_enable.saturating_add(1);
+        if output.drive_mv != self.tracked_drive_mv {
+            self.tracked_drive_mv = output.drive_mv;
+            self.voltage_settle_remaining = VOLTAGE_SETTING_SETTLE_SAMPLES;
+            self.voltage_samples = 0;
+        }
+        if self.grace_remaining > 0 {
+            self.grace_remaining -= 1;
+            return None;
+        }
+
+        let overcurrent_threshold = match output.regulation_mode {
+            RegulationMode::Cv => output.current_limit_ma,
+            RegulationMode::Cc => {
+                (u32::from(output.current_limit_ma) * 125 / 100 + 100).min(3_300) as u16
+            }
+        };
+        if measurement.milliamps > overcurrent_threshold {
+            self.overcurrent_samples = self.overcurrent_samples.saturating_add(1);
+        } else {
+            self.overcurrent_samples = 0;
+        }
+        if self.overcurrent_samples >= FAULT_CONFIRM_SAMPLES {
+            self.trip = measurement;
+            return Some(Fault::OverCurrent);
+        }
+
+        // A commanded downward step can leave the measured output above the
+        // new window while output capacitance discharges. I2C/DAC failures
+        // already fail closed in the voltage side effect, and overcurrent is
+        // still checked above on every sample. Only voltage tracking receives
+        // this bounded settling interval.
+        if self.voltage_settle_remaining > 0 {
+            self.voltage_settle_remaining -= 1;
+            self.voltage_samples = 0;
+            return None;
+        }
+
+        let voltage_below_window = output.regulation_mode == RegulationMode::Cv
+            && u32::from(measurement.millivolts) * 100 < u32::from(output.setpoint_mv) * 80;
+        let voltage_above_window =
+            u32::from(measurement.millivolts) * 100 > u32::from(output.setpoint_mv) * 120;
+        let voltage_outside_window = voltage_below_window || voltage_above_window;
+        if voltage_outside_window {
+            self.voltage_samples = self.voltage_samples.saturating_add(1);
+        } else {
+            self.voltage_samples = 0;
+        }
+        if self.voltage_samples >= FAULT_CONFIRM_SAMPLES {
+            self.trip = measurement;
+            Some(Fault::Hardware)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PowerEffect {
+    Output {
+        channel: u8,
+        operation: u16,
+        enabled: bool,
+    },
+    Voltage {
+        channel: u8,
+        millivolts: u16,
+    },
+}
+
+pub fn effect_for_transition(old: &AppState, new: &AppState) -> Option<PowerEffect> {
+    old.channels
+        .iter()
+        .zip(new.channels.iter())
+        .enumerate()
+        .find_map(|(channel, (old, new))| {
+            if old.transition == new.transition {
+                return None;
+            }
+            match new.transition {
+                OutputTransition::Enabling(operation) => Some(PowerEffect::Output {
+                    channel: channel as u8,
+                    operation,
+                    enabled: true,
+                }),
+                OutputTransition::Disabling(operation) => Some(PowerEffect::Output {
+                    channel: channel as u8,
+                    operation,
+                    enabled: false,
+                }),
+                OutputTransition::Stable => None,
+            }
+        })
+        .or_else(|| {
+            old.channels
+                .iter()
+                .zip(new.channels.iter())
+                .enumerate()
+                .find_map(|(channel, (old, new))| {
+                    let millivolts = if matches!(channel, 3 | 4)
+                        && old.drive_mv != new.drive_mv
+                        && new.physical_enabled
+                    {
+                        Some(new.drive_mv)
+                    } else {
+                        None
+                    };
+                    if let Some(millivolts) = millivolts {
+                        Some(PowerEffect::Voltage {
+                            channel: channel as u8,
+                            millivolts,
+                        })
+                    } else {
+                        None
+                    }
+                })
+        })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Rail {
+    Dc1,
+    Dc2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DriverOperation {
+    ChannelGate {
+        channel: u8,
+        enabled: bool,
+    },
+    RailEnable {
+        rail: Rail,
+        enabled: bool,
+    },
+    ConfigureRail {
+        rail: Rail,
+        millivolts: u16,
+    },
+    VerifyRail {
+        rail: Rail,
+    },
+    SetAdjustableDac {
+        millivolts: u16,
+    },
+    Ch5Enable(bool),
+    ConfigureCh5 {
+        millivolts: u16,
+        current_limit_ma: u16,
+    },
+    Ch5OutputEnable(bool),
+    Ch5Voltage(u16),
+    VerifyOutput {
+        channel: u8,
+        millivolts: u16,
+    },
+}
+
+pub trait PowerDriver {
+    type Error;
+
+    fn apply(&mut self, operation: DriverOperation) -> Result<(), Self::Error>;
+}
+
+fn rail_for(channel: u8) -> Option<Rail> {
+    match channel {
+        0 | 1 => Some(Rail::Dc1),
+        2 | 3 => Some(Rail::Dc2),
+        _ => None,
+    }
+}
+
+fn rail_setpoint(rail: Rail) -> u16 {
+    match rail {
+        Rail::Dc1 => 3_000,
+        Rail::Dc2 => 5_500,
+    }
+}
+
+fn sibling_is_on(state: &AppState, channel: u8) -> bool {
+    let Some(rail) = rail_for(channel) else {
+        return false;
+    };
+    state.channels.iter().enumerate().any(|(index, output)| {
+        index != usize::from(channel)
+            && rail_for(index as u8) == Some(rail)
+            && output.physical_enabled
+    })
+}
+
+fn enable_is_eligible(state: &AppState, channel: u8) -> Result<(), Fault> {
+    let Some(output) = state.channels.get(usize::from(channel)) else {
+        return Err(Fault::Hardware);
+    };
+    if !state.recovery_armed || !state.temp_valid || !output.measurement.valid {
+        return Err(Fault::Sensor);
+    }
+    if state.temp_sixteenths_c >= 70 * 16 {
+        return Err(Fault::OverTemperature);
+    }
+    if output.current_limit_ma > 3_000 {
+        return Err(Fault::Hardware);
+    }
+    Ok(())
+}
+
+fn best_effort_shutdown<D: PowerDriver>(driver: &mut D, state: &AppState, channel: u8) {
+    if channel == 4 {
+        let _ = driver.apply(DriverOperation::Ch5OutputEnable(false));
+        let _ = driver.apply(DriverOperation::Ch5Enable(false));
+        return;
+    }
+    let _ = driver.apply(DriverOperation::ChannelGate {
+        channel,
+        enabled: false,
+    });
+    if !sibling_is_on(state, channel) {
+        if let Some(rail) = rail_for(channel) {
+            let _ = driver.apply(DriverOperation::RailEnable {
+                rail,
+                enabled: false,
+            });
+        }
+    }
+}
+
+fn run_enable<D: PowerDriver>(driver: &mut D, state: &AppState, channel: u8) -> Result<(), Fault> {
+    enable_is_eligible(state, channel)?;
+    let output = &state.channels[usize::from(channel)];
+
+    if channel == 4 {
+        driver
+            .apply(DriverOperation::Ch5Enable(false))
+            .map_err(|_| Fault::Hardware)?;
+        driver
+            .apply(DriverOperation::Ch5Enable(true))
+            .map_err(|_| Fault::Hardware)?;
+        driver
+            .apply(DriverOperation::ConfigureCh5 {
+                millivolts: output.drive_mv,
+                current_limit_ma: CH5_TPS_CONFIGURATION_LIMIT_MA,
+            })
+            .map_err(|_| Fault::Hardware)?;
+        driver
+            .apply(DriverOperation::Ch5OutputEnable(true))
+            .map_err(|_| Fault::Hardware)?;
+    } else {
+        driver
+            .apply(DriverOperation::ChannelGate {
+                channel,
+                enabled: false,
+            })
+            .map_err(|_| Fault::Hardware)?;
+        let rail = rail_for(channel).ok_or(Fault::Hardware)?;
+        if !sibling_is_on(state, channel) {
+            driver
+                .apply(DriverOperation::RailEnable {
+                    rail,
+                    enabled: true,
+                })
+                .map_err(|_| Fault::Hardware)?;
+            driver
+                .apply(DriverOperation::ConfigureRail {
+                    rail,
+                    millivolts: rail_setpoint(rail),
+                })
+                .map_err(|_| Fault::Hardware)?;
+        }
+        driver
+            .apply(DriverOperation::VerifyRail { rail })
+            .map_err(|_| Fault::Hardware)?;
+        if channel == 3 {
+            driver
+                .apply(DriverOperation::SetAdjustableDac {
+                    millivolts: output.drive_mv,
+                })
+                .map_err(|_| Fault::Hardware)?;
+        }
+        driver
+            .apply(DriverOperation::ChannelGate {
+                channel,
+                enabled: true,
+            })
+            .map_err(|_| Fault::Hardware)?;
+    }
+    driver
+        .apply(DriverOperation::VerifyOutput {
+            channel,
+            millivolts: output.setpoint_mv,
+        })
+        .map_err(|_| Fault::Hardware)
+}
+
+fn run_disable<D: PowerDriver>(driver: &mut D, channel: u8) -> Result<(), Fault> {
+    if channel == 4 {
+        // OE is best effort: it can NACK when the converter is already held in
+        // reset. Verified EN low is the authoritative physical shutdown.
+        let _ = driver.apply(DriverOperation::Ch5OutputEnable(false));
+        driver
+            .apply(DriverOperation::Ch5Enable(false))
+            .map_err(|_| Fault::Hardware)
+    } else {
+        driver
+            .apply(DriverOperation::ChannelGate {
+                channel,
+                enabled: false,
+            })
+            .map_err(|_| Fault::Hardware)
+    }
+}
+
+pub fn execute_effect<D: PowerDriver>(
+    driver: &mut D,
+    state: &AppState,
+    effect: PowerEffect,
+) -> Action {
+    match effect {
+        PowerEffect::Output {
+            channel,
+            operation,
+            enabled,
+        } => {
+            let result = if enabled {
+                run_enable(driver, state, channel)
+            } else {
+                run_disable(driver, channel)
+            };
+            match result {
+                Ok(()) => Action::OutputApplied {
+                    channel,
+                    operation,
+                    enabled,
+                },
+                Err(fault) => {
+                    best_effort_shutdown(driver, state, channel);
+                    Action::OutputFailed {
+                        channel,
+                        operation,
+                        fault,
+                    }
+                }
+            }
+        }
+        PowerEffect::Voltage {
+            channel,
+            millivolts,
+        } => {
+            let result = match channel {
+                3 => driver.apply(DriverOperation::SetAdjustableDac { millivolts }),
+                4 => driver.apply(DriverOperation::Ch5Voltage(millivolts)),
+                _ => return Action::HardwareSettingApplied,
+            };
+            if result.is_ok() {
+                Action::HardwareSettingApplied
+            } else {
+                best_effort_shutdown(driver, state, channel);
+                Action::HardwareSettingFailed {
+                    channel,
+                    fault: Fault::Hardware,
+                }
+            }
+        }
+    }
+}
+
+/// Immediate, best-effort physical shutdown used by global safety interlocks.
+/// Every independent off control is attempted even if an earlier driver call fails.
+pub fn execute_global_shutdown<D: PowerDriver>(driver: &mut D) -> Result<(), Fault> {
+    let mut failed = false;
+    for channel in 0..4 {
+        failed |= driver
+            .apply(DriverOperation::ChannelGate {
+                channel,
+                enabled: false,
+            })
+            .is_err();
+    }
+    failed |= driver
+        .apply(DriverOperation::Ch5OutputEnable(false))
+        .is_err();
+    failed |= driver.apply(DriverOperation::Ch5Enable(false)).is_err();
+    failed |= driver
+        .apply(DriverOperation::RailEnable {
+            rail: Rail::Dc1,
+            enabled: false,
+        })
+        .is_err();
+    failed |= driver
+        .apply(DriverOperation::RailEnable {
+            rail: Rail::Dc2,
+            enabled: false,
+        })
+        .is_err();
+    if failed {
+        Err(Fault::Hardware)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use crate::app::AppReducer;
+    use reducto::Reducer;
+    use std::vec::Vec;
+
+    #[derive(Default)]
+    struct MockDriver {
+        calls: Vec<DriverOperation>,
+        fail_at: Option<usize>,
+        rail_enabled: [bool; 2],
+        rail_configured: [bool; 2],
+        gates: [bool; 4],
+        ch5_enable: bool,
+        ch5_configured: bool,
+        ch5_oe: bool,
+    }
+
+    impl MockDriver {
+        fn rail_index(rail: Rail) -> usize {
+            match rail {
+                Rail::Dc1 => 0,
+                Rail::Dc2 => 1,
+            }
+        }
+
+        fn safe(&self) -> bool {
+            (!self.gates[0] && !self.gates[1] || !self.rail_enabled[0] || self.rail_configured[0])
+                && (!self.gates[2] && !self.gates[3]
+                    || !self.rail_enabled[1]
+                    || self.rail_configured[1])
+                && (!self.ch5_oe || !self.ch5_enable || self.ch5_configured)
+        }
+    }
+
+    impl PowerDriver for MockDriver {
+        type Error = ();
+
+        fn apply(&mut self, operation: DriverOperation) -> Result<(), Self::Error> {
+            let call = self.calls.len();
+            self.calls.push(operation);
+            if self.fail_at == Some(call) {
+                return Err(());
+            }
+            match operation {
+                DriverOperation::ChannelGate { channel, enabled } => {
+                    self.gates[usize::from(channel)] = enabled
+                }
+                DriverOperation::RailEnable { rail, enabled } => {
+                    let index = Self::rail_index(rail);
+                    self.rail_enabled[index] = enabled;
+                    if !enabled {
+                        self.rail_configured[index] = false;
+                    }
+                }
+                DriverOperation::ConfigureRail { rail, .. } => {
+                    let index = Self::rail_index(rail);
+                    if !self.rail_enabled[index] {
+                        return Err(());
+                    }
+                    self.rail_configured[index] = true;
+                }
+                DriverOperation::VerifyRail { rail } => {
+                    let index = Self::rail_index(rail);
+                    if !self.rail_enabled[index] || !self.rail_configured[index] {
+                        return Err(());
+                    }
+                }
+                DriverOperation::Ch5Enable(enabled) => {
+                    self.ch5_enable = enabled;
+                    if !enabled {
+                        self.ch5_configured = false;
+                        self.ch5_oe = false;
+                    }
+                }
+                DriverOperation::ConfigureCh5 { .. } => {
+                    if !self.ch5_enable {
+                        return Err(());
+                    }
+                    self.ch5_configured = true;
+                }
+                DriverOperation::Ch5OutputEnable(enabled) => {
+                    if enabled && (!self.ch5_enable || !self.ch5_configured) {
+                        return Err(());
+                    }
+                    self.ch5_oe = enabled;
+                }
+                DriverOperation::Ch5Voltage(_) => {
+                    if !self.ch5_enable || !self.ch5_configured {
+                        return Err(());
+                    }
+                }
+                DriverOperation::VerifyOutput { channel, .. } => {
+                    let enabled = if channel == 4 {
+                        self.ch5_oe
+                    } else {
+                        self.gates[usize::from(channel)]
+                    };
+                    if !enabled {
+                        return Err(());
+                    }
+                }
+                DriverOperation::SetAdjustableDac { .. } => {}
+            }
+            assert!(self.safe());
+            Ok(())
+        }
+    }
+
+    fn eligible_state() -> AppState {
+        let mut state = AppState::new(true, Some(25 * 16));
+        for output in &mut state.channels {
+            output.measurement = Measurement {
+                millivolts: 0,
+                milliamps: 0,
+                valid: true,
+            };
+        }
+        state
+    }
+
+    fn requested(state: &AppState, channel: u8, enabled: bool) -> AppState {
+        AppReducer::reduce(state, Action::SetOutputRequested { channel, enabled })
+    }
+
+    #[test]
+    fn stale_hardware_completion_cannot_change_state() {
+        let initial = eligible_state();
+        let enabling = requested(&initial, 0, true);
+        let cancelled = requested(&enabling, 0, false);
+        let stale = AppReducer::reduce(
+            &cancelled,
+            Action::OutputApplied {
+                channel: 0,
+                operation: 1,
+                enabled: true,
+            },
+        );
+        assert_eq!(stale.version, cancelled.version);
+        assert!(!stale.channels[0].physical_enabled);
+    }
+
+    #[test]
+    fn every_single_driver_failure_fails_closed() {
+        for channel in 0..5 {
+            let state = requested(&eligible_state(), channel, true);
+            let effect = effect_for_transition(&eligible_state(), &state).unwrap();
+            let mut successful = MockDriver::default();
+            let _ = execute_effect(&mut successful, &state, effect);
+            let call_count = successful.calls.len();
+
+            for failure in 0..call_count {
+                let mut driver = MockDriver {
+                    fail_at: Some(failure),
+                    ..MockDriver::default()
+                };
+                let action = execute_effect(&mut driver, &state, effect);
+                let final_state = AppReducer::reduce(&state, action);
+                assert!(driver.safe());
+                assert!(!final_state.channels[usize::from(channel)].physical_enabled);
+                assert!(!final_state.channels[usize::from(channel)].requested_enabled);
+            }
+        }
+    }
+
+    #[test]
+    fn randomized_requests_and_injected_failures_preserve_interlocks() {
+        let mut seed = 0x51a7_3c9du32;
+        let mut state = eligible_state();
+        let mut driver = MockDriver::default();
+        for _ in 0..10_000 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let channel = ((seed >> 8) % 5) as u8;
+            let enabled = seed & 1 != 0;
+            let old = state;
+            state = requested(&state, channel, enabled);
+            if let Some(effect) = effect_for_transition(&old, &state) {
+                driver.fail_at = if seed & 0x18 == 0 {
+                    Some(driver.calls.len())
+                } else {
+                    None
+                };
+                let completion = execute_effect(&mut driver, &state, effect);
+                state = AppReducer::reduce(&state, completion);
+            }
+            assert!(driver.safe());
+        }
+    }
+
+    #[test]
+    fn global_shutdown_attempts_every_off_control_after_each_possible_failure() {
+        for failure in 0..8 {
+            let mut driver = MockDriver {
+                fail_at: Some(failure),
+                rail_enabled: [true; 2],
+                rail_configured: [true; 2],
+                gates: [true; 4],
+                ch5_enable: true,
+                ch5_configured: true,
+                ch5_oe: true,
+                ..MockDriver::default()
+            };
+            assert!(execute_global_shutdown(&mut driver).is_err());
+            assert_eq!(driver.calls.len(), 8);
+            assert!(driver.safe());
+        }
+    }
+
+    #[test]
+    fn setting_edits_are_pure_when_off_and_emit_hardware_effects_when_on() {
+        let mut state = eligible_state();
+        state.screen = crate::app::Screen::Channel(4);
+        state = AppReducer::reduce(&state, Action::NextControl);
+        state = AppReducer::reduce(&state, Action::NextControl);
+        assert!(state.focus == crate::app::ControlFocus::Voltage);
+
+        let old = state;
+        state = AppReducer::reduce(&state, Action::AdjustFocused(1));
+        assert_eq!(state.channels[4].setpoint_mv, 12_010);
+        assert!(effect_for_transition(&old, &state).is_none());
+
+        state = AppReducer::reduce(
+            &state,
+            Action::SetOutputRequested {
+                channel: 4,
+                enabled: true,
+            },
+        );
+        let enable = effect_for_transition(&old, &state).unwrap();
+        let mut driver = MockDriver::default();
+        state = AppReducer::reduce(&state, execute_effect(&mut driver, &state, enable));
+        assert!(state.channels[4].physical_enabled);
+
+        let old = state;
+        state = AppReducer::reduce(&state, Action::AdjustFocused(5));
+        assert_eq!(state.channels[4].setpoint_mv, 12_060);
+        assert_eq!(state.channels[4].drive_mv, 12_010);
+        assert!(effect_for_transition(&old, &state).is_none());
+
+        let old = state;
+        state = AppReducer::reduce(
+            &state,
+            Action::RegulateChannel {
+                channel: 4,
+                measurement: Measurement {
+                    millivolts: 12_010,
+                    milliamps: 0,
+                    valid: true,
+                },
+            },
+        );
+        assert_eq!(state.channels[4].drive_mv, 12_060);
+        assert_eq!(
+            effect_for_transition(&old, &state),
+            Some(PowerEffect::Voltage {
+                channel: 4,
+                millivolts: 12_060
+            })
+        );
+    }
+
+    #[test]
+    fn usb_pd_input_limit_is_a_pure_bounded_alarm_setting() {
+        let mut state = eligible_state();
+        state.screen = crate::app::Screen::UsbPdInput;
+
+        state = AppReducer::reduce(&state, Action::NextControl);
+        assert!(state.focus == crate::app::ControlFocus::CurrentLimit);
+
+        let old = state;
+        state = AppReducer::reduce(&state, Action::AdjustFocused(-5));
+        assert_eq!(state.sink_current_limit_ma, 4_950);
+        assert!(effect_for_transition(&old, &state).is_none());
+
+        state.sink_current_limit_ma = 4_990;
+        state = AppReducer::reduce(&state, Action::AdjustFocused(127));
+        assert_eq!(state.sink_current_limit_ma, 5_000);
+        state.sink_current_limit_ma = 10;
+        state = AppReducer::reduce(&state, Action::AdjustFocused(-127));
+        assert_eq!(state.sink_current_limit_ma, 0);
+
+        state = AppReducer::reduce(&state, Action::NextControl);
+        assert!(state.focus == crate::app::ControlFocus::None);
+    }
+
+    #[test]
+    fn overview_clicks_cycle_output_toggles_then_restore_screen_navigation() {
+        let mut state = eligible_state();
+        assert!(state.screen == crate::app::Screen::Overview);
+        for channel in 0..5u8 {
+            state = AppReducer::reduce(&state, Action::NextControl);
+            assert!(state.focus == crate::app::ControlFocus::OverviewOutput(channel));
+        }
+        state = AppReducer::reduce(&state, Action::NextControl);
+        assert!(state.focus == crate::app::ControlFocus::None);
+
+        state = AppReducer::reduce(&state, Action::NextControl);
+        state = AppReducer::reduce(&state, Action::GoOverview);
+        assert!(state.screen == crate::app::Screen::Overview);
+        assert!(state.focus == crate::app::ControlFocus::None);
+    }
+
+    #[test]
+    fn ch5_cc_reducer_drives_voltage_side_effects_and_fails_closed() {
+        let mut state = eligible_state();
+        state.channels[4].current_limit_ma = 720;
+
+        let off = state;
+        state = AppReducer::reduce(
+            &state,
+            Action::SetRegulationMode {
+                channel: 4,
+                mode: RegulationMode::Cc,
+            },
+        );
+        assert!(state.channels[4].regulation_mode == RegulationMode::Cc);
+        assert_eq!(state.channels[4].current_limit_ma, 720);
+        assert!(effect_for_transition(&off, &state).is_none());
+
+        let old = state;
+        state = AppReducer::reduce(
+            &state,
+            Action::SetOutputRequested {
+                channel: 4,
+                enabled: true,
+            },
+        );
+        let mut driver = MockDriver::default();
+        let enable = effect_for_transition(&old, &state).unwrap();
+        state = AppReducer::reduce(&state, execute_effect(&mut driver, &state, enable));
+        assert!(state.channels[4].physical_enabled);
+        assert!(driver.calls.iter().any(|operation| matches!(
+            operation,
+            DriverOperation::ConfigureCh5 {
+                current_limit_ma: 3_000,
+                ..
+            }
+        )));
+
+        let old = state;
+        state = AppReducer::reduce(
+            &state,
+            Action::SetCurrentLimit {
+                channel: 4,
+                milliamps: 500,
+            },
+        );
+        assert!(effect_for_transition(&old, &state).is_none());
+
+        let old = state;
+        state = AppReducer::reduce(
+            &state,
+            Action::RegulateChannel {
+                channel: 4,
+                measurement: Measurement {
+                    millivolts: 12_000,
+                    milliamps: 600,
+                    valid: true,
+                },
+            },
+        );
+        assert_eq!(state.channels[4].drive_mv, 11_800);
+        assert_eq!(
+            effect_for_transition(&old, &state),
+            Some(PowerEffect::Voltage {
+                channel: 4,
+                millivolts: 11_800,
+            })
+        );
+        let effect = effect_for_transition(&old, &state).unwrap();
+        let completion = execute_effect(&mut driver, &state, effect);
+        state = AppReducer::reduce(&state, completion);
+        assert!(matches!(
+            driver.calls.last(),
+            Some(DriverOperation::Ch5Voltage(11_800))
+        ));
+
+        let old = state;
+        let failed = AppReducer::reduce(
+            &state,
+            Action::RegulateChannel {
+                channel: 4,
+                measurement: Measurement {
+                    millivolts: 11_800,
+                    milliamps: 800,
+                    valid: true,
+                },
+            },
+        );
+        driver.fail_at = Some(driver.calls.len());
+        let effect = effect_for_transition(&old, &failed).unwrap();
+        let completion = execute_effect(&mut driver, &failed, effect);
+        let failed = AppReducer::reduce(&failed, completion);
+        assert!(driver.safe());
+        assert!(!failed.channels[4].physical_enabled);
+        assert!(!failed.channels[4].requested_enabled);
+        assert!(failed.channels[4].fault == Fault::Hardware);
+    }
+
+    #[test]
+    fn ch4_cc_reducer_drives_dac_side_effects_and_fails_closed() {
+        let mut state = eligible_state();
+        state.channels[3].requested_enabled = true;
+        state.channels[3].physical_enabled = true;
+        state.channels[3].setpoint_mv = 5_000;
+        state.channels[3].drive_mv = 5_000;
+        state.channels[3].current_limit_ma = 500;
+        state.channels[3].regulation_mode = RegulationMode::Cc;
+
+        let old = state;
+        state = AppReducer::reduce(
+            &state,
+            Action::RegulateChannel {
+                channel: 3,
+                measurement: Measurement {
+                    millivolts: 5_000,
+                    milliamps: 600,
+                    valid: true,
+                },
+            },
+        );
+        assert_eq!(state.channels[3].drive_mv, 4_800);
+        let effect = effect_for_transition(&old, &state).unwrap();
+        assert_eq!(
+            effect,
+            PowerEffect::Voltage {
+                channel: 3,
+                millivolts: 4_800,
+            }
+        );
+
+        let mut driver = MockDriver::default();
+        let completion = execute_effect(&mut driver, &state, effect);
+        state = AppReducer::reduce(&state, completion);
+        assert!(matches!(
+            driver.calls.last(),
+            Some(DriverOperation::SetAdjustableDac { millivolts: 4_800 })
+        ));
+
+        let old = state;
+        let failed = AppReducer::reduce(
+            &state,
+            Action::RegulateChannel {
+                channel: 3,
+                measurement: Measurement {
+                    millivolts: 4_800,
+                    milliamps: 800,
+                    valid: true,
+                },
+            },
+        );
+        driver.fail_at = Some(driver.calls.len());
+        let completion = execute_effect(
+            &mut driver,
+            &failed,
+            effect_for_transition(&old, &failed).unwrap(),
+        );
+        let failed = AppReducer::reduce(&failed, completion);
+        assert!(driver.safe());
+        assert!(!failed.channels[3].physical_enabled);
+        assert!(!failed.channels[3].requested_enabled);
+        assert!(failed.channels[3].fault == Fault::Hardware);
+    }
+
+    #[test]
+    fn ch5_cc_protection_allows_voltage_droop_but_catches_runaway_current() {
+        let mut state = eligible_state();
+        let output = &mut state.channels[4];
+        output.requested_enabled = true;
+        output.physical_enabled = true;
+        output.setpoint_mv = 12_000;
+        output.current_limit_ma = 500;
+        output.regulation_mode = RegulationMode::Cc;
+        let regulating = Measurement {
+            millivolts: 8_000,
+            milliamps: 600,
+            valid: true,
+        };
+        let runaway = Measurement {
+            millivolts: 8_000,
+            milliamps: 800,
+            valid: true,
+        };
+        let mut monitor = ProtectionMonitor::default();
+        for _ in 0..STARTUP_GRACE_SAMPLES {
+            assert!(monitor.observe(output, regulating).is_none());
+        }
+        for _ in 0..20 {
+            assert!(monitor.observe(output, regulating).is_none());
+        }
+        assert!(monitor.observe(output, runaway).is_none());
+        assert!(monitor.observe(output, runaway).is_none());
+        assert!(monitor.observe(output, runaway) == Some(Fault::OverCurrent));
+    }
+
+    #[test]
+    fn ch5_cc_controller_converges_on_a_resistive_load() {
+        let mut state = eligible_state();
+        state.channels[4].requested_enabled = true;
+        state.channels[4].physical_enabled = true;
+        state.channels[4].setpoint_mv = 12_000;
+        state.channels[4].drive_mv = 12_000;
+        state.channels[4].current_limit_ma = 500;
+        state.channels[4].regulation_mode = RegulationMode::Cc;
+
+        for _ in 0..100 {
+            let current_ma = state.channels[4].drive_mv / 20;
+            state = AppReducer::reduce(
+                &state,
+                Action::RegulateChannel {
+                    channel: 4,
+                    measurement: Measurement {
+                        millivolts: state.channels[4].drive_mv,
+                        milliamps: current_ma,
+                        valid: true,
+                    },
+                },
+            );
+            assert!((800..=12_000).contains(&state.channels[4].drive_mv));
+        }
+        assert!((496..=504).contains(&(state.channels[4].drive_mv / 20)));
+    }
+
+    #[test]
+    fn ch5_cc_constant_power_instability_reaches_the_runaway_interlock() {
+        let mut state = eligible_state();
+        state.channels[4].requested_enabled = true;
+        state.channels[4].physical_enabled = true;
+        state.channels[4].setpoint_mv = 12_000;
+        state.channels[4].drive_mv = 12_000;
+        state.channels[4].current_limit_ma = 500;
+        state.channels[4].regulation_mode = RegulationMode::Cc;
+        let mut monitor = ProtectionMonitor::default();
+        let mut tripped = false;
+
+        for _ in 0..100 {
+            let voltage_mv = state.channels[4].drive_mv;
+            let measurement = Measurement {
+                millivolts: voltage_mv,
+                milliamps: (7_000_000u32 / u32::from(voltage_mv)) as u16,
+                valid: true,
+            };
+            if monitor.observe(&state.channels[4], measurement) == Some(Fault::OverCurrent) {
+                tripped = true;
+                break;
+            }
+            state = AppReducer::reduce(
+                &state,
+                Action::RegulateChannel {
+                    channel: 4,
+                    measurement,
+                },
+            );
+        }
+        assert!(tripped);
+    }
+
+    #[test]
+    fn protection_rejects_startup_transients_and_rearms_after_disable() {
+        let mut state = eligible_state();
+        let output = &mut state.channels[4];
+        output.requested_enabled = true;
+        output.physical_enabled = true;
+        output.setpoint_mv = 12_000;
+        output.current_limit_ma = 400;
+        let overload = Measurement {
+            millivolts: 2_000,
+            milliamps: 900,
+            valid: true,
+        };
+        let nominal = Measurement {
+            millivolts: 12_000,
+            milliamps: 0,
+            valid: true,
+        };
+        let mut monitor = ProtectionMonitor::default();
+
+        for _ in 0..STARTUP_GRACE_SAMPLES {
+            assert!(monitor.observe(output, overload).is_none());
+        }
+        assert!(monitor.observe(output, overload).is_none());
+        assert!(monitor.observe(output, nominal).is_none());
+        assert!(monitor.observe(output, overload).is_none());
+        assert!(monitor.observe(output, overload).is_none());
+        assert!(monitor.observe(output, overload) == Some(Fault::OverCurrent));
+        let tripped = monitor.snapshot();
+        assert!(tripped.trip == overload);
+        assert_eq!(tripped.peak_milliamps, overload.milliamps);
+
+        output.physical_enabled = false;
+        assert!(monitor.observe(output, overload).is_none());
+        assert!(monitor.snapshot().trip == overload);
+        output.physical_enabled = true;
+        for _ in 0..STARTUP_GRACE_SAMPLES {
+            assert!(monitor.observe(output, nominal).is_none());
+        }
+        assert!(monitor.observe(output, nominal).is_none());
+    }
+
+    #[test]
+    fn voltage_edits_get_bounded_settling_without_weakening_current_protection() {
+        let mut state = eligible_state();
+        let output = &mut state.channels[3];
+        output.requested_enabled = true;
+        output.physical_enabled = true;
+        output.setpoint_mv = 5_000;
+        output.drive_mv = 5_000;
+        output.current_limit_ma = 500;
+        output.regulation_mode = RegulationMode::Cc;
+        let nominal = Measurement {
+            millivolts: 5_000,
+            milliamps: 500,
+            valid: true,
+        };
+        let lagging_voltage = Measurement {
+            millivolts: 3_376,
+            milliamps: 500,
+            valid: true,
+        };
+
+        let mut monitor = ProtectionMonitor::default();
+        for _ in 0..=STARTUP_GRACE_SAMPLES {
+            assert!(monitor.observe(output, nominal).is_none());
+        }
+        output.setpoint_mv = 2_770;
+        output.drive_mv = 2_770;
+        for _ in 0..VOLTAGE_SETTING_SETTLE_SAMPLES {
+            assert!(monitor.observe(output, lagging_voltage).is_none());
+        }
+        assert!(monitor.observe(output, lagging_voltage).is_none());
+        assert!(monitor.observe(output, lagging_voltage).is_none());
+        assert!(monitor.observe(output, lagging_voltage) == Some(Fault::Hardware));
+
+        let mut monitor = ProtectionMonitor::default();
+        output.setpoint_mv = 5_000;
+        output.drive_mv = 5_000;
+        for _ in 0..=STARTUP_GRACE_SAMPLES {
+            assert!(monitor.observe(output, nominal).is_none());
+        }
+        output.setpoint_mv = 2_770;
+        output.drive_mv = 2_770;
+        let overload = Measurement {
+            millivolts: 3_376,
+            milliamps: 800,
+            valid: true,
+        };
+        assert!(monitor.observe(output, overload).is_none());
+        assert!(monitor.observe(output, overload).is_none());
+        assert!(monitor.observe(output, overload) == Some(Fault::OverCurrent));
+    }
+
+    #[test]
+    fn output_toggle_retries_a_fault_then_toggles_back_off() {
+        let mut state = eligible_state();
+        state.channels[4].fault = Fault::OverCurrent;
+        state.channels[4].current_limit_ma = 410;
+
+        let old = state;
+        state = AppReducer::reduce(&state, Action::ToggleOutputRequested { channel: 4 });
+        assert!(state.channels[4].requested_enabled);
+        assert!(state.channels[4].fault == Fault::None);
+        let enable = effect_for_transition(&old, &state).unwrap();
+        let mut driver = MockDriver::default();
+        state = AppReducer::reduce(&state, execute_effect(&mut driver, &state, enable));
+        assert!(state.channels[4].physical_enabled);
+        assert!(driver.calls.iter().any(|operation| matches!(
+            operation,
+            DriverOperation::ConfigureCh5 {
+                current_limit_ma: 3_000,
+                ..
+            }
+        )));
+
+        let old = state;
+        state = AppReducer::reduce(
+            &state,
+            Action::SetCurrentLimit {
+                channel: 4,
+                milliamps: 420,
+            },
+        );
+        assert_eq!(state.channels[4].current_limit_ma, 420);
+        assert!(effect_for_transition(&old, &state).is_none());
+
+        let old = state;
+        state = AppReducer::reduce(&state, Action::ToggleOutputRequested { channel: 4 });
+        assert!(!state.channels[4].requested_enabled);
+        assert!(matches!(
+            effect_for_transition(&old, &state),
+            Some(PowerEffect::Output { enabled: false, .. })
+        ));
+    }
+
+    #[test]
+    fn reboot_request_is_pure_application_state() {
+        let state = eligible_state();
+        let next = AppReducer::reduce(&state, Action::RequestReboot);
+        assert!(next.reboot_requested);
+        assert!(effect_for_transition(&state, &next).is_none());
+    }
+}

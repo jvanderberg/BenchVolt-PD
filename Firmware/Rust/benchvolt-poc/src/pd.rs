@@ -16,7 +16,6 @@ const PD_MESSAGE_RECEIVED: u8 = 0x04;
 const GET_SOURCE_CAPABILITIES: [u8; 2] = [0x07, 0x00];
 const SEND_COMMAND: u8 = 0x26;
 const OPERATION_TIMEOUT_MS: u16 = 500;
-const RETRY_BACKOFF_MS: u16 = 2_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PdError {
@@ -180,7 +179,8 @@ pub enum ServiceEvent {
 pub struct Service {
     negotiator: Negotiator,
     cadence_ms: u16,
-    retry_ms: u16,
+    active: bool,
+    started_pending: bool,
 }
 
 impl Service {
@@ -188,42 +188,48 @@ impl Service {
         Self {
             negotiator: Negotiator::new(current_cap_ma),
             cadence_ms: 0,
-            retry_ms: 0,
+            active: false,
+            started_pending: false,
         }
+    }
+
+    pub fn request_negotiation(&mut self, current_cap_ma: u16) {
+        self.negotiator.restart(current_cap_ma);
+        self.cadence_ms = 20;
+        self.active = true;
+        self.started_pending = true;
+    }
+
+    pub const fn current_cap_ma(&self) -> u16 {
+        self.negotiator.current_cap_ma()
     }
 
     pub fn tick<B: PdBus>(
         &mut self,
         elapsed_ms: u16,
         now: u16,
-        outputs_off: bool,
-        requested_current_cap_ma: u16,
+        _outputs_off: bool,
+        _requested_current_cap_ma: u16,
         bus: &mut B,
     ) -> [Option<ServiceEvent>; 2] {
-        if outputs_off && self.negotiator.failed().is_some() {
-            self.retry_ms = self.retry_ms.saturating_add(elapsed_ms);
-        } else {
-            self.retry_ms = 0;
-        }
-        self.cadence_ms = self.cadence_ms.wrapping_add(elapsed_ms);
         let mut events = [None; 2];
-        let retried = outputs_off && self.retry_ms >= RETRY_BACKOFF_MS;
-        if retried {
-            self.negotiator.restart(requested_current_cap_ma);
-            self.retry_ms = 0;
-            self.cadence_ms = self.cadence_ms.max(20);
+        if !self.active {
+            return events;
+        }
+        if self.started_pending {
+            self.started_pending = false;
             events[0] = Some(ServiceEvent::NegotiationStarted);
         }
+        self.cadence_ms = self.cadence_ms.wrapping_add(elapsed_ms);
         if self.cadence_ms < 20 {
             return events;
         }
         self.cadence_ms = 0;
-        if outputs_off && self.negotiator.current_cap_ma() != requested_current_cap_ma {
-            self.negotiator.restart(requested_current_cap_ma);
-            self.retry_ms = 0;
-            events[0] = Some(ServiceEvent::NegotiationStarted);
+        let event = self.negotiator.step(bus, now);
+        if matches!(event, Some(PdEvent::Lost(_))) {
+            self.active = false;
         }
-        events[1] = self.negotiator.step(bus, now).map(ServiceEvent::Pd);
+        events[1] = event.map(ServiceEvent::Pd);
         events
     }
 }
@@ -450,36 +456,36 @@ mod tests {
     }
 
     #[test]
-    fn service_owns_cadence_and_only_restarts_current_limit_while_outputs_are_off() {
-        let mut service = Service::new(3_000);
+    fn service_is_passive_until_a_deliberate_request() {
+        let mut service = Service::new(2_000);
         let mut bus = FailingBus;
-        assert_eq!(service.tick(19, 19, true, 2_000, &mut bus), [None; 2]);
-        assert_eq!(
-            service.tick(1, 20, false, 2_000, &mut bus),
-            [None, Some(ServiceEvent::Pd(PdEvent::Lost(PdError::Bus)))]
-        );
+        for now in [20, 2_020, 4_020, 60_000] {
+            assert_eq!(service.tick(2_000, now, true, 5_000, &mut bus), [None; 2]);
+        }
 
-        let events = service.tick(20, 40, true, 2_000, &mut bus);
-        assert_eq!(events[0], Some(ServiceEvent::NegotiationStarted));
+        service.request_negotiation(1_500);
+        assert_eq!(
+            service.tick(0, 60_001, true, 5_000, &mut bus),
+            [
+                Some(ServiceEvent::NegotiationStarted),
+                Some(ServiceEvent::Pd(PdEvent::Lost(PdError::Bus)))
+            ]
+        );
+        assert_eq!(service.current_cap_ma(), 1_500);
     }
 
     #[test]
-    fn failed_pd_negotiation_retries_with_outputs_off_after_backoff() {
+    fn failed_pd_negotiation_never_retries_without_another_request() {
         let mut service = Service::new(2_000);
         let mut bus = FailingBus;
+        service.request_negotiation(2_000);
         assert_eq!(
-            service.tick(20, 20, true, 2_000, &mut bus),
-            [None, Some(ServiceEvent::Pd(PdEvent::Lost(PdError::Bus)))]
-        );
-
-        assert_eq!(service.tick(2_000, 2_020, false, 2_000, &mut bus), [None; 2]);
-        assert_eq!(service.tick(1_999, 4_019, true, 2_000, &mut bus), [None; 2]);
-        let retried = service.tick(1, 4_020, true, 2_000, &mut bus);
-        assert_eq!(retried[0], Some(ServiceEvent::NegotiationStarted));
-        assert_eq!(
-            retried[1],
+            service.tick(0, 0, true, 2_000, &mut bus)[1],
             Some(ServiceEvent::Pd(PdEvent::Lost(PdError::Bus)))
         );
+        for now in [2_000, 4_000, 30_000] {
+            assert_eq!(service.tick(2_000, now, true, 2_000, &mut bus), [None; 2]);
+        }
     }
 
     fn fixed(millivolts: u16, milliamps: u16) -> u32 {

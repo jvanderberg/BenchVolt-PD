@@ -80,6 +80,7 @@ pub enum UsbIntent {
     SetCurrentLimit { channel: u8, milliamps: u16 },
     SetRegulationMode { channel: u8, mode: RegulationMode },
     SetSinkCurrentLimit(u16),
+    PdNegotiate,
     ArbData(ArbDataChunk),
     ArbStart(ArbStart),
     ArbStop(u8),
@@ -98,6 +99,19 @@ pub fn output_completion_response(result: Result<(), Fault>) -> &'static [u8] {
         Err(Fault::OverTemperature) => b"ERR:OVERTEMP\r\n",
         Err(Fault::Sensor) => b"ERR:SENSOR\r\n",
         Err(_) => b"ERR:HARDWARE\r\n",
+    }
+}
+
+pub fn pd_completion_response(result: Result<(), crate::pd::PdError>) -> &'static [u8] {
+    match result {
+        Ok(()) => b"OK\r\n",
+        Err(crate::pd::PdError::Bus) => b"ERR:PD:BUS\r\n",
+        Err(crate::pd::PdError::WrongDevice) => b"ERR:PD:DEVICE\r\n",
+        Err(crate::pd::PdError::Detached) => b"ERR:PD:DETACHED\r\n",
+        Err(crate::pd::PdError::Timeout) => b"ERR:PD:TIMEOUT\r\n",
+        Err(crate::pd::PdError::MalformedCapabilities) => b"ERR:PD:CAPS\r\n",
+        Err(crate::pd::PdError::NoSuitablePdo) => b"ERR:PD:NO_PDO\r\n",
+        Err(crate::pd::PdError::ContractMismatch) => b"ERR:PD:CONTRACT\r\n",
     }
 }
 
@@ -211,6 +225,10 @@ pub fn project_compat_query(
 }
 
 pub fn parse_compat_mutation(command: &[u8]) -> Result<Option<UsbIntent>, CommandError> {
+    if matches!(command, b"SYST:PD:NEGOTIATE" | b"SOUR:PD:CONF:MAX") {
+        return Ok(Some(UsbIntent::PdNegotiate));
+    }
+
     if let Some(rest) = command.strip_prefix(b"OUTP:CH") {
         if rest.len() == 2 && rest[1] == b'?' {
             return Ok(None);
@@ -307,6 +325,38 @@ mod tests {
     fn compatibility_parser_leaves_queries_and_unrelated_commands_untouched() {
         assert_eq!(parse_compat_mutation(b"OUTP:CH1?"), Ok(None));
         assert_eq!(parse_compat_mutation(b"MEAS:ALL?"), Ok(None));
+    }
+
+    #[test]
+    fn deliberate_pd_negotiation_accepts_rust_and_legacy_c_spellings() {
+        assert_eq!(
+            parse_compat_mutation(b"SYST:PD:NEGOTIATE"),
+            Ok(Some(UsbIntent::PdNegotiate))
+        );
+        assert_eq!(
+            parse_compat_mutation(b"SOUR:PD:CONF:MAX"),
+            Ok(Some(UsbIntent::PdNegotiate))
+        );
+        assert_eq!(parse_compat_mutation(b"SYST:PD:NEGOTIATE?"), Ok(None));
+    }
+
+    #[test]
+    fn pd_completion_responses_preserve_terminal_causes() {
+        assert_eq!(pd_completion_response(Ok(())), b"OK\r\n");
+        for (error, response) in [
+            (crate::pd::PdError::Bus, b"ERR:PD:BUS\r\n" as &[u8]),
+            (crate::pd::PdError::WrongDevice, b"ERR:PD:DEVICE\r\n"),
+            (crate::pd::PdError::Detached, b"ERR:PD:DETACHED\r\n"),
+            (crate::pd::PdError::Timeout, b"ERR:PD:TIMEOUT\r\n"),
+            (
+                crate::pd::PdError::MalformedCapabilities,
+                b"ERR:PD:CAPS\r\n",
+            ),
+            (crate::pd::PdError::NoSuitablePdo, b"ERR:PD:NO_PDO\r\n"),
+            (crate::pd::PdError::ContractMismatch, b"ERR:PD:CONTRACT\r\n"),
+        ] {
+            assert_eq!(pd_completion_response(Err(error)), response);
+        }
     }
 
     #[test]

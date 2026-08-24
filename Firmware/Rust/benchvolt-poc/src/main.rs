@@ -28,7 +28,9 @@ use benchvolt_poc::power::{
     execute_global_shutdown, FirmwareEffectPlanner, PowerExecutor, Rail,
 };
 use benchvolt_poc::settings::{PersistentSettings, SettingsDebouncer};
-use benchvolt_poc::usb_command::{output_completion_response, UsbIntent};
+use benchvolt_poc::usb_command::{
+    output_completion_response, pd_completion_response, UsbIntent,
+};
 use benchvolt_poc::waveform::{Directive as WaveformDirective, Service as WaveformService};
 use board::{
     adc::{read_channel_measurement, BoundedAdc},
@@ -428,6 +430,7 @@ fn main() -> ! {
     let mut last_encoder_direction = 0i8;
     let mut encoder_velocity = 0u8;
     let mut pending_usb_output: Option<(u8, u16, bool)> = None;
+    let mut pending_usb_pd = false;
 
     loop {
         while let Some(command) = take_usb_command() {
@@ -471,7 +474,7 @@ fn main() -> ! {
                     queue_usb_response(b"OK:REBOOTING\r\n");
                 }
                 UsbIntent::SetOutput { channel, enabled } => {
-                    if enabled && power_driver.is_busy() {
+                    if enabled && (power_driver.is_busy() || pending_usb_pd) {
                         queue_usb_response(b"ERR:BUSY\r\n");
                         continue;
                     }
@@ -622,6 +625,10 @@ fn main() -> ! {
                     }
                 }
                 UsbIntent::SetSinkCurrentLimit(milliamps) => {
+                    if pending_usb_pd {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        continue;
+                    }
                     dispatch_app(
                         &mut app,
                         &mut power_driver,
@@ -632,6 +639,26 @@ fn main() -> ! {
                     } else {
                         queue_usb_response(b"ERR:RANGE\r\n");
                     }
+                }
+                UsbIntent::PdNegotiate => {
+                    let outputs_off = app
+                        .state()
+                        .channels
+                        .iter()
+                        .all(|output| {
+                            !output.requested_enabled && !output.physical_enabled
+                        });
+                    if pending_usb_pd || power_driver.is_busy() || !outputs_off {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        continue;
+                    }
+                    pd_service.request_negotiation(app.state().sink_current_limit_ma);
+                    pending_usb_pd = true;
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::PdNegotiationStarted,
+                    );
                 }
                 UsbIntent::ArbData(chunk) => {
                     if !matches!(
@@ -743,16 +770,22 @@ fn main() -> ! {
             .into_iter()
             .flatten()
         {
-            let action = match event {
-                PdServiceEvent::NegotiationStarted => Action::PdNegotiationStarted,
+            let (action, completion) = match event {
+                PdServiceEvent::NegotiationStarted => (Action::PdNegotiationStarted, None),
                 PdServiceEvent::Pd(benchvolt_poc::pd::PdEvent::Negotiated(contract)) => {
-                    Action::PdNegotiated(contract)
+                    (Action::PdNegotiated(contract), Some(Ok(())))
                 }
                 PdServiceEvent::Pd(benchvolt_poc::pd::PdEvent::Lost(error)) => {
-                    Action::PdFailed(error)
+                    (Action::PdFailed(error), Some(Err(error)))
                 }
             };
             dispatch_app(&mut app, &mut power_driver, action);
+            if pending_usb_pd {
+                if let Some(result) = completion {
+                    queue_usb_response(pd_completion_response(result));
+                    pending_usb_pd = false;
+                }
+            }
         }
 
         let (direction, accelerated) = take_encoder_adjustment(

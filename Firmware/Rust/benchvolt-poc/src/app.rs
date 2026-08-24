@@ -1059,7 +1059,8 @@ impl Reducer for AppReducer {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
                     return Self::enforce_invariants(next);
                 };
-                if channel < 3
+                if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault)
+                    || channel < 3
                     || output.transition != OutputTransition::Stable
                     || output.regulation_mode == mode
                 {
@@ -1138,7 +1139,17 @@ impl Reducer for AppReducer {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
                     return Self::enforce_invariants(next);
                 };
-                if enabled
+                if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
+                    if !enabled
+                        && state.awg_status == AwgStatus::Running
+                        && channel == state.active_awg_channel()
+                    {
+                        next.awg_status = AwgStatus::StopRequested;
+                        true
+                    } else {
+                        false
+                    }
+                } else if enabled
                     && output.requested_enabled
                     && matches!(output.transition, OutputTransition::Stable)
                 {
@@ -1363,6 +1374,42 @@ mod tests {
         let next = AppReducer::reduce(&state, Action::BootRecoveryStatus(false));
 
         assert!(!next.recovery_armed);
+    }
+
+    #[test]
+    fn reducer_enforces_awg_channel_ownership_for_every_input_path() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        state.awg_status = AwgStatus::Running;
+        state.awg_source = AwgSource::Builtin;
+        state.awg.channel = 3;
+
+        let enabled = AppReducer::reduce(
+            &state,
+            Action::SetOutputRequested {
+                channel: 0,
+                enabled: true,
+            },
+        );
+        assert!(enabled == state);
+
+        let mode = AppReducer::reduce(
+            &state,
+            Action::SetRegulationMode {
+                channel: 3,
+                mode: RegulationMode::Cc,
+            },
+        );
+        assert!(mode == state);
+
+        let stopped = AppReducer::reduce(
+            &state,
+            Action::SetOutputRequested {
+                channel: 3,
+                enabled: false,
+            },
+        );
+        assert!(stopped.awg_status == AwgStatus::StopRequested);
+        assert!(stopped.channels == state.channels);
     }
 
     #[test]

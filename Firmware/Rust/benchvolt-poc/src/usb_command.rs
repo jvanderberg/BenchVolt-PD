@@ -101,6 +101,21 @@ pub fn output_completion_response(result: Result<(), Fault>) -> &'static [u8] {
     }
 }
 
+pub fn temperature_response(state: &AppState) -> Response {
+    let mut response = Response::new();
+    if state.temp_valid {
+        let hundredths = i32::from(state.temp_sixteenths_c) * 100 / 16;
+        if hundredths < 0 {
+            response.push_byte(b'-').ok();
+        }
+        response.push_fixed(hundredths.unsigned_abs(), 2).ok();
+        response.push_bytes(b"\r\n").ok();
+    } else {
+        response.push_bytes(b"ERR:SENSOR\r\n").ok();
+    }
+    response
+}
+
 fn write_voltage(response: &mut Response, measurement: Measurement) -> Result<(), CommandError> {
     if measurement.valid {
         let centivolts = (u32::from(measurement.millivolts) + 5) / 10;
@@ -313,6 +328,19 @@ mod tests {
             output_completion_response(Err(Fault::Hardware)),
             b"ERR:HARDWARE\r\n"
         );
+        assert_eq!(
+            output_completion_response(Err(Fault::None)),
+            b"ERR:HARDWARE\r\n"
+        );
+    }
+
+    #[test]
+    fn native_temperature_response_preserves_a_negative_sub_degree_sign() {
+        let negative = AppState::new(true, Some(-1));
+        let invalid = AppState::new(true, None);
+
+        assert_eq!(temperature_response(&negative).as_bytes(), b"-0.06\r\n");
+        assert_eq!(temperature_response(&invalid).as_bytes(), b"ERR:SENSOR\r\n");
     }
 
     const fn measurement(millivolts: u16, milliamps: u16) -> Measurement {

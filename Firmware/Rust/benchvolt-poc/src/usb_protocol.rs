@@ -11,7 +11,9 @@ use benchvolt_poc::{
     },
     power::ProtectionMonitor,
     protocol::parse_milliunits,
-    usb_command::{parse_compat_mutation, project_compat_query, CommandError, UsbIntent},
+    usb_command::{
+        parse_compat_mutation, project_compat_query, temperature_response, CommandError, UsbIntent,
+    },
 };
 use core::{fmt::Write as _, sync::atomic::Ordering};
 use heapless::String;
@@ -278,20 +280,7 @@ pub(crate) fn handle_usb_command(
             queue_usb_response(response.as_bytes());
         }
         b"MEAS:TEMP?" => {
-            let mut response: String<32> = String::new();
-            if state.temp_valid {
-                let raw = i32::from(state.temp_sixteenths_c);
-                let hundredths = raw * 100 / 16;
-                write!(
-                    &mut response,
-                    "{}.{:02}\r\n",
-                    hundredths / 100,
-                    hundredths.abs() % 100
-                )
-                .ok();
-            } else {
-                response.push_str("ERR:SENSOR\r\n").ok();
-            }
+            let response = temperature_response(state);
             queue_usb_response(response.as_bytes());
         }
         b"MEAS:CH1?" | b"MEAS:CH2?" | b"MEAS:CH3?" | b"MEAS:CH4?" | b"MEAS:CH5?" => {

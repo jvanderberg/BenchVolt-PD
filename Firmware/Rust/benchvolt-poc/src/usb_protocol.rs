@@ -1,9 +1,9 @@
-use crate::{
-    ARB_CYCLES, ARB_INDEX, ARB_LATE_UPDATES, ARB_SKIPPED_CYCLES, CH5_TPS_STATUS,
-    HW_RETRY_COUNT, LAST_HW_ERROR, LAST_HW_OPERATION, RESET_CAUSES, RESET_REASON,
-};
 use crate::input::{encoder_counts, monotonic_ms};
 use crate::usb_transport::queue_usb_response;
+use crate::{
+    ARB_CYCLES, ARB_INDEX, ARB_LATE_UPDATES, ARB_SKIPPED_CYCLES, CH5_TPS_STATUS, HW_RETRY_COUNT,
+    LAST_HW_ERROR, LAST_HW_OPERATION, RESET_CAUSES, RESET_REASON,
+};
 use benchvolt_poc::{
     app::{AppState, AwgSource, AwgStatus, RegulationMode},
     arb::{
@@ -11,7 +11,7 @@ use benchvolt_poc::{
     },
     power::ProtectionMonitor,
     protocol::parse_milliunits,
-    usb_command::{parse_compat_mutation, CommandError, UsbIntent},
+    usb_command::{parse_compat_mutation, project_compat_query, CommandError, UsbIntent},
 };
 use core::{fmt::Write as _, sync::atomic::Ordering};
 use heapless::String;
@@ -132,6 +132,21 @@ pub(crate) fn handle_usb_command(
             queue_usb_response(response.as_bytes());
             return UsbIntent::None;
         }
+    }
+    match project_compat_query(command, state) {
+        Ok(Some(response)) => {
+            queue_usb_response(response.as_bytes());
+            return UsbIntent::None;
+        }
+        Err(CommandError::Syntax) => {
+            queue_usb_response(b"ERR:SYNTAX\r\n");
+            return UsbIntent::None;
+        }
+        Err(CommandError::Range) => {
+            queue_usb_response(b"ERR:RANGE\r\n");
+            return UsbIntent::None;
+        }
+        Ok(None) => {}
     }
     match parse_compat_mutation(command) {
         Ok(Some(intent)) => return intent,

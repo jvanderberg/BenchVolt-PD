@@ -17,11 +17,7 @@ use core::{
 };
 
 use benchvolt_poc::app::{Action, AppReducer, AppState, AwgSource, AwgStatus};
-use benchvolt_poc::arb::{
-    Buffer as ArbBuffer, RuntimeDirective as ArbRuntimeDirective, RuntimeState as ArbRuntimeState,
-    Scheduler as ArbScheduler, Tick as ArbTick, UploadSession as ArbUploadSession,
-};
-use benchvolt_poc::awg::Scheduler as AwgScheduler;
+use benchvolt_poc::arb::{Buffer as ArbBuffer, UploadSession as ArbUploadSession};
 use benchvolt_poc::input_policy::{encoder_action, ButtonTracker};
 use benchvolt_poc::measurement::MeasurementWindows;
 use benchvolt_poc::monitoring::{ProtectionService, TpsStatusObservation};
@@ -31,6 +27,7 @@ use benchvolt_poc::power::{
     execute_global_shutdown, FirmwareEffectPlanner, Rail,
 };
 use benchvolt_poc::settings::{PersistentSettings, SettingsDebouncer};
+use benchvolt_poc::waveform::{Directive as WaveformDirective, Service as WaveformService};
 use board::{
     adc::{read_channel_measurement, BoundedAdc},
     i2c::{SoftI2c, SoftPdBus},
@@ -419,9 +416,7 @@ fn main() -> ! {
     let mut awg_load_ticks = 0u16;
     let mut measurement_windows = MeasurementWindows::new();
     let mut protection = ProtectionService::default();
-    let mut awg_scheduler = AwgScheduler::new();
-    let mut arb_scheduler = ArbScheduler::new();
-    let mut arb_runtime = ArbRuntimeState::new();
+    let mut waveform_service = WaveformService::new();
     let mut arb_upload = ArbUploadSession::new();
     let mut settings_effect = SettingsDebouncer::new(PersistentSettings::from_state(app.state()));
     let mut pd_service = PdService::new(app.state().sink_current_limit_ma);
@@ -490,8 +485,7 @@ fn main() -> ! {
                         && app.state().awg_status == AwgStatus::Running
                     {
                         if app.state().awg_source == AwgSource::Arbitrary {
-                            arb_runtime.cancel(channel);
-                            arb_scheduler.stop();
+                            waveform_service.cancel_arbitrary(channel);
                         }
                         if execute_global_shutdown(&mut power_driver).is_ok() {
                             dispatch_app(
@@ -632,18 +626,17 @@ fn main() -> ! {
                     if app.state().awg_status == AwgStatus::StartRequested
                         && app.state().awg_source == AwgSource::Arbitrary
                     {
-                        arb_scheduler.stop();
                         ARB_INDEX.store(0, Ordering::Relaxed);
                         ARB_CYCLES.store(0, Ordering::Relaxed);
                         ARB_LATE_UPDATES.store(0, Ordering::Relaxed);
                         ARB_SKIPPED_CYCLES.store(0, Ordering::Relaxed);
-                        arb_runtime.arm(start);
+                        waveform_service.arm_arbitrary(start);
                     } else {
                         queue_usb_response(b"ERR:BUSY\r\n");
                     }
                 }
                 UsbIntent::ArbStop(channel) => {
-                    arb_runtime.cancel(channel);
+                    waveform_service.cancel_arbitrary(channel);
                     if app.state().awg_source == AwgSource::Arbitrary
                         && app.state().active_awg_channel() == channel
                         && !matches!(app.state().awg_status, AwgStatus::Stopped)
@@ -655,7 +648,7 @@ fn main() -> ! {
                                 Action::GlobalShutdownApplied,
                             );
                             dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
-                            arb_scheduler.stop();
+                            waveform_service.stop_arbitrary();
                             queue_usb_response(b"OK\r\n");
                         } else {
                             dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
@@ -724,10 +717,43 @@ fn main() -> ! {
 
         service_profile_request(&mut app, &mut power_driver, &mut settings_store);
 
-        match app.state().awg_status {
-            AwgStatus::StartRequested => {
-                awg_scheduler.stop();
-                arb_scheduler.stop();
+        let waveform_status = app.state().awg_status;
+        let waveform_source = app.state().awg_source;
+        let waveform_config = app.state().awg;
+        let waveform_tick = monotonic_awg_tick();
+        let waveform_directive = if waveform_status == AwgStatus::Running
+            && waveform_source == AwgSource::Arbitrary
+        {
+            cortex_m::interrupt::free(|cs| {
+                let buffer = ARB_BUFFER.borrow(cs).borrow();
+                waveform_service.tick(
+                    waveform_status,
+                    waveform_source,
+                    waveform_config,
+                    waveform_tick,
+                    Some(&buffer),
+                )
+            })
+        } else {
+            waveform_service.tick(
+                waveform_status,
+                waveform_source,
+                waveform_config,
+                waveform_tick,
+                None,
+            )
+        };
+        let arb_status = waveform_service.arb_status();
+        ARB_INDEX.store(u32::from(arb_status.index), Ordering::Relaxed);
+        ARB_CYCLES.store(arb_status.cycles, Ordering::Relaxed);
+        ARB_LATE_UPDATES.store(arb_status.late_updates, Ordering::Relaxed);
+        ARB_SKIPPED_CYCLES.store(arb_status.skipped_cycles, Ordering::Relaxed);
+        match waveform_directive {
+            WaveformDirective::None => {}
+            WaveformDirective::Sample(millivolts) => {
+                dispatch_app(&mut app, &mut power_driver, Action::AwgSample(millivolts));
+            }
+            WaveformDirective::PrepareStart => {
                 if execute_global_shutdown(&mut power_driver).is_ok() {
                     dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
                     dispatch_app(&mut app, &mut power_driver, Action::AwgStartPrepared);
@@ -735,110 +761,27 @@ fn main() -> ! {
                     dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                 }
             }
-            AwgStatus::StopRequested => {
-                awg_scheduler.stop();
-                arb_scheduler.stop();
-                if app.state().awg_source == AwgSource::Arbitrary {
-                    arb_runtime.clear();
-                }
+            WaveformDirective::Stop => {
                 if execute_global_shutdown(&mut power_driver).is_ok() {
                     dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
                 } else {
                     dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                 }
             }
-            AwgStatus::Running => match app.state().awg_source {
-                AwgSource::Builtin => {
-                    arb_scheduler.stop();
-                    if let Some(millivolts) =
-                        awg_scheduler.tick(monotonic_awg_tick(), app.state().awg)
-                    {
-                        dispatch_app(&mut app, &mut power_driver, Action::AwgSample(millivolts));
-                    }
-                }
-                AwgSource::Arbitrary => {
-                    awg_scheduler.stop();
-                    match arb_runtime.directive() {
-                        ArbRuntimeDirective::Run(start) => {
-                            let tick = cortex_m::interrupt::free(|cs| {
-                                let buffer = ARB_BUFFER.borrow(cs).borrow();
-                                arb_scheduler.tick(monotonic_awg_tick(), start, &buffer)
-                            });
-                            let status = arb_scheduler.status();
-                            ARB_INDEX.store(u32::from(status.index), Ordering::Relaxed);
-                            ARB_CYCLES.store(status.cycles, Ordering::Relaxed);
-                            ARB_LATE_UPDATES.store(status.late_updates, Ordering::Relaxed);
-                            ARB_SKIPPED_CYCLES.store(status.skipped_cycles, Ordering::Relaxed);
-                            match tick {
-                                Some(ArbTick::Sample(millivolts)) => {
-                                    dispatch_app(
-                                        &mut app,
-                                        &mut power_driver,
-                                        Action::AwgSample(millivolts),
-                                    );
-                                }
-                                Some(ArbTick::Finished) => {
-                                    arb_runtime.finish();
-                                    if execute_global_shutdown(&mut power_driver).is_ok() {
-                                        dispatch_app(
-                                            &mut app,
-                                            &mut power_driver,
-                                            Action::GlobalShutdownApplied,
-                                        );
-                                        dispatch_app(
-                                            &mut app,
-                                            &mut power_driver,
-                                            Action::AwgStopped,
-                                        );
-                                    } else {
-                                        dispatch_app(
-                                            &mut app,
-                                            &mut power_driver,
-                                            Action::GlobalShutdownFailed,
-                                        );
-                                    }
-                                }
-                                None => {}
-                            }
-                        }
-                        ArbRuntimeDirective::Shutdown => {
-                            arb_scheduler.stop();
-                            if execute_global_shutdown(&mut power_driver).is_ok() {
-                                dispatch_app(
-                                    &mut app,
-                                    &mut power_driver,
-                                    Action::GlobalShutdownApplied,
-                                );
-                                dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
-                            } else {
-                                dispatch_app(
-                                    &mut app,
-                                    &mut power_driver,
-                                    Action::GlobalShutdownFailed,
-                                );
-                            }
-                        }
-                    }
-                }
-            },
-            AwgStatus::Fault => {
-                if awg_scheduler.is_active() {
-                    awg_scheduler.stop();
-                    let _ = execute_global_shutdown(&mut power_driver);
-                }
-                if arb_scheduler.is_active() {
-                    arb_scheduler.stop();
-                    let _ = execute_global_shutdown(&mut power_driver);
+            WaveformDirective::Finished | WaveformDirective::FailSafeShutdown => {
+                if execute_global_shutdown(&mut power_driver).is_ok() {
+                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
+                    dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
+                } else {
+                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                 }
             }
-            AwgStatus::Stopped => {
-                awg_scheduler.stop();
-                arb_scheduler.stop();
+            WaveformDirective::FaultShutdown => {
+                let _ = execute_global_shutdown(&mut power_driver);
             }
-            AwgStatus::Starting => {}
         }
 
-        if let Some(start) = arb_runtime.pending_ack() {
+        if let Some(start) = waveform_service.pending_arb_ack() {
             if app.state().awg_status == AwgStatus::Running
                 && app.state().awg_source == AwgSource::Arbitrary
             {
@@ -851,13 +794,13 @@ fn main() -> ! {
                 )
                 .ok();
                 queue_usb_response(response.as_bytes());
-                arb_runtime.take_pending_ack();
+                waveform_service.take_pending_arb_ack();
             } else if matches!(
                 app.state().awg_status,
                 AwgStatus::Fault | AwgStatus::Stopped
             ) {
                 queue_usb_response(b"ERR:HARDWARE\r\n");
-                arb_runtime.take_pending_ack();
+                waveform_service.take_pending_arb_ack();
             }
         }
 

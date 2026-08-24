@@ -7,27 +7,14 @@ use crate::usb_transport::queue_usb_response;
 use benchvolt_poc::{
     app::{AppState, AwgSource, AwgStatus, RegulationMode},
     arb::{
-        parse_data as parse_arb_data, parse_start as parse_arb_start, DataChunk as ArbDataChunk,
-        ParseError as ArbParseError, Start as ArbStart,
+        parse_data as parse_arb_data, parse_start as parse_arb_start, ParseError as ArbParseError,
     },
     power::ProtectionMonitor,
     protocol::parse_milliunits,
+    usb_command::{parse_compat_mutation, CommandError, UsbIntent},
 };
 use core::{fmt::Write as _, sync::atomic::Ordering};
 use heapless::String;
-
-pub(crate) enum UsbIntent {
-    None,
-    JumpToBootloader,
-    Reboot,
-    SetOutput { channel: u8, enabled: bool },
-    SetCurrentLimit { channel: u8, milliamps: u16 },
-    SetRegulationMode { channel: u8, mode: RegulationMode },
-    SetSinkCurrentLimit(u16),
-    ArbData(ArbDataChunk),
-    ArbStart(ArbStart),
-    ArbStop(u8),
-}
 
 pub(crate) fn handle_usb_command(
     command: &[u8],
@@ -145,6 +132,18 @@ pub(crate) fn handle_usb_command(
             queue_usb_response(response.as_bytes());
             return UsbIntent::None;
         }
+    }
+    match parse_compat_mutation(command) {
+        Ok(Some(intent)) => return intent,
+        Err(CommandError::Syntax) => {
+            queue_usb_response(b"ERR:SYNTAX\r\n");
+            return UsbIntent::None;
+        }
+        Err(CommandError::Range) => {
+            queue_usb_response(b"ERR:RANGE\r\n");
+            return UsbIntent::None;
+        }
+        Ok(None) => {}
     }
     if let Some(rest) = command.strip_prefix(b"SOUR:CURR:CH") {
         let Some(channel) = rest.first().and_then(|byte| byte.checked_sub(b'1')) else {
@@ -431,66 +430,6 @@ pub(crate) fn handle_usb_command(
                 }
             }
             queue_usb_response(response.as_bytes());
-        }
-        b"OUTP:CH1 ON" => {
-            return UsbIntent::SetOutput {
-                channel: 0,
-                enabled: true,
-            }
-        }
-        b"OUTP:CH1 OFF" => {
-            return UsbIntent::SetOutput {
-                channel: 0,
-                enabled: false,
-            }
-        }
-        b"OUTP:CH2 ON" => {
-            return UsbIntent::SetOutput {
-                channel: 1,
-                enabled: true,
-            }
-        }
-        b"OUTP:CH2 OFF" => {
-            return UsbIntent::SetOutput {
-                channel: 1,
-                enabled: false,
-            }
-        }
-        b"OUTP:CH3 ON" => {
-            return UsbIntent::SetOutput {
-                channel: 2,
-                enabled: true,
-            }
-        }
-        b"OUTP:CH3 OFF" => {
-            return UsbIntent::SetOutput {
-                channel: 2,
-                enabled: false,
-            }
-        }
-        b"OUTP:CH4 ON" => {
-            return UsbIntent::SetOutput {
-                channel: 3,
-                enabled: true,
-            }
-        }
-        b"OUTP:CH4 OFF" => {
-            return UsbIntent::SetOutput {
-                channel: 3,
-                enabled: false,
-            }
-        }
-        b"OUTP:CH5 ON" => {
-            return UsbIntent::SetOutput {
-                channel: 4,
-                enabled: true,
-            }
-        }
-        b"OUTP:CH5 OFF" => {
-            return UsbIntent::SetOutput {
-                channel: 4,
-                enabled: false,
-            }
         }
         b"JUMP:BOOTLOADER" => return UsbIntent::JumpToBootloader,
         b"SYST:REBOOT" => return UsbIntent::Reboot,

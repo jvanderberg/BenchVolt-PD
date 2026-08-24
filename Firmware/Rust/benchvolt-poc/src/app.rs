@@ -139,7 +139,7 @@ impl ControlFocus {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegulationMode {
     Cv,
     Cc,
@@ -385,6 +385,10 @@ pub enum Action {
     SetCurrentLimit {
         channel: u8,
         milliamps: u16,
+    },
+    SetVoltage {
+        channel: u8,
+        millivolts: u16,
     },
     SetRegulationMode {
         channel: u8,
@@ -1055,6 +1059,32 @@ impl Reducer for AppReducer {
                     true
                 }
             }
+            Action::SetVoltage {
+                channel,
+                millivolts,
+            } => {
+                let Some(output) = next.channels.get_mut(usize::from(channel)) else {
+                    return Self::enforce_invariants(next);
+                };
+                let in_range = match channel {
+                    3 => (500..=5_000).contains(&millivolts),
+                    4 => (CH5_MIN_VOLTAGE_MV..=CH5_MAX_VOLTAGE_MV).contains(&millivolts),
+                    _ => false,
+                };
+                if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault)
+                    || output.transition != OutputTransition::Stable
+                    || !in_range
+                    || output.setpoint_mv == millivolts
+                {
+                    false
+                } else {
+                    output.setpoint_mv = millivolts;
+                    if !output.physical_enabled {
+                        output.drive_mv = millivolts;
+                    }
+                    true
+                }
+            }
             Action::SetRegulationMode { channel, mode } => {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
                     return Self::enforce_invariants(next);
@@ -1410,6 +1440,30 @@ mod tests {
         );
         assert!(stopped.awg_status == AwgStatus::StopRequested);
         assert!(stopped.channels == state.channels);
+    }
+
+    #[test]
+    fn remote_voltage_setpoint_uses_the_same_reducer_safety_boundary() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        let changed = AppReducer::reduce(
+            &state,
+            Action::SetVoltage {
+                channel: 4,
+                millivolts: 9_000,
+            },
+        );
+        assert_eq!(changed.channels[4].setpoint_mv, 9_000);
+        assert_eq!(changed.channels[4].drive_mv, 9_000);
+
+        state.awg_status = AwgStatus::Running;
+        let blocked = AppReducer::reduce(
+            &state,
+            Action::SetVoltage {
+                channel: 4,
+                millivolts: 9_000,
+            },
+        );
+        assert!(blocked == state);
     }
 
     #[test]

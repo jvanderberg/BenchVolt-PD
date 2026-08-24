@@ -27,6 +27,7 @@ use benchvolt_poc::power::{
     execute_global_shutdown, FirmwareEffectPlanner, Rail,
 };
 use benchvolt_poc::settings::{PersistentSettings, SettingsDebouncer};
+use benchvolt_poc::usb_command::UsbIntent;
 use benchvolt_poc::waveform::{Directive as WaveformDirective, Service as WaveformService};
 use board::{
     adc::{read_channel_measurement, BoundedAdc},
@@ -53,7 +54,7 @@ use stm32f0xx_hal::{
     rcc::{HSEBypassMode, USBClockSource},
     spi::{Mode, Phase, Polarity, Spi},
 };
-use usb_protocol::{handle_usb_command, UsbIntent};
+use usb_protocol::handle_usb_command;
 use usb_transport::{queue_usb_response, take_usb_command};
 use view::BenchVoltView;
 
@@ -535,6 +536,32 @@ fn main() -> ! {
                         && output.fault != benchvolt_poc::app::Fault::Hardware
                     {
                         queue_usb_response(b"OK\r\n");
+                    } else {
+                        queue_usb_response(b"ERR:HARDWARE\r\n");
+                    }
+                }
+                UsbIntent::SetVoltage {
+                    channel,
+                    millivolts,
+                } => {
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::SetVoltage {
+                            channel,
+                            millivolts,
+                        },
+                    );
+                    let output = &app.state().channels[usize::from(channel)];
+                    if output.setpoint_mv == millivolts
+                        && output.fault != benchvolt_poc::app::Fault::Hardware
+                    {
+                        queue_usb_response(b"OK\r\n");
+                    } else if !matches!(
+                        app.state().awg_status,
+                        AwgStatus::Stopped | AwgStatus::Fault
+                    ) {
+                        queue_usb_response(b"ERR:BUSY\r\n");
                     } else {
                         queue_usb_response(b"ERR:HARDWARE\r\n");
                     }

@@ -1,9 +1,6 @@
 use crate::input::{encoder_counts, monotonic_ms};
 use crate::usb_transport::queue_usb_response;
-use crate::{
-    arb_runtime, CH5_TPS_STATUS, HW_RETRY_COUNT, LAST_HW_ERROR, LAST_HW_OPERATION, RESET_CAUSES,
-    RESET_REASON,
-};
+use crate::{arb_runtime, diagnostics};
 use benchvolt_poc::{
     app::{AppState, AwgSource, AwgStatus, RegulationMode},
     arb::{
@@ -15,7 +12,7 @@ use benchvolt_poc::{
         parse_compat_mutation, project_compat_query, temperature_response, CommandError, UsbIntent,
     },
 };
-use core::{fmt::Write as _, sync::atomic::Ordering};
+use core::fmt::Write as _;
 use heapless::String;
 
 pub(crate) fn handle_usb_command(
@@ -204,15 +201,15 @@ pub(crate) fn handle_usb_command(
             write!(
                 &mut response,
                 "OP{} ERR{} RETRIES{}\r\n",
-                LAST_HW_OPERATION.load(Ordering::Relaxed),
-                LAST_HW_ERROR.load(Ordering::Relaxed),
-                HW_RETRY_COUNT.load(Ordering::Relaxed),
+                diagnostics::last_hw_operation(),
+                diagnostics::last_hw_error(),
+                diagnostics::hw_retry_count(),
             )
             .ok();
             queue_usb_response(response.as_bytes());
         }
         b"SYST:RESET?" => {
-            let causes = RESET_CAUSES.load(Ordering::Relaxed);
+            let causes = diagnostics::reset_causes();
             let mut response: String<96> = String::new();
             write!(&mut response, "0x{causes:02X}").ok();
             for (mask, label) in [
@@ -230,7 +227,7 @@ pub(crate) fn handle_usb_command(
                 }
             }
             if let Some(reason) = benchvolt_poc::reset_cause::ResetReason::from_raw(u32::from(
-                RESET_REASON.load(Ordering::Relaxed),
+                diagnostics::reset_reason(),
             )) {
                 write!(&mut response, ",CAUSE:{}", reason.label()).ok();
             }
@@ -242,7 +239,7 @@ pub(crate) fn handle_usb_command(
             write!(
                 &mut response,
                 "0x{:02X}\r\n",
-                CH5_TPS_STATUS.load(Ordering::Relaxed)
+                diagnostics::ch5_tps_status()
             )
             .ok();
             queue_usb_response(response.as_bytes());

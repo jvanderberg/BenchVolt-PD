@@ -1,11 +1,10 @@
 use super::i2c::SoftI2c;
-use crate::{record_hw_retries, LAST_HW_ERROR, LAST_HW_OPERATION};
+use crate::diagnostics::{record_hw_error, record_hw_retries};
 use benchvolt_poc::power::{
     tps55289_configuration_registers, tps55289_current_code, tps55289_output_acknowledged,
     tps55289_output_mode, tps55289_voltage_code, DriverOperation, PowerDriver, Rail,
     SHARED_RAIL_LIMIT_MA,
 };
-use core::sync::atomic::Ordering;
 use embedded_hal::{
     blocking::delay::{DelayMs, DelayUs},
     digital::v2::{InputPin, OutputPin},
@@ -433,13 +432,12 @@ where
             }
         };
         if let Err(error) = result {
-            LAST_HW_OPERATION.store(operation_code, Ordering::Relaxed);
-            LAST_HW_ERROR.store(
+            record_hw_error(
+                operation_code,
                 match error {
                     HardwareError::Bus => 1,
                     HardwareError::Verify => 2,
                 },
-                Ordering::Relaxed,
             );
         }
         result

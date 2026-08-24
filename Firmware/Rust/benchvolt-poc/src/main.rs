@@ -4,6 +4,7 @@
 mod arb_runtime;
 mod board;
 mod boot;
+mod diagnostics;
 mod input;
 mod reset_marker;
 mod runtime;
@@ -11,10 +12,7 @@ mod usb_protocol;
 mod usb_transport;
 mod view;
 
-use core::{
-    fmt::Write as _,
-    sync::atomic::{AtomicU32, AtomicU8, Ordering},
-};
+use core::fmt::Write as _;
 
 use benchvolt_poc::app::{Action, AppReducer, AppState, AwgSource, AwgStatus};
 use benchvolt_poc::arb::UploadSession as ArbUploadSession;
@@ -164,19 +162,6 @@ fn benchvolt_wait_for_flash_ready(status: *const u32) -> bool {
     false
 }
 
-static LAST_HW_OPERATION: AtomicU8 = AtomicU8::new(0);
-static LAST_HW_ERROR: AtomicU8 = AtomicU8::new(0);
-static RESET_CAUSES: AtomicU8 = AtomicU8::new(0);
-static RESET_REASON: AtomicU8 = AtomicU8::new(0);
-static HW_RETRY_COUNT: AtomicU32 = AtomicU32::new(0);
-static CH5_TPS_STATUS: AtomicU8 = AtomicU8::new(0);
-
-fn record_hw_retries(count: u32) {
-    let current = HW_RETRY_COUNT.load(Ordering::Relaxed);
-    HW_RETRY_COUNT.store(current.saturating_add(count), Ordering::Relaxed);
-}
-
-
 fn monotonic_awg_tick() -> u16 {
     unsafe { (*pac::TIM14::ptr()).cnt.read().cnt().bits() }
 }
@@ -200,17 +185,14 @@ fn main() -> ! {
 
     // RCC reset flags are sticky and may overlap (for example PIN + POR).
     // Capture them before any initialization, then clear them for the next boot.
-    RESET_CAUSES.store(
-        benchvolt_poc::reset_cause::decode_rcc_csr(dp.RCC.csr.read().bits()),
-        Ordering::Relaxed,
-    );
+    let reset_causes = benchvolt_poc::reset_cause::decode_rcc_csr(dp.RCC.csr.read().bits());
     let reset_reason = unsafe {
         reset_marker::take(
-            RESET_CAUSES.load(Ordering::Relaxed),
+            reset_causes,
             dp.FLASH.obr.read().ram_parity_check().is_disabled(),
         )
     };
-    RESET_REASON.store(reset_reason.map_or(0, |reason| reason as u8), Ordering::Relaxed);
+    diagnostics::record_reset(reset_causes, reset_reason);
     dp.RCC.csr.modify(|_, w| w.rmvf().set_bit());
 
     // Start recovery supervision before boot-metadata flash access. Startup is
@@ -945,11 +927,11 @@ fn main() -> ! {
             let ch5_status = if app.state().channels[4].physical_enabled {
                 match power_driver.read_ch5_status() {
                     Ok(status) => {
-                        CH5_TPS_STATUS.store(status, Ordering::Relaxed);
+                        diagnostics::record_ch5_tps_status(status);
                         TpsStatusObservation::Value(status)
                     }
                     Err(_) => {
-                        CH5_TPS_STATUS.store(0xff, Ordering::Relaxed);
+                        diagnostics::record_ch5_tps_status(0xff);
                         TpsStatusObservation::ReadError
                     }
                 }

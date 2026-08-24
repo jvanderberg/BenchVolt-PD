@@ -350,7 +350,7 @@ where
                     &mut self.delay,
                     address,
                     millivolts,
-                    6_000,
+                    5_000,
                     true,
                     false,
                 )?;

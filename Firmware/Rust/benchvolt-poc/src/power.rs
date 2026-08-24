@@ -8,6 +8,7 @@ const STARTUP_GRACE_SAMPLES: u8 = 10;
 const FAULT_CONFIRM_SAMPLES: u8 = 3;
 const SINK_RECOVERY_SAMPLES: u8 = 10;
 const VOLTAGE_SETTING_SETTLE_SAMPLES: u8 = 25;
+const HARD_OVERCURRENT_CEILING_MA: u16 = 3_300;
 // Board tests show IOUT_LIMIT is not a usable CH5 regulation loop. Keep this
 // fixed; user CC is implemented only by ADC feedback and voltage side effects.
 const CH5_TPS_CONFIGURATION_LIMIT_MA: u16 = 3_000;
@@ -133,6 +134,13 @@ impl ProtectionMonitor {
         }
         if self.grace_remaining > 0 {
             self.grace_remaining -= 1;
+            // Startup grace suppresses voltage-settling false positives, but
+            // never permits a gross current excursion beyond the channel's
+            // physical operating envelope.
+            if measurement.milliamps > HARD_OVERCURRENT_CEILING_MA {
+                self.trip = measurement;
+                return Some(Fault::OverCurrent);
+            }
             return None;
         }
 
@@ -554,7 +562,11 @@ fn run_enable<D: PowerDriver>(driver: &mut D, state: &AppState, channel: u8) -> 
         .map_err(|_| Fault::Hardware)
 }
 
-fn run_disable<D: PowerDriver>(driver: &mut D, channel: u8) -> Result<(), Fault> {
+fn run_disable<D: PowerDriver>(
+    driver: &mut D,
+    state: &AppState,
+    channel: u8,
+) -> Result<(), Fault> {
     if channel == 4 {
         // OE is best effort: it can NACK when the converter is already held in
         // reset. Verified EN low is the authoritative physical shutdown.
@@ -568,7 +580,16 @@ fn run_disable<D: PowerDriver>(driver: &mut D, channel: u8) -> Result<(), Fault>
                 channel,
                 enabled: false,
             })
-            .map_err(|_| Fault::Hardware)
+            .map_err(|_| Fault::Hardware)?;
+        if !sibling_is_on(state, channel) {
+            driver
+                .apply(DriverOperation::RailEnable {
+                    rail: rail_for(channel).ok_or(Fault::Hardware)?,
+                    enabled: false,
+                })
+                .map_err(|_| Fault::Hardware)?;
+        }
+        Ok(())
     }
 }
 
@@ -586,7 +607,7 @@ pub fn execute_effect<D: PowerDriver>(
             let result = if enabled {
                 run_enable(driver, state, channel)
             } else {
-                run_disable(driver, channel)
+                run_disable(driver, state, channel)
             };
             match result {
                 Ok(()) => Action::OutputApplied {
@@ -1623,6 +1644,65 @@ mod tests {
             effect_for_transition(&old, &state),
             Some(PowerEffect::Output { enabled: false, .. })
         ));
+    }
+
+    #[test]
+    fn startup_grace_still_trips_a_gross_overcurrent_immediately() {
+        let mut state = eligible_state();
+        let output = &mut state.channels[0];
+        output.physical_enabled = true;
+        output.current_limit_ma = 3_000;
+        let gross_overcurrent = Measurement {
+            millivolts: output.setpoint_mv,
+            milliamps: HARD_OVERCURRENT_CEILING_MA + 1,
+            valid: true,
+        };
+
+        let mut monitor = ProtectionMonitor::default();
+        assert_eq!(
+            monitor.observe(output, gross_overcurrent),
+            Some(Fault::OverCurrent)
+        );
+        assert!(monitor.snapshot().trip == gross_overcurrent);
+    }
+
+    #[test]
+    fn disabling_the_last_sibling_turns_off_its_shared_rail() {
+        let mut state = eligible_state();
+        state.channels[0].physical_enabled = true;
+        let mut driver = MockDriver::default();
+
+        assert!(run_disable(&mut driver, &state, 0).is_ok());
+        assert_eq!(
+            driver.calls.as_slice(),
+            &[
+                DriverOperation::ChannelGate {
+                    channel: 0,
+                    enabled: false,
+                },
+                DriverOperation::RailEnable {
+                    rail: Rail::Dc1,
+                    enabled: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn disabling_one_sibling_keeps_a_shared_rail_alive_for_the_other() {
+        let mut state = eligible_state();
+        state.channels[0].physical_enabled = true;
+        state.channels[1].physical_enabled = true;
+        let mut driver = MockDriver::default();
+
+        assert!(run_disable(&mut driver, &state, 0).is_ok());
+        assert_eq!(
+            driver.calls.as_slice(),
+            &[DriverOperation::ChannelGate {
+                channel: 0,
+                enabled: false,
+            }]
+        );
     }
 
     #[test]

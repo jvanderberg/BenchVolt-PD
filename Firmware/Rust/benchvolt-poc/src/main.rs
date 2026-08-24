@@ -20,6 +20,7 @@ use benchvolt_poc::arb::{
 };
 use benchvolt_poc::awg::Scheduler as AwgScheduler;
 use benchvolt_poc::load::LoadAccumulator;
+use benchvolt_poc::pd::{BusError as PdBusError, Negotiator as PdNegotiator, PdBus, PdEvent};
 use benchvolt_poc::power::{
     execute_effect, execute_global_shutdown, protection_output, tps55289_status_fault,
     DriverOperation, FirmwareEffectPlanner, PowerDriver, ProtectionMonitor, Rail,
@@ -507,12 +508,12 @@ unsafe impl UsbPeripheral for BenchUsb {
     }
 }
 
-struct SoftI2c<SCL, SDA> {
+struct SoftI2c<SCL, SDA, const HALF_CYCLE_US: u32 = 2> {
     scl: SCL,
     sda: SDA,
 }
 
-impl<SCL, SDA> SoftI2c<SCL, SDA>
+impl<SCL, SDA, const HALF_CYCLE_US: u32> SoftI2c<SCL, SDA, HALF_CYCLE_US>
 where
     SCL: OutputPin,
     SDA: OutputPin + InputPin,
@@ -524,7 +525,7 @@ where
     }
 
     fn half_cycle(delay: &mut impl DelayUs<u32>) {
-        delay.delay_us(2);
+        delay.delay_us(HALF_CYCLE_US);
     }
 
     fn start(&mut self, delay: &mut impl DelayUs<u32>) {
@@ -697,6 +698,44 @@ where
         }
         self.stop(delay);
         Ok(())
+    }
+}
+
+struct SoftPdBus<'a, SCL, SDA> {
+    bus: &'a mut SoftI2c<SCL, SDA, 1>,
+    delay: &'a mut Delay,
+}
+
+impl<SCL, SDA> PdBus for SoftPdBus<'_, SCL, SDA>
+where
+    SCL: OutputPin,
+    SDA: OutputPin + InputPin,
+{
+    fn read(&mut self, register: u8, values: &mut [u8]) -> Result<(), PdBusError> {
+        self.bus
+            .read_registers(
+                benchvolt_poc::pd::STUSB4500_ADDRESS,
+                register,
+                values,
+                self.delay,
+            )
+            .map_err(|_| PdBusError)
+    }
+
+    fn write(&mut self, register: u8, values: &[u8]) -> Result<(), PdBusError> {
+        if values.len() > 4 {
+            return Err(PdBusError);
+        }
+        let mut bytes = [0u8; 5];
+        bytes[0] = register;
+        bytes[1..values.len() + 1].copy_from_slice(values);
+        self.bus
+            .write_bytes(
+                benchvolt_poc::pd::STUSB4500_ADDRESS,
+                &bytes[..values.len() + 1],
+                self.delay,
+            )
+            .map_err(|_| PdBusError)
     }
 }
 
@@ -1626,6 +1665,34 @@ fn handle_usb_command(
             .ok();
             queue_usb_response(response.as_bytes());
         }
+        b"SYST:PD?" => {
+            let mut response: String<64> = String::new();
+            if let Some(contract) = state.pd_contract {
+                write!(
+                    &mut response,
+                    "READY,PDO{},{}mV,{}mA,MAX{}mA\r\n",
+                    contract.source_position,
+                    contract.millivolts,
+                    contract.operating_milliamps,
+                    contract.maximum_milliamps,
+                )
+                .ok();
+            } else if let Some(error) = state.pd_error {
+                let code = match error {
+                    benchvolt_poc::pd::PdError::Bus => "BUS",
+                    benchvolt_poc::pd::PdError::WrongDevice => "DEVICE",
+                    benchvolt_poc::pd::PdError::Detached => "DETACHED",
+                    benchvolt_poc::pd::PdError::Timeout => "TIMEOUT",
+                    benchvolt_poc::pd::PdError::MalformedCapabilities => "CAPS",
+                    benchvolt_poc::pd::PdError::NoSuitablePdo => "NO_PDO",
+                    benchvolt_poc::pd::PdError::ContractMismatch => "CONTRACT",
+                };
+                write!(&mut response, "ERROR,{code}\r\n").ok();
+            } else {
+                response.push_str("NEGOTIATING\r\n").ok();
+            }
+            queue_usb_response(response.as_bytes());
+        }
         b"SYST:TICK?" => {
             let mut response: String<16> = String::new();
             write!(&mut response, "{}\r\n", monotonic_ms()).ok();
@@ -2050,7 +2117,7 @@ fn main() -> ! {
     let mut adc = Adc::new(dp.ADC, &mut rcc);
     adc.set_sample_time(AdcSampleTime::T_71);
 
-    let (sck, miso, mosi, dc, rst, cs, scl, sda, aux_scl, aux_sda) =
+    let (sck, miso, mosi, dc, rst, cs, scl, sda, aux_scl, aux_sda, pd_scl, pd_sda, _pd_alert) =
         cortex_m::interrupt::free(|cs_token| {
             (
                 gpiob.pb3.into_alternate_af0(cs_token),
@@ -2063,6 +2130,9 @@ fn main() -> ! {
                 gpioc.pc9.into_open_drain_output(cs_token),
                 gpioc.pc6.into_open_drain_output(cs_token),
                 gpioc.pc7.into_open_drain_output(cs_token),
+                gpioa.pa8.into_open_drain_output(cs_token),
+                gpioa.pa9.into_open_drain_output(cs_token),
+                gpioa.pa10.into_floating_input(cs_token),
             )
         });
 
@@ -2084,6 +2154,7 @@ fn main() -> ! {
     let mut sensor = SoftI2c::new(scl, sda);
     let initial_temperature = sensor.read_tmp1075(&mut delay);
     let mut power_driver = HardwarePowerDriver::new(sensor, SoftI2c::new(aux_scl, aux_sda), delay);
+    let mut pd_bus = SoftI2c::<_, _, 1>::new(pd_scl, pd_sda);
     let mut initial_state = AppState::new(recovery_armed, initial_temperature);
     if let Some(record) = settings_store.latest {
         record.settings.apply_to(&mut initial_state);
@@ -2136,6 +2207,7 @@ fn main() -> ! {
     cortex_m::peripheral::NVIC::pend(pac::Interrupt::USB);
 
     let mut temperature_ticks = 0u16;
+    let mut pd_ticks = 0u16;
     let mut measurement_ticks = 0u16;
     let mut display_measurement_ticks = 0u16;
     let mut awg_load_ticks = 0u16;
@@ -2154,6 +2226,7 @@ fn main() -> ! {
     let mut pending_arb_ack: Option<ArbStart> = None;
     let mut arb_upload = ArbUploadSession::new();
     let mut settings_effect = SettingsDebouncer::new(PersistentSettings::from_state(app.state()));
+    let mut pd_negotiator = PdNegotiator::new(app.state().sink_current_limit_ma);
     let mut input_ticks = monotonic_ms();
     let mut service_tick = input_ticks;
     let mut health_ticks = 0u32;
@@ -2382,9 +2455,37 @@ fn main() -> ! {
         service_tick = input_ticks;
         health_ticks = health_ticks.saturating_add(u32::from(elapsed_ms));
         temperature_ticks = temperature_ticks.wrapping_add(elapsed_ms);
+        pd_ticks = pd_ticks.wrapping_add(elapsed_ms);
         measurement_ticks = measurement_ticks.wrapping_add(elapsed_ms);
         display_measurement_ticks = display_measurement_ticks.wrapping_add(elapsed_ms);
         awg_load_ticks = awg_load_ticks.wrapping_add(elapsed_ms);
+
+        if pd_ticks >= 20 {
+            pd_ticks = 0;
+            let outputs_off = app
+                .state()
+                .channels
+                .iter()
+                .all(|output| !output.requested_enabled && !output.physical_enabled);
+            if outputs_off && pd_negotiator.current_cap_ma() != app.state().sink_current_limit_ma {
+                dispatch_app(&mut app, &mut power_driver, Action::PdNegotiationStarted);
+                pd_negotiator.restart(app.state().sink_current_limit_ma);
+            }
+            let event = pd_negotiator.step(
+                &mut SoftPdBus {
+                    bus: &mut pd_bus,
+                    delay: &mut power_driver.delay,
+                },
+                input_ticks,
+            );
+            if let Some(event) = event {
+                let action = match event {
+                    PdEvent::Negotiated(contract) => Action::PdNegotiated(contract),
+                    PdEvent::Lost(error) => Action::PdFailed(error),
+                };
+                dispatch_app(&mut app, &mut power_driver, action);
+            }
+        }
 
         let (direction, accelerated) = take_encoder_adjustment(
             &mut last_encoder_tick,

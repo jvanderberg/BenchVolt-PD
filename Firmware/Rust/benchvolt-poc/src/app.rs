@@ -263,6 +263,8 @@ pub struct AppState {
     pub sink: Measurement,
     pub sink_current_limit_ma: u16,
     pub sink_fault: Fault,
+    pub pd_contract: Option<crate::pd::Contract>,
+    pub pd_error: Option<crate::pd::PdError>,
     pub temp_sixteenths_c: i16,
     pub temp_valid: bool,
     pub recovery_armed: bool,
@@ -300,6 +302,8 @@ impl AppState {
             sink: Measurement::INVALID,
             sink_current_limit_ma: 5_000,
             sink_fault: Fault::None,
+            pd_contract: None,
+            pd_error: None,
             temp_sixteenths_c,
             temp_valid,
             recovery_armed,
@@ -416,6 +420,9 @@ pub enum Action {
     SinkMeasurement(Measurement),
     SinkProtectionTrip(Fault),
     SinkProtectionRecovered,
+    PdNegotiated(crate::pd::Contract),
+    PdNegotiationStarted,
+    PdFailed(crate::pd::PdError),
 }
 
 pub struct AppReducer;
@@ -1287,6 +1294,48 @@ impl Reducer for AppReducer {
                 next.sink_fault = Fault::None;
                 true
             }
+            Action::PdNegotiated(contract)
+                if state.pd_contract == Some(contract) && state.pd_error.is_none() =>
+            {
+                false
+            }
+            Action::PdNegotiated(contract) => {
+                next.pd_contract = Some(contract);
+                next.pd_error = None;
+                true
+            }
+            Action::PdNegotiationStarted
+                if state.pd_contract.is_none() && state.pd_error.is_none() =>
+            {
+                false
+            }
+            Action::PdNegotiationStarted => {
+                next.pd_contract = None;
+                next.pd_error = None;
+                true
+            }
+            Action::PdFailed(error)
+                if state.pd_contract.is_none() && state.pd_error == Some(error) =>
+            {
+                false
+            }
+            Action::PdFailed(error) => {
+                let contract_lost = state.pd_contract.is_some();
+                next.pd_contract = None;
+                next.pd_error = Some(error);
+                if contract_lost
+                    || state
+                        .channels
+                        .iter()
+                        .any(|output| output.requested_enabled || output.physical_enabled)
+                {
+                    next.sink_fault = Fault::Hardware;
+                    if !matches!(state.awg_status, AwgStatus::Stopped) {
+                        next.awg_status = AwgStatus::Fault;
+                    }
+                }
+                true
+            }
         };
 
         Self::enforce_invariants(next)
@@ -1396,6 +1445,21 @@ mod tests {
         let recovered = AppReducer::reduce(&tripped, Action::SinkProtectionRecovered);
         assert_eq!(recovered.sink_fault, Fault::None);
         assert!(recovered.awg_status == AwgStatus::Fault);
+    }
+
+    #[test]
+    fn losing_a_negotiated_pd_contract_latches_input_fault() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        state.pd_contract = Some(crate::pd::Contract {
+            source_position: 2,
+            millivolts: 9_000,
+            operating_milliamps: 3_000,
+            maximum_milliamps: 3_000,
+        });
+        let lost = AppReducer::reduce(&state, Action::PdFailed(crate::pd::PdError::Detached));
+        assert!(lost.pd_contract.is_none());
+        assert_eq!(lost.pd_error, Some(crate::pd::PdError::Detached));
+        assert_eq!(lost.sink_fault, Fault::Hardware);
     }
 
     #[test]

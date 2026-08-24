@@ -209,13 +209,15 @@ impl SinkProtectionMonitor {
             .channels
             .iter()
             .any(|output| output.requested_enabled || output.physical_enabled);
+        let effective_limit_ma = state
+            .pd_contract
+            .map(|contract| contract.operating_milliamps)
+            .unwrap_or(state.sink_current_limit_ma)
+            .min(state.sink_current_limit_ma);
 
         if state.sink_fault != Fault::None {
             self.overcurrent_samples = 0;
-            if !output_active
-                && measurement.valid
-                && measurement.milliamps <= state.sink_current_limit_ma
-            {
+            if !output_active && measurement.valid && measurement.milliamps <= effective_limit_ma {
                 self.recovery_samples = self.recovery_samples.saturating_add(1);
                 if self.recovery_samples >= SINK_RECOVERY_SAMPLES {
                     self.recovery_samples = 0;
@@ -236,7 +238,7 @@ impl SinkProtectionMonitor {
             self.overcurrent_samples = 0;
             return Some(SinkProtectionEvent::Trip(Fault::Sensor));
         }
-        if measurement.milliamps > state.sink_current_limit_ma {
+        if measurement.milliamps > effective_limit_ma {
             self.overcurrent_samples = self.overcurrent_samples.saturating_add(1);
         } else {
             self.overcurrent_samples = 0;
@@ -291,7 +293,14 @@ impl TransitionEffect<AppState> for FirmwareEffectPlanner {
         let awg_boundary = old.screen != new.screen
             && (old.screen == crate::app::Screen::Awg || new.screen == crate::app::Screen::Awg);
         let sink_trip = old.sink_fault != new.sink_fault && new.sink_fault != Fault::None;
-        let global_shutdown = awg_boundary || sink_trip;
+        let contract_lost = old.pd_contract.is_some() && new.pd_contract.is_none();
+        let contract_limit_changed = old.sink_current_limit_ma != new.sink_current_limit_ma
+            && old.pd_contract.is_some()
+            && old
+                .channels
+                .iter()
+                .any(|output| output.requested_enabled || output.physical_enabled);
+        let global_shutdown = awg_boundary || sink_trip || contract_lost || contract_limit_changed;
         let power = if global_shutdown {
             None
         } else {
@@ -434,6 +443,9 @@ fn enable_is_eligible(state: &AppState, channel: u8) -> Result<(), Fault> {
     }
     if state.sink_fault != Fault::None {
         return Err(state.sink_fault);
+    }
+    if state.pd_contract.is_none() {
+        return Err(Fault::Hardware);
     }
     if state.temp_sixteenths_c >= OVERTEMPERATURE_REENABLE_SIXTEENTHS_C {
         return Err(Fault::OverTemperature);
@@ -779,6 +791,12 @@ mod tests {
 
     fn eligible_state() -> AppState {
         let mut state = AppState::new(true, Some(25 * 16));
+        state.pd_contract = Some(crate::pd::Contract {
+            source_position: 1,
+            millivolts: 5_000,
+            operating_milliamps: 5_000,
+            maximum_milliamps: 5_000,
+        });
         for output in &mut state.channels {
             output.measurement = Measurement {
                 millivolts: 0,
@@ -868,6 +886,16 @@ mod tests {
         assert_eq!(
             run_enable(&mut MockDriver::default(), &state, 0),
             Err(Fault::OverCurrent)
+        );
+    }
+
+    #[test]
+    fn missing_pd_contract_blocks_output_enable() {
+        let mut state = eligible_state();
+        state.pd_contract = None;
+        assert_eq!(
+            run_enable(&mut MockDriver::default(), &state, 0),
+            Err(Fault::Hardware)
         );
     }
 
@@ -1020,6 +1048,19 @@ mod tests {
         sink_trip.sink_fault = Fault::OverCurrent;
         assert_eq!(
             FirmwareEffectPlanner::plan(&old, &sink_trip),
+            Some(FirmwareEffect {
+                power: None,
+                global_shutdown: true,
+            })
+        );
+
+        let mut active = old;
+        active.channels[0].requested_enabled = true;
+        active.channels[0].physical_enabled = true;
+        let mut lower_contract_limit = active;
+        lower_contract_limit.sink_current_limit_ma -= 10;
+        assert_eq!(
+            FirmwareEffectPlanner::plan(&active, &lower_contract_limit),
             Some(FirmwareEffect {
                 power: None,
                 global_shutdown: true,

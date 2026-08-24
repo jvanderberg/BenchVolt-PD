@@ -163,12 +163,23 @@ use a resistor or an electronic load in constant-resistance mode for CC tests.
 The final screen is `USB PD Input`. It shows the measured sink voltage,
 current, and power in the same tabular format as the overview. A short press
 focuses the sink current protection limit; rotation adjusts it from 0 to 5 A in
-10 mA steps. The edit itself does not program the STUSB4500 or renegotiate the
-USB PD contract. While an output is active, however, three consecutive valid
-ADC samples above the configured limit latch an input overcurrent fault and
-run the global hardware shutdown. A missing sink-current sample fails closed.
-The latch clears only after every output is off and ten consecutive samples are
-valid and at or below the limit; outputs do not automatically restart.
+10 mA steps. On boot, the firmware actively reads source capabilities, selects
+the highest-power fixed PDO at or below 20 V, caps its requested current to this
+setting, writes the STUSB4500's third sink PDO in RAM, requests renegotiation,
+and verifies the resulting RDO. All operations are bounded to 500 ms and run
+before the boot-health seal is restored, so a charger-induced VBUS reset falls
+back to the bootloader instead of becoming an endless boot loop. A valid
+contract is required before any output can enable. Changing the limit shuts
+active outputs down and renegotiates while they are off.
+
+During operation, three consecutive valid ADC samples above the lower of the
+configured limit and negotiated operating current latch an input overcurrent
+fault and run the global hardware shutdown. Detach, contract downgrade, or PD
+communication failure also shuts down globally. A missing sink-current sample
+fails closed. The latch clears only after every output is off and ten
+consecutive samples are valid and at or below the limit; outputs do not
+automatically restart. `SYST:PD?` reports negotiation, contract, or typed error
+status over CDC.
 
 ## Headless build and flash runbook
 

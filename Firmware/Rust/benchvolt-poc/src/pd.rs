@@ -1,0 +1,549 @@
+pub const STUSB4500_ADDRESS: u8 = 0x28;
+const DEVICE_ID: u8 = 0x2f;
+const PORT_STATUS: u8 = 0x0e;
+const PRT_STATUS: u8 = 0x16;
+const COMMAND_CTRL: u8 = 0x1a;
+const PE_FSM: u8 = 0x29;
+const RX_BYTE_COUNT: u8 = 0x30;
+const RX_HEADER: u8 = 0x31;
+const RX_DATA: u8 = 0x33;
+const TX_HEADER: u8 = 0x51;
+const SINK_PDO3: u8 = 0x8d;
+const ACTIVE_RDO: u8 = 0x91;
+const DEVICE_IDS: [u8; 2] = [0x25, 0x21];
+const PE_SINK_READY: u8 = 0x18;
+const PD_MESSAGE_RECEIVED: u8 = 0x04;
+const GET_SOURCE_CAPABILITIES: [u8; 2] = [0x07, 0x00];
+const SEND_COMMAND: u8 = 0x26;
+const OPERATION_TIMEOUT_MS: u16 = 500;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PdError {
+    Bus,
+    WrongDevice,
+    Detached,
+    Timeout,
+    MalformedCapabilities,
+    NoSuitablePdo,
+    ContractMismatch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FixedPdo {
+    pub source_position: u8,
+    pub millivolts: u16,
+    pub milliamps: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Selection {
+    pub source: FixedPdo,
+    pub requested_milliamps: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rdo {
+    pub source_position: u8,
+    pub operating_milliamps: u16,
+    pub maximum_milliamps: u16,
+    pub capability_mismatch: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Contract {
+    pub source_position: u8,
+    pub millivolts: u16,
+    pub operating_milliamps: u16,
+    pub maximum_milliamps: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BusError;
+
+pub trait PdBus {
+    fn read(&mut self, register: u8, values: &mut [u8]) -> Result<(), BusError>;
+    fn write(&mut self, register: u8, values: &[u8]) -> Result<(), BusError>;
+}
+
+pub fn decode_fixed_pdo(raw: u32, source_position: u8) -> Option<FixedPdo> {
+    if raw >> 30 != 0 || !(1..=7).contains(&source_position) {
+        return None;
+    }
+    let millivolts = ((raw >> 10) & 0x03ff) as u16 * 50;
+    let milliamps = (raw & 0x03ff) as u16 * 10;
+    (millivolts != 0 && milliamps != 0).then_some(FixedPdo {
+        source_position,
+        millivolts,
+        milliamps,
+    })
+}
+
+pub fn encode_sink_fixed_pdo(millivolts: u16, milliamps: u16) -> Option<u32> {
+    if millivolts == 0
+        || millivolts > 20_000
+        || millivolts / 50 * 50 != millivolts
+        || milliamps == 0
+        || milliamps > 5_000
+        || milliamps / 10 * 10 != milliamps
+    {
+        return None;
+    }
+    Some((u32::from(millivolts / 50) << 10) | u32::from(milliamps / 10))
+}
+
+pub fn select_highest_power_fixed(
+    raw_pdos: &[u32],
+    max_voltage_mv: u16,
+    current_cap_ma: u16,
+) -> Option<Selection> {
+    raw_pdos
+        .iter()
+        .copied()
+        .take(7)
+        .enumerate()
+        .filter_map(|(index, raw)| decode_fixed_pdo(raw, index as u8 + 1))
+        .filter(|pdo| pdo.millivolts <= max_voltage_mv)
+        .filter_map(|source| {
+            let requested_milliamps = source.milliamps.min(current_cap_ma).min(5_000);
+            (requested_milliamps >= 10).then_some(Selection {
+                source,
+                requested_milliamps,
+            })
+        })
+        .max_by_key(|selection| {
+            (
+                u32::from(selection.source.millivolts) * u32::from(selection.requested_milliamps),
+                selection.source.millivolts,
+                selection.requested_milliamps,
+            )
+        })
+}
+
+pub fn decode_source_capabilities(
+    header: [u8; 2],
+    byte_count: u8,
+    data: &[u8],
+) -> Result<([u32; 7], usize), PdError> {
+    let header = u16::from_le_bytes(header);
+    let count = usize::from((header >> 12) & 0x07);
+    if header & 0x1f != 1
+        || count == 0
+        || byte_count as usize != count * 4
+        || data.len() != count * 4
+    {
+        return Err(PdError::MalformedCapabilities);
+    }
+    let mut pdos = [0u32; 7];
+    for (destination, bytes) in pdos.iter_mut().zip(data.chunks_exact(4)) {
+        *destination = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    }
+    Ok((pdos, count))
+}
+
+pub fn decode_rdo(bytes: [u8; 4]) -> Result<Rdo, PdError> {
+    let raw = u32::from_le_bytes(bytes);
+    let source_position = ((raw >> 28) & 0x07) as u8;
+    if !(1..=7).contains(&source_position) {
+        return Err(PdError::ContractMismatch);
+    }
+    Ok(Rdo {
+        source_position,
+        operating_milliamps: ((raw >> 10) & 0x03ff) as u16 * 10,
+        maximum_milliamps: (raw & 0x03ff) as u16 * 10,
+        capability_mismatch: raw & (1 << 26) != 0,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum State {
+    Discover,
+    WaitReady { deadline: u16 },
+    WaitCapabilities { deadline: u16 },
+    WaitContract { deadline: u16, selection: Selection },
+    Ready(Contract),
+    Failed(PdError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PdEvent {
+    Negotiated(Contract),
+    Lost(PdError),
+}
+
+pub struct Negotiator {
+    state: State,
+    current_cap_ma: u16,
+}
+
+impl Negotiator {
+    pub const fn new(current_cap_ma: u16) -> Self {
+        Self {
+            state: State::Discover,
+            current_cap_ma,
+        }
+    }
+
+    pub const fn contract(&self) -> Option<Contract> {
+        match self.state {
+            State::Ready(contract) => Some(contract),
+            _ => None,
+        }
+    }
+
+    pub const fn current_cap_ma(&self) -> u16 {
+        self.current_cap_ma
+    }
+
+    pub fn restart(&mut self, current_cap_ma: u16) {
+        self.current_cap_ma = current_cap_ma;
+        self.state = State::Discover;
+    }
+
+    pub const fn failed(&self) -> Option<PdError> {
+        match self.state {
+            State::Failed(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    fn deadline_expired(now: u16, deadline: u16) -> bool {
+        now.wrapping_sub(deadline) < 0x8000
+    }
+
+    fn fail(&mut self, error: PdError) -> Option<PdEvent> {
+        self.state = State::Failed(error);
+        Some(PdEvent::Lost(error))
+    }
+
+    fn read_byte(bus: &mut impl PdBus, register: u8) -> Result<u8, PdError> {
+        let mut value = [0u8];
+        bus.read(register, &mut value).map_err(|_| PdError::Bus)?;
+        Ok(value[0])
+    }
+
+    fn send_get_source_capabilities(bus: &mut impl PdBus) -> Result<(), PdError> {
+        bus.write(TX_HEADER, &GET_SOURCE_CAPABILITIES)
+            .map_err(|_| PdError::Bus)?;
+        bus.write(COMMAND_CTRL, &[SEND_COMMAND])
+            .map_err(|_| PdError::Bus)
+    }
+
+    fn step_result(&mut self, bus: &mut impl PdBus, now: u16) -> Result<Option<PdEvent>, PdError> {
+        let result = match self.state {
+            State::Discover => {
+                let identity = Self::read_byte(bus, DEVICE_ID);
+                match identity {
+                    Ok(identity) if DEVICE_IDS.contains(&identity) => {
+                        match Self::read_byte(bus, PORT_STATUS) {
+                            Ok(status) if status & 1 != 0 => {
+                                self.state = State::WaitReady {
+                                    deadline: now.wrapping_add(OPERATION_TIMEOUT_MS),
+                                };
+                                return Ok(None);
+                            }
+                            Ok(_) => Err(PdError::Detached),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Ok(_) => Err(PdError::WrongDevice),
+                    Err(error) => Err(error),
+                }
+            }
+            State::WaitReady { deadline } => match Self::read_byte(bus, PE_FSM) {
+                Ok(PE_SINK_READY) => Self::send_get_source_capabilities(bus).map(|()| {
+                    self.state = State::WaitCapabilities {
+                        deadline: now.wrapping_add(OPERATION_TIMEOUT_MS),
+                    };
+                }),
+                Ok(_) if Self::deadline_expired(now, deadline) => Err(PdError::Timeout),
+                Ok(_) => return Ok(None),
+                Err(error) => Err(error),
+            },
+            State::WaitCapabilities { deadline } => match Self::read_byte(bus, PRT_STATUS) {
+                Ok(status) if status & PD_MESSAGE_RECEIVED != 0 => {
+                    let mut header = [0u8; 2];
+                    let mut byte_count = [0u8];
+                    bus.read(RX_HEADER, &mut header).map_err(|_| PdError::Bus)?;
+                    bus.read(RX_BYTE_COUNT, &mut byte_count)
+                        .map_err(|_| PdError::Bus)?;
+                    let count = usize::from((u16::from_le_bytes(header) >> 12) & 0x07);
+                    if count == 0 || count > 7 || byte_count[0] as usize != count * 4 {
+                        Err(PdError::MalformedCapabilities)
+                    } else {
+                        let mut bytes = [0u8; 28];
+                        bus.read(RX_DATA, &mut bytes[..count * 4])
+                            .map_err(|_| PdError::Bus)?;
+                        let (pdos, count) =
+                            decode_source_capabilities(header, byte_count[0], &bytes[..count * 4])?;
+                        let selection =
+                            select_highest_power_fixed(&pdos[..count], 20_000, self.current_cap_ma)
+                                .ok_or(PdError::NoSuitablePdo)?;
+                        let sink_pdo = encode_sink_fixed_pdo(
+                            selection.source.millivolts,
+                            selection.requested_milliamps,
+                        )
+                        .ok_or(PdError::NoSuitablePdo)?;
+                        bus.write(SINK_PDO3, &sink_pdo.to_le_bytes())
+                            .map_err(|_| PdError::Bus)?;
+                        Self::send_get_source_capabilities(bus)?;
+                        self.state = State::WaitContract {
+                            deadline: now.wrapping_add(OPERATION_TIMEOUT_MS),
+                            selection,
+                        };
+                        return Ok(None);
+                    }
+                }
+                Ok(_) if Self::deadline_expired(now, deadline) => Err(PdError::Timeout),
+                Ok(_) => return Ok(None),
+                Err(error) => Err(error),
+            },
+            State::WaitContract {
+                deadline,
+                selection,
+            } => {
+                let attached = Self::read_byte(bus, PORT_STATUS)? & 1 != 0;
+                if !attached {
+                    Err(PdError::Detached)
+                } else if Self::read_byte(bus, PE_FSM)? != PE_SINK_READY {
+                    if Self::deadline_expired(now, deadline) {
+                        Err(PdError::Timeout)
+                    } else {
+                        return Ok(None);
+                    }
+                } else {
+                    let mut bytes = [0u8; 4];
+                    bus.read(ACTIVE_RDO, &mut bytes).map_err(|_| PdError::Bus)?;
+                    let rdo = decode_rdo(bytes)?;
+                    if rdo.source_position != selection.source.source_position
+                        || rdo.capability_mismatch
+                        || rdo.operating_milliamps == 0
+                        || rdo.operating_milliamps > selection.requested_milliamps
+                    {
+                        if Self::deadline_expired(now, deadline) {
+                            Err(PdError::ContractMismatch)
+                        } else {
+                            return Ok(None);
+                        }
+                    } else {
+                        let contract = Contract {
+                            source_position: rdo.source_position,
+                            millivolts: selection.source.millivolts,
+                            operating_milliamps: rdo.operating_milliamps,
+                            maximum_milliamps: rdo.maximum_milliamps,
+                        };
+                        self.state = State::Ready(contract);
+                        return Ok(Some(PdEvent::Negotiated(contract)));
+                    }
+                }
+            }
+            State::Ready(contract) => {
+                let attached = Self::read_byte(bus, PORT_STATUS)? & 1 != 0;
+                if !attached || Self::read_byte(bus, PE_FSM)? != PE_SINK_READY {
+                    Err(PdError::Detached)
+                } else {
+                    let mut bytes = [0u8; 4];
+                    bus.read(ACTIVE_RDO, &mut bytes).map_err(|_| PdError::Bus)?;
+                    let rdo = decode_rdo(bytes)?;
+                    if rdo.source_position != contract.source_position
+                        || rdo.capability_mismatch
+                        || rdo.operating_milliamps < contract.operating_milliamps
+                    {
+                        Err(PdError::ContractMismatch)
+                    } else {
+                        return Ok(None);
+                    }
+                }
+            }
+            State::Failed(_) => return Ok(None),
+        };
+
+        match result {
+            Ok(()) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn step(&mut self, bus: &mut impl PdBus, now: u16) -> Option<PdEvent> {
+        match self.step_result(bus, now) {
+            Ok(event) => event,
+            Err(error) => self.fail(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use std::{collections::VecDeque, vec, vec::Vec};
+
+    fn fixed(millivolts: u16, milliamps: u16) -> u32 {
+        encode_sink_fixed_pdo(millivolts, milliamps).unwrap()
+    }
+
+    #[test]
+    fn fixed_pdo_codec_enforces_product_limits_and_resolution() {
+        assert_eq!(
+            decode_fixed_pdo(fixed(20_000, 5_000), 3)
+                .unwrap()
+                .millivolts,
+            20_000
+        );
+        assert!(encode_sink_fixed_pdo(20_050, 1_000).is_none());
+        assert!(encode_sink_fixed_pdo(9_001, 1_000).is_none());
+        assert!(encode_sink_fixed_pdo(9_000, 1_001).is_none());
+        assert!(decode_fixed_pdo((1 << 30) | fixed(9_000, 1_000), 1).is_none());
+    }
+
+    #[test]
+    fn selection_chooses_highest_safe_power_and_caps_requested_current() {
+        let pdos = [
+            fixed(5_000, 3_000),
+            fixed(9_000, 3_000),
+            fixed(20_000, 2_000),
+            (21_000u32 / 50 << 10) | (5_000u32 / 10),
+        ];
+        let selected = select_highest_power_fixed(&pdos, 20_000, 1_500).unwrap();
+        assert_eq!(selected.source.source_position, 3);
+        assert_eq!(selected.source.millivolts, 20_000);
+        assert_eq!(selected.requested_milliamps, 1_500);
+        assert!(select_highest_power_fixed(&pdos, 20_000, 0).is_none());
+    }
+
+    #[test]
+    fn source_capability_and_rdo_parsers_reject_malformed_frames() {
+        let header = [0x01, 0x30];
+        let data = [
+            fixed(5_000, 3_000),
+            fixed(9_000, 3_000),
+            fixed(20_000, 2_000),
+        ]
+        .map(u32::to_le_bytes)
+        .concat();
+        let (_, count) = decode_source_capabilities(header, 12, &data).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(
+            decode_source_capabilities([0x02, 0x30], 12, &data),
+            Err(PdError::MalformedCapabilities)
+        );
+        assert_eq!(
+            decode_source_capabilities(header, 8, &data),
+            Err(PdError::MalformedCapabilities)
+        );
+
+        let raw = (3u32 << 28) | (1_500u32 / 10 << 10) | (2_000u32 / 10);
+        assert_eq!(
+            decode_rdo(raw.to_le_bytes()).unwrap().operating_milliamps,
+            1_500
+        );
+        assert_eq!(decode_rdo([0; 4]), Err(PdError::ContractMismatch));
+    }
+
+    enum Operation {
+        Read(u8, Vec<u8>),
+        Write(u8, Vec<u8>),
+    }
+
+    struct ScriptBus(VecDeque<Operation>);
+
+    impl PdBus for ScriptBus {
+        fn read(&mut self, register: u8, values: &mut [u8]) -> Result<(), BusError> {
+            match self.0.pop_front() {
+                Some(Operation::Read(expected, result))
+                    if expected == register && result.len() == values.len() =>
+                {
+                    values.copy_from_slice(&result);
+                    Ok(())
+                }
+                _ => Err(BusError),
+            }
+        }
+
+        fn write(&mut self, register: u8, values: &[u8]) -> Result<(), BusError> {
+            match self.0.pop_front() {
+                Some(Operation::Write(expected, result))
+                    if expected == register && result == values =>
+                {
+                    Ok(())
+                }
+                _ => Err(BusError),
+            }
+        }
+    }
+
+    #[test]
+    fn negotiator_executes_bounded_active_sequence_and_verifies_rdo() {
+        let source = [
+            fixed(5_000, 3_000),
+            fixed(9_000, 3_000),
+            fixed(20_000, 2_000),
+        ];
+        let source_bytes = source.map(u32::to_le_bytes).concat();
+        let requested = fixed(20_000, 1_500).to_le_bytes();
+        let rdo = ((3u32 << 28) | (1_500u32 / 10 << 10) | (2_000u32 / 10)).to_le_bytes();
+        let mut bus = ScriptBus(VecDeque::from(vec![
+            Operation::Read(DEVICE_ID, vec![0x25]),
+            Operation::Read(PORT_STATUS, vec![1]),
+            Operation::Read(PE_FSM, vec![PE_SINK_READY]),
+            Operation::Write(TX_HEADER, GET_SOURCE_CAPABILITIES.to_vec()),
+            Operation::Write(COMMAND_CTRL, vec![SEND_COMMAND]),
+            Operation::Read(PRT_STATUS, vec![PD_MESSAGE_RECEIVED]),
+            Operation::Read(RX_HEADER, vec![0x01, 0x30]),
+            Operation::Read(RX_BYTE_COUNT, vec![12]),
+            Operation::Read(RX_DATA, source_bytes),
+            Operation::Write(SINK_PDO3, requested.to_vec()),
+            Operation::Write(TX_HEADER, GET_SOURCE_CAPABILITIES.to_vec()),
+            Operation::Write(COMMAND_CTRL, vec![SEND_COMMAND]),
+            Operation::Read(PORT_STATUS, vec![1]),
+            Operation::Read(PE_FSM, vec![PE_SINK_READY]),
+            Operation::Read(ACTIVE_RDO, rdo.to_vec()),
+        ]));
+        let mut negotiator = Negotiator::new(1_500);
+        assert_eq!(negotiator.step(&mut bus, 0), None);
+        assert_eq!(negotiator.step(&mut bus, 1), None);
+        assert_eq!(negotiator.step(&mut bus, 2), None);
+        assert_eq!(
+            negotiator.step(&mut bus, 3),
+            Some(PdEvent::Negotiated(Contract {
+                source_position: 3,
+                millivolts: 20_000,
+                operating_milliamps: 1_500,
+                maximum_milliamps: 2_000,
+            }))
+        );
+        assert!(bus.0.is_empty());
+    }
+
+    #[test]
+    fn negotiation_times_out_without_an_unbounded_poll_loop() {
+        let mut bus = ScriptBus(VecDeque::from(vec![
+            Operation::Read(DEVICE_ID, vec![0x25]),
+            Operation::Read(PORT_STATUS, vec![1]),
+            Operation::Read(PE_FSM, vec![0]),
+            Operation::Read(PE_FSM, vec![0]),
+        ]));
+        let mut negotiator = Negotiator::new(3_000);
+        assert_eq!(negotiator.step(&mut bus, u16::MAX - 100), None);
+        assert_eq!(negotiator.step(&mut bus, u16::MAX - 99), None);
+        assert_eq!(
+            negotiator.step(&mut bus, 400),
+            Some(PdEvent::Lost(PdError::Timeout))
+        );
+        assert_eq!(negotiator.failed(), Some(PdError::Timeout));
+        assert!(bus.0.is_empty());
+    }
+
+    #[test]
+    fn every_bus_failure_becomes_a_terminal_reported_error() {
+        let mut bus = ScriptBus(VecDeque::new());
+        let mut negotiator = Negotiator::new(3_000);
+        assert_eq!(
+            negotiator.step(&mut bus, 0),
+            Some(PdEvent::Lost(PdError::Bus))
+        );
+        assert_eq!(negotiator.step(&mut bus, 1), None);
+        negotiator.restart(2_000);
+        assert_eq!(negotiator.current_cap_ma(), 2_000);
+    }
+}

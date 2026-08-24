@@ -76,6 +76,12 @@ Note:
 - USB-C input supporting **PD sink mode**  
 - Up to **100 W** USB-PD power input  
 
+> [!WARNING]
+> r3 boards have a documented USB-C CC/VBUS routing defect. PD attachment works
+> in only one plug orientation, and both receptacles share VBUS without source
+> isolation. Do not connect a powered USB-A COM cable and a separate PD source
+> simultaneously. See the [r3 USB-C routing erratum](Docs/r3-usb-c-routing-erratum.md).
+
 ---
 
 ### **Controls**

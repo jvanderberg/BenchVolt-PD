@@ -7,7 +7,7 @@ use embedded_graphics::{
     },
     pixelcolor::Rgb565,
     prelude::*,
-    primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle},
+    primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
     text::{Baseline, Text},
 };
 use heapless::String;
@@ -275,12 +275,9 @@ where
         const TRACK_WIDTH: i32 = 27;
         const KNOB_DIAMETER: i32 = 9;
         const KNOB_INSET: i32 = 2;
-        RoundedRectangle::with_equal_corners(
-            Rectangle::new(
-                Point::new(TRACK_X, top + 6),
-                Size::new(TRACK_WIDTH as u32, 13),
-            ),
-            Size::new(6, 6),
+        Rectangle::new(
+            Point::new(TRACK_X, top + 6),
+            Size::new(TRACK_WIDTH as u32, 13),
         )
         .into_styled(
             PrimitiveStyleBuilder::new()
@@ -540,13 +537,10 @@ where
     fn draw_detail_setting_frame(&mut self, x: i32, width: u32, focused: bool) {
         self.clear_detail_region(x, 126, width, 37);
         if focused {
-            RoundedRectangle::with_equal_corners(
-                Rectangle::new(Point::new(x, 128), Size::new(width, 31)),
-                Size::new(5, 5),
-            )
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::CYAN, 1))
-            .draw(&mut self.display)
-            .ok();
+            Rectangle::new(Point::new(x, 128), Size::new(width, 31))
+                .into_styled(PrimitiveStyle::with_stroke(Rgb565::CYAN, 1))
+                .draw(&mut self.display)
+                .ok();
         }
     }
 
@@ -614,19 +608,16 @@ where
             StatusProjection::Wait => Rgb565::new(24, 38, 4),
             StatusProjection::Off | StatusProjection::Fault => Rgb565::new(24, 5, 5),
         };
-        RoundedRectangle::with_equal_corners(
-            Rectangle::new(Point::new(249, 130), Size::new(58, 28)),
-            Size::new(14, 14),
-        )
-        .into_styled(
-            PrimitiveStyleBuilder::new()
-                .fill_color(track_color)
-                .stroke_color(if focused { Rgb565::CYAN } else { track_color })
-                .stroke_width(if focused { 2 } else { 0 })
-                .build(),
-        )
-        .draw(&mut self.display)
-        .ok();
+        Rectangle::new(Point::new(249, 130), Size::new(58, 28))
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .fill_color(track_color)
+                    .stroke_color(if focused { Rgb565::CYAN } else { track_color })
+                    .stroke_width(if focused { 2 } else { 0 })
+                    .build(),
+            )
+            .draw(&mut self.display)
+            .ok();
         let knob_x = if matches!(status, StatusProjection::On) {
             282
         } else {
@@ -642,13 +633,10 @@ where
         let focused = projection.focus == ControlFocus::RegulationMode;
         self.clear_detail_region(94, 126, 44, 37);
         if focused {
-            RoundedRectangle::with_equal_corners(
-                Rectangle::new(Point::new(94, 128), Size::new(44, 31)),
-                Size::new(5, 5),
-            )
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::CYAN, 1))
-            .draw(&mut self.display)
-            .ok();
+            Rectangle::new(Point::new(94, 128), Size::new(44, 31))
+                .into_styled(PrimitiveStyle::with_stroke(Rgb565::CYAN, 1))
+                .draw(&mut self.display)
+                .ok();
         }
         Text::with_baseline(
             match projection.regulation_mode {
@@ -915,13 +903,10 @@ where
             )
             .ok();
         if selected {
-            RoundedRectangle::with_equal_corners(
-                Rectangle::new(Point::new(5, y - 2), Size::new(310, 22)),
-                Size::new(4, 4),
-            )
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::new(0, 18, 24)))
-            .draw(&mut self.display)
-            .ok();
+            Rectangle::new(Point::new(5, y - 2), Size::new(310, 22))
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::new(0, 18, 24)))
+                .draw(&mut self.display)
+                .ok();
         }
         Text::with_baseline(
             if selected { ">" } else { " " },

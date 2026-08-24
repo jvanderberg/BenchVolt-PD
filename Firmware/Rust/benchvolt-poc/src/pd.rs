@@ -1,4 +1,5 @@
 pub const STUSB4500_ADDRESS: u8 = 0x28;
+pub const STUSB4500_I2C_HALF_CYCLE_US: u32 = 2;
 const DEVICE_ID: u8 = 0x2f;
 const PORT_STATUS: u8 = 0x0e;
 const MONITORING_STATUS: u8 = 0x10;
@@ -22,6 +23,7 @@ const DEVICE_IDS: [u8; 2] = [0x25, 0x21];
 const PE_SINK_READY: u8 = 0x18;
 const PD_MESSAGE_RECEIVED: u8 = 0x04;
 const GET_SOURCE_CAPABILITIES: [u8; 2] = [0x07, 0x00];
+const SOFT_RESET: [u8; 2] = [0x0d, 0x00];
 const SEND_COMMAND: u8 = 0x26;
 const OPERATION_TIMEOUT_MS: u16 = 500;
 const PASSIVE_DISCOVERY_MS: u16 = 500;
@@ -433,6 +435,13 @@ impl Negotiator {
             .map_err(|_| PdError::Bus)
     }
 
+    fn send_soft_reset(bus: &mut impl PdBus) -> Result<(), PdError> {
+        bus.write(TX_HEADER, &SOFT_RESET)
+            .map_err(|_| PdError::Bus)?;
+        bus.write(COMMAND_CTRL, &[SEND_COMMAND])
+            .map_err(|_| PdError::Bus)
+    }
+
     fn import_passive(
         &mut self,
         bus: &mut impl PdBus,
@@ -530,7 +539,7 @@ impl Negotiator {
                         .ok_or(PdError::NoSuitablePdo)?;
                         bus.write(SINK_PDO3, &sink_pdo.to_le_bytes())
                             .map_err(|_| PdError::Bus)?;
-                        Self::send_get_source_capabilities(bus)?;
+                        Self::send_soft_reset(bus)?;
                         self.state = State::WaitContract {
                             deadline: now.wrapping_add(OPERATION_TIMEOUT_MS),
                             selection,
@@ -623,6 +632,14 @@ mod tests {
 
     use super::*;
     use std::{collections::VecDeque, vec, vec::Vec};
+
+    #[test]
+    fn stusb4500_i2c_clock_stays_within_fast_mode() {
+        const FAST_MODE_MAX_HZ: u32 = 400_000;
+        const CLOCK_HZ: u32 = 1_000_000 / (2 * STUSB4500_I2C_HALF_CYCLE_US);
+
+        assert!(CLOCK_HZ <= FAST_MODE_MAX_HZ);
+    }
 
     struct FailingBus;
 
@@ -941,7 +958,7 @@ mod tests {
             Operation::Read(RX_BYTE_COUNT, vec![12]),
             Operation::Read(RX_DATA, source_bytes),
             Operation::Write(SINK_PDO3, requested.to_vec()),
-            Operation::Write(TX_HEADER, GET_SOURCE_CAPABILITIES.to_vec()),
+            Operation::Write(TX_HEADER, SOFT_RESET.to_vec()),
             Operation::Write(COMMAND_CTRL, vec![SEND_COMMAND]),
             Operation::Read(PORT_STATUS, vec![1]),
             Operation::Read(PE_FSM, vec![PE_SINK_READY]),

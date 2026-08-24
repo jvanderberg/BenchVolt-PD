@@ -22,6 +22,11 @@ because `main.rs` has been reduced from 2,663 to 1,012 lines.
   discovery is read-only; bus transmission occurs only after an explicit CLI
   request. Detach, RDO identity change, invalid contract voltage, or missing
   contract while outputs are active causes global shutdown.
+- The STUSB4500 software-I2C clock now uses a tested 2 us half-cycle. This
+  keeps its requested clock within the controller's 400 kHz Fast-mode limit
+  instead of relying on incidental GPIO overhead to slow a nominal 500 kHz
+  request. After writing a selected sink PDO, active negotiation now sends the
+  documented PD Soft Reset before verifying the new RDO.
 - Passive RDO import rejects capability mismatch, impossible current fields,
   operating current above the matched local sink PDO, and fixed-supply current
   above 5 A (`8026e56`). Input protection uses the lower of the user limit and
@@ -76,8 +81,14 @@ executor.
   therefore powered and running but electrically sees neither CC attachment
   nor a PD contract. The active command correctly returns `ERR:PD:DETACHED`
   without transmitting. Rust retains the same attach guard as the reference C
-  driver. The connector/ESD/CC1/CC2 path must be traced on the board before
-  negotiation can be accepted.
+  driver. The same tuple remained stable after flashing the slower I2C build,
+  ruling out the prior out-of-spec requested clock as the detach cause. The r3
+  schematic uses a stacked dual USB-C assembly: VBUS is shared, but only the
+  receptacle labelled `USB PD/COMM` routes CC1 and CC2 to the STUSB4500. That
+  makes the wrong physical receptacle, its footprint or solder joints, D3, or
+  an open CC trace the leading explanations for VBUS being present without
+  Type-C attachment. Test both plug orientations, then continuity/probe CC1
+  and CC2 from the intended receptacle through D3 to STUSB4500 pins 2 and 4.
 
 - Passive startup can recover RDO current exactly, but the RDO contains no
   nominal voltage. If the transient Source Capabilities message was missed,
@@ -85,7 +96,7 @@ executor.
   local fixed sink profile. This is deliberately fail-closed but remains an
   inference rather than exact source metadata.
 - Connected-hardware coverage is still required for autonomous attach timing,
-  explicit `GET_SOURCE_CAP` negotiation on the installed STUSB4500 revision,
+  explicit fixed-PDO negotiation on the installed STUSB4500 revision,
   detach under load, watchdog reset with energized outputs, and injected I2C
   faults. The headless gate does not claim to replace those tests.
 - `main.rs` is substantially smaller but still owns board construction and the

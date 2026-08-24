@@ -391,7 +391,11 @@ fn main() -> ! {
     let mut sensor = SoftI2c::new(scl, sda);
     let initial_temperature = sensor.read_tmp1075(&mut delay);
     let power_driver = HardwarePowerDriver::new(sensor, SoftI2c::new(aux_scl, aux_sda), delay);
-    let mut pd_bus = SoftI2c::<_, _, 1>::new(pd_scl, pd_sda);
+    let mut pd_bus = SoftI2c::<
+        _,
+        _,
+        { benchvolt_poc::pd::STUSB4500_I2C_HALF_CYCLE_US },
+    >::new(pd_scl, pd_sda);
     let mut initial_state = AppState::new(recovery_armed, initial_temperature);
     if let Some(record) = settings_store.latest {
         record.settings.apply_to(&mut initial_state);

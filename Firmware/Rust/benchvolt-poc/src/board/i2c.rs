@@ -1,4 +1,6 @@
-use benchvolt_poc::pd::{BusError as PdBusError, PdBus, STUSB4500_ADDRESS};
+use benchvolt_poc::pd::{
+    BusError as PdBusError, PdBus, STUSB4500_ADDRESS, STUSB4500_I2C_HALF_CYCLE_US,
+};
 use embedded_hal::{
     blocking::delay::DelayUs,
     digital::v2::{InputPin, OutputPin},
@@ -199,12 +201,15 @@ where
 }
 
 pub(crate) struct SoftPdBus<'a, SCL, SDA> {
-    bus: &'a mut SoftI2c<SCL, SDA, 1>,
+    bus: &'a mut SoftI2c<SCL, SDA, STUSB4500_I2C_HALF_CYCLE_US>,
     delay: &'a mut Delay,
 }
 
 impl<'a, SCL, SDA> SoftPdBus<'a, SCL, SDA> {
-    pub(crate) fn new(bus: &'a mut SoftI2c<SCL, SDA, 1>, delay: &'a mut Delay) -> Self {
+    pub(crate) fn new(
+        bus: &'a mut SoftI2c<SCL, SDA, STUSB4500_I2C_HALF_CYCLE_US>,
+        delay: &'a mut Delay,
+    ) -> Self {
         Self { bus, delay }
     }
 }

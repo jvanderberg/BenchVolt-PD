@@ -128,6 +128,11 @@ pub fn pd_diagnostics_response(snapshot: crate::pd::Diagnostics) -> Response {
         (b"ID" as &[u8], snapshot.device_id),
         (b" PORT", snapshot.port_status),
         (b" MON", snapshot.monitoring_status),
+        (b" CC", snapshot.cc_status),
+        (b" CCF", snapshot.cc_hw_fault_status),
+        (b" TYPEC", snapshot.typec_status),
+        (b" RESET", snapshot.reset_ctrl),
+        (b" VBUS", snapshot.vbus_ctrl),
         (b" PE", snapshot.pe_fsm),
         (b" PDO", snapshot.sink_pdo_count),
     ] {
@@ -381,13 +386,18 @@ mod tests {
             device_id: 0x25,
             port_status: 0x01,
             monitoring_status: 0x08,
+            cc_status: 0x11,
+            cc_hw_fault_status: 0x40,
+            typec_status: 0x82,
+            reset_ctrl: 0x00,
+            vbus_ctrl: 0x02,
             pe_fsm: 0x18,
             sink_pdo_count: 0x03,
             active_rdo: [0xc8, 0x58, 0x02, 0x30],
         });
         assert_eq!(
             response.as_bytes(),
-            b"ID0x25 PORT0x01 MON0x08 PE0x18 PDO0x03 RDO0x300258C8\r\n"
+            b"ID0x25 PORT0x01 MON0x08 CC0x11 CCF0x40 TYPEC0x82 RESET0x00 VBUS0x02 PE0x18 PDO0x03 RDO0x300258C8\r\n"
         );
     }
 

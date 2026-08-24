@@ -2,8 +2,13 @@ pub const STUSB4500_ADDRESS: u8 = 0x28;
 const DEVICE_ID: u8 = 0x2f;
 const PORT_STATUS: u8 = 0x0e;
 const MONITORING_STATUS: u8 = 0x10;
+const CC_STATUS: u8 = 0x11;
+const CC_HW_FAULT_STATUS: u8 = 0x13;
+const TYPEC_STATUS: u8 = 0x15;
 const PRT_STATUS: u8 = 0x16;
 const COMMAND_CTRL: u8 = 0x1a;
+const RESET_CTRL: u8 = 0x23;
+const VBUS_CTRL: u8 = 0x27;
 const PE_FSM: u8 = 0x29;
 const RX_BYTE_COUNT: u8 = 0x30;
 const RX_HEADER: u8 = 0x31;
@@ -74,6 +79,11 @@ pub struct Diagnostics {
     pub device_id: u8,
     pub port_status: u8,
     pub monitoring_status: u8,
+    pub cc_status: u8,
+    pub cc_hw_fault_status: u8,
+    pub typec_status: u8,
+    pub reset_ctrl: u8,
+    pub vbus_ctrl: u8,
     pub pe_fsm: u8,
     pub sink_pdo_count: u8,
     pub active_rdo: [u8; 4],
@@ -89,6 +99,11 @@ pub fn read_diagnostics(bus: &mut impl PdBus) -> Result<Diagnostics, BusError> {
     let device_id = read_byte(bus, DEVICE_ID)?;
     let port_status = read_byte(bus, PORT_STATUS)?;
     let monitoring_status = read_byte(bus, MONITORING_STATUS)?;
+    let cc_status = read_byte(bus, CC_STATUS)?;
+    let cc_hw_fault_status = read_byte(bus, CC_HW_FAULT_STATUS)?;
+    let typec_status = read_byte(bus, TYPEC_STATUS)?;
+    let reset_ctrl = read_byte(bus, RESET_CTRL)?;
+    let vbus_ctrl = read_byte(bus, VBUS_CTRL)?;
     let pe_fsm = read_byte(bus, PE_FSM)?;
     let sink_pdo_count = read_byte(bus, SINK_PDO_COUNT)?;
     let mut active_rdo = [0; 4];
@@ -97,6 +112,11 @@ pub fn read_diagnostics(bus: &mut impl PdBus) -> Result<Diagnostics, BusError> {
         device_id,
         port_status,
         monitoring_status,
+        cc_status,
+        cc_hw_fault_status,
+        typec_status,
+        reset_ctrl,
+        vbus_ctrl,
         pe_fsm,
         sink_pdo_count,
         active_rdo,
@@ -622,6 +642,11 @@ mod tests {
             Operation::Read(DEVICE_ID, vec![0x25]),
             Operation::Read(PORT_STATUS, vec![0x01]),
             Operation::Read(MONITORING_STATUS, vec![0x08]),
+            Operation::Read(CC_STATUS, vec![0x11]),
+            Operation::Read(CC_HW_FAULT_STATUS, vec![0x40]),
+            Operation::Read(TYPEC_STATUS, vec![0x82]),
+            Operation::Read(RESET_CTRL, vec![0x00]),
+            Operation::Read(VBUS_CTRL, vec![0x02]),
             Operation::Read(PE_FSM, vec![PE_SINK_READY]),
             Operation::Read(SINK_PDO_COUNT, vec![0x03]),
             Operation::Read(ACTIVE_RDO, vec![0xc8, 0x58, 0x02, 0x30]),
@@ -633,6 +658,11 @@ mod tests {
                 device_id: 0x25,
                 port_status: 0x01,
                 monitoring_status: 0x08,
+                cc_status: 0x11,
+                cc_hw_fault_status: 0x40,
+                typec_status: 0x82,
+                reset_ctrl: 0x00,
+                vbus_ctrl: 0x02,
                 pe_fsm: PE_SINK_READY,
                 sink_pdo_count: 0x03,
                 active_rdo: [0xc8, 0x58, 0x02, 0x30],

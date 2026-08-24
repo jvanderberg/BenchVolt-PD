@@ -67,13 +67,17 @@ executor.
 
 - Connected-device testing now has a read-only `SYST:PD:RAW?` snapshot. On the
   currently attached bench setup, ten consecutive samples returned device ID
-  `0x25`, port status `0x00`, monitoring status `0x02`, policy-engine state
-  `0x00`, three configured sink PDOs, and an all-zero active RDO while the
-  independent PC0 ADC measured about 19.36 V on `VBUS_SINK`. The controller is
-  therefore not attached and has no PD contract; the active command correctly
-  returns `ERR:PD:DETACHED` without transmitting. Rust retains the same attach
-  guard as the reference C driver. The physical source path must present a real
-  Type-C CC attachment before negotiation can be accepted.
+  `0x25`, port status `0x00`, monitoring status `0x02`, CC status `0x20`,
+  Type-C state `0x01`, reset control `0x00`, VBUS control `0x00`, policy-engine
+  state `0x00`, three configured sink PDOs, and an all-zero active RDO while
+  the independent PC0 ADC measured about 19.36 V on `VBUS_SINK`. `CC=0x20`
+  means the controller is looking for a connection with no valid Rp detected;
+  `TYPEC=0x01` is `ATTACHWAIT_SNK`; and reset is deasserted. The controller is
+  therefore powered and running but electrically sees neither CC attachment
+  nor a PD contract. The active command correctly returns `ERR:PD:DETACHED`
+  without transmitting. Rust retains the same attach guard as the reference C
+  driver. The connector/ESD/CC1/CC2 path must be traced on the board before
+  negotiation can be accepted.
 
 - Passive startup can recover RDO current exactly, but the RDO contains no
   nominal voltage. If the transient Source Capabilities message was missed,

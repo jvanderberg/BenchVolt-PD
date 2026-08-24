@@ -189,7 +189,8 @@ consecutive samples are valid and at or below the limit; outputs do not
 automatically restart. `SYST:PD?` distinguishes idle, active negotiation,
 verified contract, and typed terminal error status over CDC. `SYST:PD:RAW?` is
 a read-only hardware diagnostic: it reports the STUSB4500 device ID, attach,
-VBUS-monitor, policy-engine, configured-PDO-count, and active-RDO registers.
+VBUS-monitor, CC state/fault, Type-C FSM, reset, VBUS gate, policy-engine,
+configured-PDO-count, and active-RDO registers.
 It deliberately avoids read-clear alert registers and never transmits a PD
 message.
 

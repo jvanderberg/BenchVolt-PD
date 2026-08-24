@@ -761,7 +761,9 @@ fn main() -> ! {
         service_tick = input_ticks;
         let mut due = cadence.advance(elapsed_ms);
 
-        let stale_actions = ProtectionService::stale_sample_trip_actions(app.state(), elapsed_ms);
+        let protection_stale = cadence.protection_stale(!app.state().outputs_inactive());
+        let stale_actions =
+            ProtectionService::stale_sample_trip_actions(app.state(), protection_stale);
         if stale_actions.iter().any(Option::is_some) {
             let shutdown_ok = execute_global_shutdown(&mut power_driver).is_ok();
             for action in stale_actions.into_iter().flatten() {

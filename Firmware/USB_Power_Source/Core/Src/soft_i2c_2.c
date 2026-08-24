@@ -318,5 +318,5 @@ void SetVoltageDC1(float voltage){ TPS55289_SetVoltage(DC1_ADDRS,voltage); }
 void SetVoltageDC2(float voltage){ TPS55289_SetVoltage(DC2_ADDRS,voltage); }
 void SetDC1CurrentLimit(float current) { TPS55289_SetCurrentLimit(DC1_ADDRS,current); }
 void SetDC2CurrentLimit(float current) { TPS55289_SetCurrentLimit(DC2_ADDRS,current); }
-uint8_t ReadStatusDC1()  { TPS55289_GetStatus(DC1_ADDRS); }
-uint8_t ReadStatusDC2()  { TPS55289_GetStatus(DC2_ADDRS); }
+uint8_t ReadStatusDC1()  { return TPS55289_GetStatus(DC1_ADDRS); }
+uint8_t ReadStatusDC2()  { return TPS55289_GetStatus(DC2_ADDRS); }

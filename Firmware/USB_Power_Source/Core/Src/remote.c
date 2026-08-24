@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
-#include "stm32_sw_I2C.h"
+#include "stm32_sw_i2c.h"
 #include <soft_i2c_2.h>
 #include <soft_i2c_3.h>
 #include <stusb4500.h>

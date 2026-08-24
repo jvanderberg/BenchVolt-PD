@@ -428,10 +428,12 @@ void StepwiseUpdateDisplay() {
 
         case 19: PCBTemperature = read_temp(0);
         case 20:
+		{
         	char buffer[16];
 			snprintf(buffer, sizeof(buffer), "Temp:%.2fF", PCBTemperature * 9.0f / 5.0f + 32.0f);
 			ST7789_WriteString(235, 15, buffer, Font_7x10, WHITE, BLACK);
 			break;
+		}
 
     }
 
@@ -916,7 +918,8 @@ void WriteExtraInfoStepByStep(void)
             uint32_t val = (pdo_raw[3] << 24) | (pdo_raw[2] << 16) | (pdo_raw[1] << 8) | pdo_raw[0];
             uint32_t voltage = ((val >> 10) & 0x3FF) * 50;
             uint32_t current = (val & 0x3FF) * 10;
-            snprintf(buffer, sizeof(buffer), "%luV @%luA", voltage / 1000, current / 1000);
+            snprintf(buffer, sizeof(buffer), "%luV @%luA",
+                     (unsigned long)(voltage / 1000), (unsigned long)(current / 1000));
             ST7789_WriteString(235, 70, buffer, Font_7x10, WHITE, BLACK);
             break;
         }
@@ -926,7 +929,8 @@ void WriteExtraInfoStepByStep(void)
             uint32_t val = (pdo_raw[7] << 24) | (pdo_raw[6] << 16) | (pdo_raw[5] << 8) | pdo_raw[4];
             uint32_t voltage = ((val >> 10) & 0x3FF) * 50;
             uint32_t current = (val & 0x3FF) * 10;
-            snprintf(buffer, sizeof(buffer), "%luV @%luA", voltage / 1000, current / 1000);
+            snprintf(buffer, sizeof(buffer), "%luV @%luA",
+                     (unsigned long)(voltage / 1000), (unsigned long)(current / 1000));
             ST7789_WriteString(235, 82, buffer, Font_7x10, WHITE, BLACK);
             break;
         }
@@ -936,7 +940,8 @@ void WriteExtraInfoStepByStep(void)
             uint32_t val = (pdo_raw[11] << 24) | (pdo_raw[10] << 16) | (pdo_raw[9] << 8) | pdo_raw[8];
             uint32_t voltage = ((val >> 10) & 0x3FF) * 50;
             uint32_t current = (val & 0x3FF) * 10;
-            snprintf(buffer, sizeof(buffer), "%luV @%luA", voltage / 1000, current / 1000);
+            snprintf(buffer, sizeof(buffer), "%luV @%luA",
+                     (unsigned long)(voltage / 1000), (unsigned long)(current / 1000));
             ST7789_WriteString(235, 94, buffer, Font_7x10, WHITE, BLACK);
             break;
         }
@@ -1858,7 +1863,8 @@ void print_time_ms(uint8_t tag)
 {
 	uint32_t now = HAL_GetTick();
 	char buffer[64];
-	snprintf(buffer, sizeof(buffer), "Tag %u - Current Time: %lu ms\r\n", tag, now);
+	snprintf(buffer, sizeof(buffer), "Tag %u - Current Time: %lu ms\r\n",
+			tag, (unsigned long)now);
 	USB_SendMessage(buffer);
 }
 

@@ -28,7 +28,6 @@ use benchvolt_poc::monitoring::{ProtectionService, TpsStatusObservation};
 use benchvolt_poc::pd::{Service as PdService, ServiceEvent as PdServiceEvent};
 use benchvolt_poc::power::{
     execute_effect, execute_global_shutdown, FirmwareEffectPlanner, PowerDriver, Rail,
-    OVERTEMPERATURE_TRIP_SIXTEENTHS_C,
 };
 use benchvolt_poc::settings::{PersistentSettings, RecordKind, SettingsDebouncer};
 use board::{
@@ -914,23 +913,13 @@ fn main() -> ! {
                 &mut power_driver,
                 Action::Temperature(temperature),
             );
-            let fault = match temperature {
-                Some(raw) if raw >= OVERTEMPERATURE_TRIP_SIXTEENTHS_C => {
-                    Some(benchvolt_poc::app::Fault::OverTemperature)
-                }
-                None => Some(benchvolt_poc::app::Fault::Sensor),
-                _ => None,
-            };
+            let fault = ProtectionService::temperature_fault(temperature);
             if let Some(fault) = fault {
-                for channel in 0..5u8 {
-                    let output = &app.state().channels[usize::from(channel)];
-                    if output.requested_enabled || output.physical_enabled {
-                        dispatch_app(
-                            &mut app,
-                            &mut power_driver,
-                            Action::ProtectionTrip { channel, fault },
-                        );
-                    }
+                for action in ProtectionService::temperature_trip_actions(app.state(), fault)
+                    .into_iter()
+                    .flatten()
+                {
+                    dispatch_app(&mut app, &mut power_driver, action);
                 }
                 let _ = execute_global_shutdown(&mut power_driver);
             }

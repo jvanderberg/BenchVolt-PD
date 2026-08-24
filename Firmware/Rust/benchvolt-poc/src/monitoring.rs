@@ -5,6 +5,7 @@ use crate::{
     power::{
         protection_output, tps55289_status_fault, ProtectionMonitor, Rail,
         SharedRailProtectionMonitor, SinkProtectionEvent, SinkProtectionMonitor,
+        OVERTEMPERATURE_TRIP_SIXTEENTHS_C,
     },
 };
 
@@ -27,6 +28,26 @@ pub struct ProtectionService {
 impl ProtectionService {
     pub fn channel_monitors(&self) -> &[ProtectionMonitor; 5] {
         &self.channels
+    }
+
+    pub const fn temperature_fault(sample: Option<i16>) -> Option<Fault> {
+        match sample {
+            Some(raw) if raw >= OVERTEMPERATURE_TRIP_SIXTEENTHS_C => Some(Fault::OverTemperature),
+            None => Some(Fault::Sensor),
+            _ => None,
+        }
+    }
+
+    pub fn temperature_trip_actions(state: &AppState, fault: Fault) -> [Option<Action>; 5] {
+        core::array::from_fn(|index| {
+            let output = &state.channels[index];
+            (output.requested_enabled || output.physical_enabled).then_some(
+                Action::ProtectionTrip {
+                    channel: index as u8,
+                    fault,
+                },
+            )
+        })
     }
 
     /// TPS STATUS is latched and read-to-clear. Require the same fault to
@@ -208,6 +229,38 @@ mod tests {
             Some(Action::ProtectionTrip {
                 channel: 4,
                 fault: Fault::Hardware
+            })
+        ));
+    }
+
+    #[test]
+    fn temperature_failures_trip_only_active_outputs() {
+        let mut state = active_state(1);
+        state.channels[4].requested_enabled = true;
+        assert_eq!(
+            ProtectionService::temperature_fault(Some(75 * 16)),
+            Some(Fault::OverTemperature)
+        );
+        assert_eq!(
+            ProtectionService::temperature_fault(None),
+            Some(Fault::Sensor)
+        );
+        assert_eq!(ProtectionService::temperature_fault(Some(74 * 16)), None);
+
+        let actions = ProtectionService::temperature_trip_actions(&state, Fault::Sensor);
+        assert!(actions[0].is_none());
+        assert!(matches!(
+            actions[1],
+            Some(Action::ProtectionTrip {
+                channel: 1,
+                fault: Fault::Sensor
+            })
+        ));
+        assert!(matches!(
+            actions[4],
+            Some(Action::ProtectionTrip {
+                channel: 4,
+                fault: Fault::Sensor
             })
         ));
     }

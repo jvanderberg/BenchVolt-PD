@@ -4,6 +4,7 @@
 mod board;
 mod boot;
 mod input;
+mod runtime;
 mod usb_protocol;
 mod usb_transport;
 mod view;
@@ -14,9 +15,7 @@ use core::{
     sync::atomic::{AtomicU32, AtomicU8, Ordering},
 };
 
-use benchvolt_poc::app::{
-    Action, AppReducer, AppState, AwgSource, AwgStatus, ProfileRequest, ProfileStatus,
-};
+use benchvolt_poc::app::{Action, AppReducer, AppState, AwgSource, AwgStatus};
 use benchvolt_poc::arb::{
     Buffer as ArbBuffer, Scheduler as ArbScheduler, Start as ArbStart, Tick as ArbTick,
     UploadSession as ArbUploadSession,
@@ -27,9 +26,9 @@ use benchvolt_poc::measurement::MeasurementWindows;
 use benchvolt_poc::monitoring::{ProtectionService, TpsStatusObservation};
 use benchvolt_poc::pd::{Service as PdService, ServiceEvent as PdServiceEvent};
 use benchvolt_poc::power::{
-    execute_effect, execute_global_shutdown, FirmwareEffectPlanner, PowerDriver, Rail,
+    execute_global_shutdown, FirmwareEffectPlanner, Rail,
 };
-use benchvolt_poc::settings::{PersistentSettings, RecordKind, SettingsDebouncer};
+use benchvolt_poc::settings::{PersistentSettings, SettingsDebouncer};
 use board::{
     adc::{read_channel_measurement, BoundedAdc},
     i2c::{SoftI2c, SoftPdBus},
@@ -37,8 +36,7 @@ use board::{
 };
 use boot::{
     compact_settings_store, erase_flash_page, invalidate_boot_metadata, load_settings_store,
-    persist_settings, persist_settings_record, restore_boot_seal, BOOT_METADATA_ADDR,
-    SETTINGS_SLOTS,
+    persist_settings, restore_boot_seal, BOOT_METADATA_ADDR, SETTINGS_SLOTS,
 };
 use cortex_m::interrupt::Mutex;
 use cortex_m_rt::{entry, exception, ExceptionFrame};
@@ -48,6 +46,7 @@ use heapless::String;
 use input::{monotonic_ms, take_encoder_adjustment};
 use mipidsi::{Builder, ColorInversion, ModelOptions, Orientation};
 use reducto::EffectApp;
+use runtime::{dispatch_app, service_profile_request};
 use stm32f0xx_hal::{
     delay::Delay,
     pac,
@@ -161,37 +160,6 @@ fn benchvolt_display_offset(_: &ModelOptions) -> (u16, u16) {
 
 
 
-
-fn dispatch_app<V, D, const Q: usize>(
-    app: &mut EffectApp<AppReducer, V, FirmwareEffectPlanner, Q>,
-    power_driver: &mut D,
-    action: Action,
-) -> bool
-where
-    V: reducto::View<State = AppState>,
-    D: PowerDriver,
-{
-    let mut pending_action = Some(action);
-    let mut changed = false;
-    while let Some(action) = pending_action.take() {
-        let outcome = app.dispatch(action);
-        changed |= outcome.changed();
-        pending_action = match outcome.effect() {
-            Some(effect) if effect.global_shutdown => {
-                Some(if execute_global_shutdown(power_driver).is_ok() {
-                    Action::GlobalShutdownApplied
-                } else {
-                    Action::GlobalShutdownFailed
-                })
-            }
-            Some(effect) => effect
-                .power
-                .map(|power| execute_effect(power_driver, app.state(), power)),
-            None => None,
-        };
-    }
-    changed
-}
 
 #[entry]
 fn main() -> ! {
@@ -722,76 +690,7 @@ fn main() -> ! {
             dispatch_app(&mut app, &mut power_driver, action);
         }
 
-        match app.state().profile_request {
-            ProfileRequest::None => {}
-            ProfileRequest::Save(slot) => {
-                let outputs_physically_off = app
-                    .state()
-                    .channels
-                    .iter()
-                    .all(|channel| !channel.physical_enabled);
-                let settings = PersistentSettings::from_state(app.state());
-                let status = if persist_settings_record(
-                    &mut settings_store,
-                    RecordKind::Profile(slot),
-                    settings,
-                    outputs_physically_off,
-                ) {
-                    ProfileStatus::Saved(slot)
-                } else {
-                    ProfileStatus::Failed
-                };
-                dispatch_app(
-                    &mut app,
-                    &mut power_driver,
-                    Action::ProfileOperationFinished(status),
-                );
-            }
-            ProfileRequest::Load(slot) => {
-                if let Some(record) = settings_store.profiles[usize::from(slot)] {
-                    if execute_global_shutdown(&mut power_driver).is_ok() {
-                        dispatch_app(
-                            &mut app,
-                            &mut power_driver,
-                            Action::ApplyProfile(record.settings, ProfileStatus::Loaded(slot)),
-                        );
-                    } else {
-                        dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
-                        dispatch_app(
-                            &mut app,
-                            &mut power_driver,
-                            Action::ProfileOperationFinished(ProfileStatus::Failed),
-                        );
-                    }
-                } else {
-                    dispatch_app(
-                        &mut app,
-                        &mut power_driver,
-                        Action::ProfileOperationFinished(ProfileStatus::Empty(slot)),
-                    );
-                }
-            }
-            ProfileRequest::FactoryDefaults => {
-                if execute_global_shutdown(&mut power_driver).is_ok() {
-                    let defaults = AppState::new(app.state().recovery_armed, None);
-                    dispatch_app(
-                        &mut app,
-                        &mut power_driver,
-                        Action::ApplyProfile(
-                            PersistentSettings::from_state(&defaults),
-                            ProfileStatus::DefaultsLoaded,
-                        ),
-                    );
-                } else {
-                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
-                    dispatch_app(
-                        &mut app,
-                        &mut power_driver,
-                        Action::ProfileOperationFinished(ProfileStatus::Failed),
-                    );
-                }
-            }
-        }
+        service_profile_request(&mut app, &mut power_driver, &mut settings_store);
 
         match app.state().awg_status {
             AwgStatus::StartRequested => {

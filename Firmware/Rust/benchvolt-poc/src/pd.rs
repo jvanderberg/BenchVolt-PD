@@ -166,6 +166,9 @@ pub fn match_passive_contract(
     if rdo.capability_mismatch
         || rdo.operating_milliamps == 0
         || rdo.maximum_milliamps == 0
+        || rdo.operating_milliamps > 5_000
+        || rdo.maximum_milliamps > 5_000
+        || rdo.maximum_milliamps < rdo.operating_milliamps
         || measured_vbus_mv == 0
     {
         return Err(PdError::ContractMismatch);
@@ -188,6 +191,10 @@ pub fn match_passive_contract(
         })
         .min_by_key(|pdo| pdo.millivolts.abs_diff(measured_vbus_mv))
         .ok_or(PdError::ContractMismatch)?;
+
+    if rdo.operating_milliamps > matched.milliamps {
+        return Err(PdError::ContractMismatch);
+    }
 
     Ok(Contract {
         source_position: rdo.source_position,
@@ -668,6 +675,33 @@ mod tests {
             match_passive_contract(&sink_pdos, mismatch.to_le_bytes(), 20_000),
             Err(PdError::ContractMismatch)
         );
+    }
+
+    #[test]
+    fn passive_contract_rejects_impossible_or_unsafe_rdo_currents() {
+        let sink_pdos = [
+            fixed(5_000, 3_000),
+            fixed(12_000, 2_000),
+            fixed(20_000, 1_500),
+        ];
+        let rdo = |operating_ma: u32, maximum_ma: u32| {
+            ((3u32 << 28) | (operating_ma / 10 << 10) | (maximum_ma / 10)).to_le_bytes()
+        };
+
+        for invalid in [
+            rdo(1_510, 2_250), // Operating current exceeds the matched sink PDO.
+            rdo(1_500, 1_490), // Maximum current cannot be below operating current.
+            rdo(5_010, 5_010), // USB PD fixed-supply current fields are capped at 5 A.
+        ] {
+            assert_eq!(
+                match_passive_contract(&sink_pdos, invalid, 20_000),
+                Err(PdError::ContractMismatch)
+            );
+        }
+
+        // The RDO maximum reflects source capability and may exceed the local
+        // sink PDO as long as the operating current stays within the sink limit.
+        assert!(match_passive_contract(&sink_pdos, rdo(1_500, 5_000), 20_000).is_ok());
     }
 
     #[test]

@@ -350,6 +350,22 @@ impl AppState {
             AwgSource::Arbitrary => (self.arb_run.low_mv, self.arb_run.high_mv),
         }
     }
+
+    pub fn outputs_inactive(&self) -> bool {
+        self.channels
+            .iter()
+            .all(|output| !output.requested_enabled && !output.physical_enabled)
+    }
+
+    pub fn outputs_physically_off(&self) -> bool {
+        self.channels.iter().all(|output| !output.physical_enabled)
+    }
+
+    pub fn output_transitions_stable(&self) -> bool {
+        self.channels
+            .iter()
+            .all(|output| output.transition == OutputTransition::Stable)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1769,5 +1785,26 @@ mod tests {
         let ui_toggle = AppReducer::reduce(&running, Action::ToggleOutputRequested { channel: 0 });
         assert!(ui_toggle.awg_status == AwgStatus::StopRequested);
         assert!(!ui_toggle.channels[0].requested_enabled);
+    }
+
+    #[test]
+    fn output_safety_predicates_distinguish_requested_physical_and_transition_state() {
+        let mut state = AppState::new(true, None);
+        assert!(state.outputs_inactive());
+        assert!(state.outputs_physically_off());
+        assert!(state.output_transitions_stable());
+
+        state.channels[0].requested_enabled = true;
+        state.channels[0].transition = OutputTransition::Enabling(1);
+        assert!(!state.outputs_inactive());
+        assert!(state.outputs_physically_off());
+        assert!(!state.output_transitions_stable());
+
+        state.channels[0].requested_enabled = false;
+        state.channels[0].physical_enabled = true;
+        state.channels[0].transition = OutputTransition::Stable;
+        assert!(!state.outputs_inactive());
+        assert!(!state.outputs_physically_off());
+        assert!(state.output_transitions_stable());
     }
 }

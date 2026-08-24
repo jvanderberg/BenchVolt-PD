@@ -49,11 +49,7 @@ pub(crate) fn service_profile_request<V, D, const Q: usize>(
     match app.state().profile_request {
         ProfileRequest::None => {}
         ProfileRequest::Save(slot) => {
-            let outputs_physically_off = app
-                .state()
-                .channels
-                .iter()
-                .all(|channel| !channel.physical_enabled);
+            let outputs_physically_off = app.state().outputs_physically_off();
             let settings = PersistentSettings::from_state(app.state());
             let status = if persist_settings_record(
                 settings_store,

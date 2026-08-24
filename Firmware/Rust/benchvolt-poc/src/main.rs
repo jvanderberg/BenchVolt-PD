@@ -635,13 +635,7 @@ fn main() -> ! {
                     }
                 }
                 UsbIntent::PdNegotiate => {
-                    let outputs_off = app
-                        .state()
-                        .channels
-                        .iter()
-                        .all(|output| {
-                            !output.requested_enabled && !output.physical_enabled
-                        });
+                    let outputs_off = app.state().outputs_inactive();
                     if pending_usb_pd || power_driver.is_busy() || !outputs_off {
                         queue_usb_response(b"ERR:BUSY\r\n");
                         break 'usb_command;
@@ -765,11 +759,7 @@ fn main() -> ! {
             );
         }
 
-        let outputs_off = app
-            .state()
-            .channels
-            .iter()
-            .all(|output| !output.requested_enabled && !output.physical_enabled);
+        let outputs_off = app.state().outputs_inactive();
         for event in pd_service
             .tick(
                 elapsed_ms,
@@ -1043,16 +1033,8 @@ fn main() -> ! {
         }
 
         let current_settings = PersistentSettings::from_state(app.state());
-        let outputs_stable = app
-            .state()
-            .channels
-            .iter()
-            .all(|channel| channel.transition == benchvolt_poc::app::OutputTransition::Stable);
-        let outputs_physically_off = app
-            .state()
-            .channels
-            .iter()
-            .all(|channel| !channel.physical_enabled);
+        let outputs_stable = app.state().output_transitions_stable();
+        let outputs_physically_off = app.state().outputs_physically_off();
         if let Some(settings) = settings_effect.tick(
             current_settings,
             outputs_stable,

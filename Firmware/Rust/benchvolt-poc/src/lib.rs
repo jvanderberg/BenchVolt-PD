@@ -15,5 +15,6 @@ pub mod protocol;
 pub mod reset_cause;
 pub mod settings;
 pub mod usb_command;
+pub mod usb_output;
 pub mod view_projection;
 pub mod waveform;

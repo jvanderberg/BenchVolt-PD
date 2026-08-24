@@ -1,6 +1,8 @@
 use super::i2c::SoftI2c;
 use crate::{record_hw_retries, LAST_HW_ERROR, LAST_HW_OPERATION};
-use benchvolt_poc::power::{DriverOperation, PowerDriver, Rail};
+use benchvolt_poc::power::{
+    tps55289_output_acknowledged, DriverOperation, PowerDriver, Rail,
+};
 use core::sync::atomic::Ordering;
 use embedded_hal::{
     blocking::delay::{DelayMs, DelayUs},
@@ -314,7 +316,10 @@ where
         let mode = bus
             .read_register(address, 0x06, delay)
             .map_err(|_| HardwareError::Bus)?;
-        if mode & 0x80 != 0 {
+        let status = bus
+            .read_register(address, 0x07, delay)
+            .map_err(|_| HardwareError::Bus)?;
+        if tps55289_output_acknowledged(mode, status) {
             Ok(())
         } else {
             Err(HardwareError::Verify)

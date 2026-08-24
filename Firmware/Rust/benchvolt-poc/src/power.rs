@@ -26,6 +26,12 @@ pub const fn tps55289_status_fault(status: u8) -> Option<Fault> {
     }
 }
 
+/// A TPS output acknowledgement covers OE and the converter's own status.
+/// Actual output-voltage qualification remains the ADC protection monitor's job.
+pub const fn tps55289_output_acknowledged(mode: u8, status: u8) -> bool {
+    mode & 0x80 != 0 && tps55289_status_fault(status).is_none() && status & 0x03 != 0x03
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ProtectionSnapshot {
     pub active: bool,
@@ -608,11 +614,7 @@ fn run_enable<D: PowerDriver>(driver: &mut D, state: &AppState, channel: u8) -> 
         .map_err(|_| Fault::Hardware)
 }
 
-fn run_disable<D: PowerDriver>(
-    driver: &mut D,
-    state: &AppState,
-    channel: u8,
-) -> Result<(), Fault> {
+fn run_disable<D: PowerDriver>(driver: &mut D, state: &AppState, channel: u8) -> Result<(), Fault> {
     if channel == 4 {
         // OE is best effort: it can NACK when the converter is already held in
         // reset. Verified EN low is the authoritative physical shutdown.
@@ -746,6 +748,10 @@ mod tests {
         assert_eq!(tps55289_status_fault(0x80), Some(Fault::OverCurrent));
         assert_eq!(tps55289_status_fault(0x20), Some(Fault::Hardware));
         assert_eq!(tps55289_status_fault(0xe0), Some(Fault::OverCurrent));
+        assert!(tps55289_output_acknowledged(0x80, 0x00));
+        assert!(!tps55289_output_acknowledged(0x00, 0x00));
+        assert!(!tps55289_output_acknowledged(0x80, 0x20));
+        assert!(!tps55289_output_acknowledged(0x80, 0x03));
     }
 
     #[derive(Default)]

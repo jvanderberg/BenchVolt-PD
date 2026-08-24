@@ -82,6 +82,7 @@ impl SettingsDebouncer {
         &mut self,
         current: PersistentSettings,
         transitions_stable: bool,
+        outputs_physically_off: bool,
         elapsed_ms: u16,
     ) -> Option<PersistentSettings> {
         if current != self.observed {
@@ -93,7 +94,7 @@ impl SettingsDebouncer {
             return None;
         }
         self.quiet_ms = self.quiet_ms.saturating_add(elapsed_ms);
-        if self.quiet_ms >= 1_000 && transitions_stable {
+        if self.quiet_ms >= 1_000 && transitions_stable && outputs_physically_off {
             self.quiet_ms = 0;
             Some(current)
         } else {
@@ -323,21 +324,22 @@ mod tests {
         state.channels[4].current_limit_ma = 400;
         let edited = PersistentSettings::from_state(&state);
 
-        assert!(effect.tick(edited, true, 400).is_none());
-        assert!(effect.tick(edited, true, 999).is_none());
-        assert!(effect.tick(edited, false, 1).is_none());
-        assert!(effect.tick(edited, true, 0) == Some(edited));
+        assert!(effect.tick(edited, true, true, 400).is_none());
+        assert!(effect.tick(edited, true, true, 999).is_none());
+        assert!(effect.tick(edited, false, true, 1).is_none());
+        assert!(effect.tick(edited, true, false, 0).is_none());
+        assert!(effect.tick(edited, true, true, 0) == Some(edited));
         effect.mark_saved(edited);
-        assert!(effect.tick(edited, true, 5_000).is_none());
+        assert!(effect.tick(edited, true, true, 5_000).is_none());
 
         state.channels[4].current_limit_ma = 410;
         let first = PersistentSettings::from_state(&state);
-        assert!(effect.tick(first, true, 500).is_none());
-        assert!(effect.tick(first, true, 500).is_none());
+        assert!(effect.tick(first, true, true, 500).is_none());
+        assert!(effect.tick(first, true, true, 500).is_none());
         state.channels[4].current_limit_ma = 420;
         let second = PersistentSettings::from_state(&state);
-        assert!(effect.tick(second, true, 500).is_none());
-        assert!(effect.tick(second, true, 999).is_none());
-        assert!(effect.tick(second, true, 1) == Some(second));
+        assert!(effect.tick(second, true, true, 500).is_none());
+        assert!(effect.tick(second, true, true, 999).is_none());
+        assert!(effect.tick(second, true, true, 1) == Some(second));
     }
 }

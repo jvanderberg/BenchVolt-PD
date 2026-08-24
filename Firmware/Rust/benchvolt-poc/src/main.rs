@@ -944,13 +944,22 @@ fn main() -> ! {
             .channels
             .iter()
             .all(|channel| !channel.physical_enabled);
-        if let Some(settings) = settings_effect.tick(current_settings, outputs_stable, elapsed_ms) {
+        if let Some(settings) = settings_effect.tick(
+            current_settings,
+            outputs_stable,
+            outputs_physically_off,
+            elapsed_ms,
+        ) {
             if persist_settings(&mut settings_store, settings, outputs_physically_off) {
                 settings_effect.mark_saved(settings);
             }
         }
 
-        if !seal_attempted && health_ticks >= 3_000 && app.state().temp_valid {
+        if !seal_attempted
+            && health_ticks >= 3_000
+            && app.state().temp_valid
+            && outputs_physically_off
+        {
             seal_attempted = true;
             if let Some(seal) = boot_seal {
                 let restored = restore_boot_seal(seal);

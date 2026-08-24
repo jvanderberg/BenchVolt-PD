@@ -255,12 +255,14 @@ pub(crate) fn persist_settings_record(
     settings: PersistentSettings,
     outputs_physically_off: bool,
 ) -> bool {
-    if store.next_slot >= SETTINGS_SLOTS {
-        // Erasing a flash page briefly stalls instruction fetch on this MCU.
-        // Never introduce that service gap while any power output is live.
-        if !outputs_physically_off || !compact_settings_store(store) {
-            return false;
-        }
+    // Same-bank programming can stall foreground protection before control
+    // reaches the RAM-resident busy waiter. Never begin any flash mutation
+    // while a power output is physically live.
+    if !outputs_physically_off {
+        return false;
+    }
+    if store.next_slot >= SETTINGS_SLOTS && !compact_settings_store(store) {
+        return false;
     }
     let record = SettingsRecord {
         sequence: match kind {

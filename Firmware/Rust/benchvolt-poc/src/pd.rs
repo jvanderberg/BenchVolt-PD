@@ -358,8 +358,8 @@ impl Negotiator {
                     let rdo = decode_rdo(bytes)?;
                     if rdo.source_position != selection.source.source_position
                         || rdo.capability_mismatch
-                        || rdo.operating_milliamps == 0
-                        || rdo.operating_milliamps > selection.requested_milliamps
+                        || rdo.operating_milliamps != selection.requested_milliamps
+                        || rdo.maximum_milliamps != selection.source.milliamps
                     {
                         if Self::deadline_expired(now, deadline) {
                             Err(PdError::ContractMismatch)
@@ -388,7 +388,8 @@ impl Negotiator {
                     let rdo = decode_rdo(bytes)?;
                     if rdo.source_position != contract.source_position
                         || rdo.capability_mismatch
-                        || rdo.operating_milliamps < contract.operating_milliamps
+                        || rdo.operating_milliamps != contract.operating_milliamps
+                        || rdo.maximum_milliamps != contract.maximum_milliamps
                     {
                         Err(PdError::ContractMismatch)
                     } else {
@@ -581,6 +582,35 @@ mod tests {
             }))
         );
         assert!(bus.0.is_empty());
+    }
+
+    #[test]
+    fn ready_contract_rejects_any_rdo_identity_change() {
+        let contract = Contract {
+            source_position: 3,
+            millivolts: 20_000,
+            operating_milliamps: 1_500,
+            maximum_milliamps: 2_000,
+        };
+        for changed_rdo in [
+            (3u32 << 28) | (1_510u32 / 10 << 10) | (2_000u32 / 10),
+            (3u32 << 28) | (1_500u32 / 10 << 10) | (1_990u32 / 10),
+        ] {
+            let mut negotiator = Negotiator {
+                state: State::Ready(contract),
+                current_cap_ma: 1_500,
+            };
+            let mut bus = ScriptBus(VecDeque::from(vec![
+                Operation::Read(PORT_STATUS, vec![1]),
+                Operation::Read(PE_FSM, vec![PE_SINK_READY]),
+                Operation::Read(ACTIVE_RDO, changed_rdo.to_le_bytes().to_vec()),
+            ]));
+
+            assert_eq!(
+                negotiator.step(&mut bus, 0),
+                Some(PdEvent::Lost(PdError::ContractMismatch))
+            );
+        }
     }
 
     #[test]

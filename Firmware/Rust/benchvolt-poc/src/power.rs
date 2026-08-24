@@ -210,7 +210,16 @@ pub enum SinkProtectionEvent {
 #[derive(Clone, Copy, Default)]
 pub struct SinkProtectionMonitor {
     overcurrent_samples: u8,
+    voltage_samples: u8,
     recovery_samples: u8,
+}
+
+fn sink_voltage_within_contract(state: &AppState, measurement: Measurement) -> bool {
+    state.pd_contract.is_some_and(|contract| {
+        let measured = u32::from(measurement.millivolts) * 100;
+        let negotiated = u32::from(contract.millivolts);
+        measured >= negotiated * 80 && measured <= negotiated * 120
+    })
 }
 
 #[derive(Clone, Copy, Default)]
@@ -277,7 +286,12 @@ impl SinkProtectionMonitor {
 
         if state.sink_fault != Fault::None {
             self.overcurrent_samples = 0;
-            if !output_active && measurement.valid && measurement.milliamps <= effective_limit_ma {
+            self.voltage_samples = 0;
+            if !output_active
+                && measurement.valid
+                && measurement.milliamps <= effective_limit_ma
+                && sink_voltage_within_contract(state, measurement)
+            {
                 self.recovery_samples = self.recovery_samples.saturating_add(1);
                 if self.recovery_samples >= SINK_RECOVERY_SAMPLES {
                     self.recovery_samples = 0;
@@ -292,11 +306,24 @@ impl SinkProtectionMonitor {
         self.recovery_samples = 0;
         if !output_active {
             self.overcurrent_samples = 0;
+            self.voltage_samples = 0;
             return None;
         }
         if !measurement.valid {
             self.overcurrent_samples = 0;
+            self.voltage_samples = 0;
             return Some(SinkProtectionEvent::Trip(Fault::Sensor));
+        }
+        if state.pd_contract.is_none() {
+            self.overcurrent_samples = 0;
+            self.voltage_samples = 0;
+            return Some(SinkProtectionEvent::Trip(Fault::Hardware));
+        }
+        let gross_limit_ma = ((u32::from(effective_limit_ma) * 125 / 100) + 100).min(5_500) as u16;
+        if measurement.milliamps > gross_limit_ma {
+            self.overcurrent_samples = 0;
+            self.voltage_samples = 0;
+            return Some(SinkProtectionEvent::Trip(Fault::OverCurrent));
         }
         if measurement.milliamps > effective_limit_ma {
             self.overcurrent_samples = self.overcurrent_samples.saturating_add(1);
@@ -305,7 +332,18 @@ impl SinkProtectionMonitor {
         }
         if self.overcurrent_samples >= FAULT_CONFIRM_SAMPLES {
             self.overcurrent_samples = 0;
-            Some(SinkProtectionEvent::Trip(Fault::OverCurrent))
+            self.voltage_samples = 0;
+            return Some(SinkProtectionEvent::Trip(Fault::OverCurrent));
+        }
+        if sink_voltage_within_contract(state, measurement) {
+            self.voltage_samples = 0;
+        } else {
+            self.voltage_samples = self.voltage_samples.saturating_add(1);
+        }
+        if self.voltage_samples >= FAULT_CONFIRM_SAMPLES {
+            self.overcurrent_samples = 0;
+            self.voltage_samples = 0;
+            Some(SinkProtectionEvent::Trip(Fault::Hardware))
         } else {
             None
         }
@@ -906,6 +944,68 @@ mod tests {
             monitor.observe(&state, over),
             Some(SinkProtectionEvent::Trip(Fault::OverCurrent))
         );
+    }
+
+    #[test]
+    fn sink_voltage_must_track_the_negotiated_contract() {
+        for millivolts in [3_999, 6_001] {
+            let mut state = eligible_state();
+            state.channels[0].physical_enabled = true;
+            let outside = Measurement {
+                millivolts,
+                milliamps: 500,
+                valid: true,
+            };
+            let mut monitor = SinkProtectionMonitor::default();
+
+            assert_eq!(monitor.observe(&state, outside), None);
+            assert_eq!(monitor.observe(&state, outside), None);
+            assert_eq!(
+                monitor.observe(&state, outside),
+                Some(SinkProtectionEvent::Trip(Fault::Hardware))
+            );
+        }
+    }
+
+    #[test]
+    fn gross_sink_overcurrent_trips_without_confirmation_delay() {
+        let mut state = eligible_state();
+        state.channels[0].physical_enabled = true;
+        state.sink_current_limit_ma = 1_000;
+        let gross = Measurement {
+            millivolts: 5_000,
+            milliamps: 1_351,
+            valid: true,
+        };
+
+        assert_eq!(
+            SinkProtectionMonitor::default().observe(&state, gross),
+            Some(SinkProtectionEvent::Trip(Fault::OverCurrent))
+        );
+    }
+
+    #[test]
+    fn sink_fault_recovery_requires_a_valid_contract_voltage() {
+        let mut state = eligible_state();
+        state.sink_fault = Fault::Hardware;
+        let wrong_voltage = Measurement {
+            millivolts: 3_999,
+            milliamps: 500,
+            valid: true,
+        };
+        let mut monitor = SinkProtectionMonitor::default();
+
+        for _ in 0..SINK_RECOVERY_SAMPLES {
+            assert_eq!(monitor.observe(&state, wrong_voltage), None);
+        }
+        state.pd_contract = None;
+        let nominal = Measurement {
+            millivolts: 5_000,
+            ..wrong_voltage
+        };
+        for _ in 0..SINK_RECOVERY_SAMPLES {
+            assert_eq!(monitor.observe(&state, nominal), None);
+        }
     }
 
     #[test]

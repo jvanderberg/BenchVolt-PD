@@ -22,6 +22,7 @@ use benchvolt_poc::arb::{
     UploadSession as ArbUploadSession,
 };
 use benchvolt_poc::awg::Scheduler as AwgScheduler;
+use benchvolt_poc::input_policy::{encoder_action, ButtonTracker};
 use benchvolt_poc::load::LoadAccumulator;
 use benchvolt_poc::monitoring::{ProtectionService, TpsStatusObservation};
 use benchvolt_poc::pd::{Negotiator as PdNegotiator, PdEvent};
@@ -59,8 +60,6 @@ use usb_protocol::{handle_usb_command, UsbIntent};
 use usb_transport::{queue_usb_response, take_usb_command};
 use view::BenchVoltView;
 
-const OVERVIEW_HOLD_MS: u16 = 500;
-const REBOOT_HOLD_MS: u16 = 3_000;
 const FLASH_READY_SPINS: u32 = 12_000_000;
 
 /// Turn off every independent output control without relying on initialized
@@ -437,10 +436,7 @@ fn main() -> ! {
     let mut service_tick = input_ticks;
     let mut health_ticks = 0u32;
     let mut seal_attempted = false;
-    let mut last_button_tick = 0u16;
-    let mut button_press_tick = None;
-    let mut overview_hold_fired = false;
-    let mut encoder_sw_high = encoder_sw.is_high().unwrap_or(true);
+    let mut button = ButtonTracker::new(encoder_sw.is_high().unwrap_or(true));
     let mut last_encoder_tick = input_ticks;
     let mut last_encoder_direction = 0i8;
     let mut encoder_velocity = 0u8;
@@ -718,85 +714,14 @@ fn main() -> ! {
             &mut last_encoder_direction,
             &mut encoder_velocity,
         );
-        if direction != 0 {
-            match app.state().focus {
-                benchvolt_poc::app::ControlFocus::None => {
-                    let action = if app.state().screen == benchvolt_poc::app::Screen::Awg
-                        && app.state().awg_editing
-                    {
-                        Action::AdjustAwg(accelerated)
-                    } else if matches!(
-                        app.state().screen,
-                        benchvolt_poc::app::Screen::MainMenu
-                            | benchvolt_poc::app::Screen::Awg
-                            | benchvolt_poc::app::Screen::Settings
-                            | benchvolt_poc::app::Screen::ProfileSave
-                            | benchvolt_poc::app::Screen::ProfileLoad
-                            | benchvolt_poc::app::Screen::System
-                            | benchvolt_poc::app::Screen::Help
-                    ) {
-                        Action::NavigateMenu(direction)
-                    } else if direction < 0 {
-                        Action::PreviousScreen
-                    } else {
-                        Action::NextScreen
-                    };
-                    dispatch_app(&mut app, &mut power_driver, action)
-                }
-                benchvolt_poc::app::ControlFocus::Output => {
-                    if let benchvolt_poc::app::Screen::Channel(channel) = app.state().screen {
-                        dispatch_app(
-                            &mut app,
-                            &mut power_driver,
-                            Action::ToggleOutputRequested { channel },
-                        );
-                    }
-                    true
-                }
-                benchvolt_poc::app::ControlFocus::OverviewOutput(channel) => {
-                    dispatch_app(
-                        &mut app,
-                        &mut power_driver,
-                        Action::ToggleOutputRequested { channel },
-                    );
-                    true
-                }
-                _ => dispatch_app(
-                    &mut app,
-                    &mut power_driver,
-                    Action::AdjustFocused(accelerated),
-                ),
-            };
+        if let Some(action) = encoder_action(app.state(), direction, accelerated) {
+            dispatch_app(&mut app, &mut power_driver, action);
         }
 
-        let next_sw_high = encoder_sw.is_high().unwrap_or(encoder_sw_high);
-        if encoder_sw_high && !next_sw_high && input_ticks.wrapping_sub(last_button_tick) >= 50 {
-            button_press_tick = Some(input_ticks);
-            overview_hold_fired = false;
+        let next_sw_high = encoder_sw.is_high().unwrap_or(button.is_high());
+        if let Some(action) = button.sample(input_ticks, next_sw_high) {
+            dispatch_app(&mut app, &mut power_driver, action);
         }
-        if !next_sw_high {
-            if let Some(pressed_at) = button_press_tick {
-                let held_ms = input_ticks.wrapping_sub(pressed_at);
-                if held_ms >= REBOOT_HOLD_MS {
-                    button_press_tick = None;
-                    dispatch_app(&mut app, &mut power_driver, Action::RequestReboot);
-                } else if held_ms >= OVERVIEW_HOLD_MS && !overview_hold_fired {
-                    overview_hold_fired = true;
-                    dispatch_app(&mut app, &mut power_driver, Action::GoMainMenu);
-                }
-            }
-        } else if !encoder_sw_high && next_sw_high {
-            if let Some(pressed_at) = button_press_tick.take() {
-                let held_ms = input_ticks.wrapping_sub(pressed_at);
-                last_button_tick = input_ticks;
-                if held_ms >= OVERVIEW_HOLD_MS {
-                    dispatch_app(&mut app, &mut power_driver, Action::GoMainMenu);
-                } else if held_ms >= 30 {
-                    dispatch_app(&mut app, &mut power_driver, Action::NextControl);
-                }
-            }
-        }
-        encoder_sw_high = next_sw_high;
 
         match app.state().profile_request {
             ProfileRequest::None => {}

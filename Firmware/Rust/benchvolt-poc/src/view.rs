@@ -18,7 +18,8 @@ use benchvolt_poc::app::{
     ProfileStatus, RegulationMode, Screen, TemperatureUnit, HELP_MAX_SCROLL,
 };
 use benchvolt_poc::view_projection::{
-    awg_damage, sink_projection, SinkPdStatus, SinkProjection,
+    awg_damage, framed_value_damage, sink_projection, FramedValueDamage, SinkPdStatus,
+    SinkProjection,
 };
 
 const TABLE_TOP: i32 = 24;
@@ -1568,17 +1569,25 @@ where
                 if old.power_centiwatts != new.power_centiwatts {
                     self.draw_detail_power(new);
                 }
-                if (old.focus == ControlFocus::Voltage) != (new.focus == ControlFocus::Voltage) {
-                    self.draw_detail_setpoint(new);
-                } else if old.setpoint_centivolts != new.setpoint_centivolts {
-                    self.draw_detail_setpoint_value(new);
+                match framed_value_damage(
+                    old.setpoint_centivolts,
+                    new.setpoint_centivolts,
+                    old.focus == ControlFocus::Voltage,
+                    new.focus == ControlFocus::Voltage,
+                ) {
+                    FramedValueDamage::Frame => self.draw_detail_setpoint(new),
+                    FramedValueDamage::Value => self.draw_detail_setpoint_value(new),
+                    FramedValueDamage::None => {}
                 }
-                if (old.focus == ControlFocus::CurrentLimit)
-                    != (new.focus == ControlFocus::CurrentLimit)
-                {
-                    self.draw_detail_limit(new);
-                } else if old.limit_centiamps != new.limit_centiamps {
-                    self.draw_detail_limit_value(new);
+                match framed_value_damage(
+                    old.limit_centiamps,
+                    new.limit_centiamps,
+                    old.focus == ControlFocus::CurrentLimit,
+                    new.focus == ControlFocus::CurrentLimit,
+                ) {
+                    FramedValueDamage::Frame => self.draw_detail_limit(new),
+                    FramedValueDamage::Value => self.draw_detail_limit_value(new),
+                    FramedValueDamage::None => {}
                 }
                 if old.status != new.status
                     || (old.focus == ControlFocus::Output) != (new.focus == ControlFocus::Output)

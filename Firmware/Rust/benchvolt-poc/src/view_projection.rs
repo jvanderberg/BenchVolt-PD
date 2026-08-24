@@ -1,6 +1,28 @@
 use crate::app::AppState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FramedValueDamage {
+    None,
+    Value,
+    Frame,
+}
+
+pub const fn framed_value_damage(
+    old_value: u16,
+    new_value: u16,
+    old_focused: bool,
+    new_focused: bool,
+) -> FramedValueDamage {
+    if old_focused != new_focused {
+        FramedValueDamage::Frame
+    } else if old_value != new_value {
+        FramedValueDamage::Value
+    } else {
+        FramedValueDamage::None
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SinkPdStatus {
     Negotiating,
     Ready(crate::pd::Contract),
@@ -108,6 +130,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn value_edits_preserve_the_existing_focus_frame() {
+        assert_eq!(
+            framed_value_damage(500, 501, true, true),
+            FramedValueDamage::Value
+        );
+        assert_eq!(
+            framed_value_damage(500, 501, false, false),
+            FramedValueDamage::Value
+        );
+        assert_eq!(
+            framed_value_damage(500, 501, false, true),
+            FramedValueDamage::Frame
+        );
+        assert_eq!(
+            framed_value_damage(500, 500, true, true),
+            FramedValueDamage::None
+        );
+    }
+
+    #[test]
     fn sink_projection_keeps_latched_fault_visibly_asserted() {
         let mut state = AppState::new(true, None);
         state.sink = crate::app::Measurement {
@@ -121,7 +163,10 @@ mod tests {
         let projection = sink_projection(&state);
         assert!(projection.over_limit);
         assert_eq!(projection.current_centiamps, Some(10));
-        assert_eq!(projection.pd_status, SinkPdStatus::Fault(crate::app::Fault::OverCurrent));
+        assert_eq!(
+            projection.pd_status,
+            SinkPdStatus::Fault(crate::app::Fault::OverCurrent)
+        );
     }
 
     #[test]
@@ -135,7 +180,10 @@ mod tests {
         };
         state.pd_contract = Some(contract);
 
-        assert_eq!(sink_projection(&state).pd_status, SinkPdStatus::Ready(contract));
+        assert_eq!(
+            sink_projection(&state).pd_status,
+            SinkPdStatus::Ready(contract)
+        );
     }
 
     #[test]

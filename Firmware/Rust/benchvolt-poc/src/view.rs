@@ -15,7 +15,10 @@ use reducto::View;
 
 use benchvolt_poc::app::{
     AppState, AwgStatus, AwgWaveform, ChannelSnapshot, ControlFocus, Fault, OutputTransition,
-    ProfileStatus, RegulationMode, Screen, TemperatureUnit, HELP_MAX_SCROLL,
+    ProfileStatus, RegulationMode, Screen, TemperatureUnit,
+};
+use benchvolt_poc::ui_content::{
+    HELP_MAX_SCROLL, HELP_TEXT, HELP_VISIBLE_LINES, MAIN_MENU_ITEMS,
 };
 use benchvolt_poc::view_projection::{
     awg_damage, framed_value_damage, seven_segment_mask, sink_projection, FramedValueDamage,
@@ -888,7 +891,7 @@ where
     }
 
     fn main_menu_item(index: usize) -> &'static str {
-        ["DC Power", "AWG", "Settings", "System", "Help"][index]
+        MAIN_MENU_ITEMS[index]
     }
 
     fn settings_item(state: &AppState, index: usize) -> &'static str {
@@ -915,11 +918,7 @@ where
     }
 
     fn draw_main_menu(&mut self, state: &AppState) {
-        self.draw_menu(
-            "BenchVolt",
-            &["DC Power", "AWG", "Settings", "System", "Help"],
-            state,
-        );
+        self.draw_menu("BenchVolt", &MAIN_MENU_ITEMS, state);
     }
 
     fn draw_help(&mut self, state: &AppState) {
@@ -936,7 +935,6 @@ where
     }
 
     fn draw_help_content(&mut self, state: &AppState) {
-        const HELP: &str = "MAIN MENU\nSelect an item:\nPower - control all five DC outputs\nAWG - waveforms on CH4 / CH5\nSettings - save / restore settings\nSystem - firmware version and status\nHelp - this guide\nNAVIGATION\nLong press - go back\nClick - move focus between controls\nTurn - menu selection or control edit\nPOWER SCREENS\nOverview shows all outputs and status.\nClick to focus a channel switch.\nTurn either way to toggle it.\nClick past CH5 to finish.\nWith no focus, turn between screens.\nOn a channel, click through Output,\nVoltage, CV/CC, and Current Limit.\nTurn to edit the focused control.\nClick until focus clears to navigate.\nCV / CC\nCH4 and CH5 support CC mode.\nSelect CC, then set Current Limit.\nThe loop lowers voltage to hold current.\nCC turns green while regulating.\nAWG\nGenerates waveforms on CH4 or CH5.\nTurn, click to edit, turn, then click.\nSine, triangle, ramp, and square.\nFrequency is available up to 120 Hz.\nSquare adds a duty-cycle setting.\nSet Low and High, then choose Start.\nRMS amps and average watts appear\nin the load panel on the right.";
         self.display
             .fill_solid(
                 &Rectangle::new(Point::new(0, 28), Size::new(320, 142)),
@@ -944,7 +942,12 @@ where
             )
             .ok();
         let start = usize::from(state.help_scroll);
-        for (row, text) in HELP.split('\n').skip(start).take(7).enumerate() {
+        for (row, text) in HELP_TEXT
+            .split('\n')
+            .skip(start)
+            .take(usize::from(HELP_VISIBLE_LINES))
+            .enumerate()
+        {
             let heading = matches!(
                 text,
                 "MAIN MENU" | "NAVIGATION" | "POWER SCREENS" | "CV / CC" | "AWG"
@@ -966,8 +969,8 @@ where
             &mut footer,
             "TURN scroll  CLICK back  {}-{}/{}",
             state.help_scroll + 1,
-            (state.help_scroll + 7).min(HELP_MAX_SCROLL + 7),
-            HELP_MAX_SCROLL + 7,
+            (state.help_scroll + HELP_VISIBLE_LINES).min(HELP_MAX_SCROLL + HELP_VISIBLE_LINES),
+            HELP_MAX_SCROLL + HELP_VISIBLE_LINES,
         )
         .ok();
         Text::with_baseline(

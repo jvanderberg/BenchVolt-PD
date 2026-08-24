@@ -1,9 +1,12 @@
 use reducto::Reducer;
 
-use crate::limits::{CH5_MAX_VOLTAGE_MV, CH5_MIN_VOLTAGE_MV};
-
-pub const HELP_MAX_SCROLL: u8 = 28;
-pub const HELP_SCROLL_STEP: u8 = 5;
+use crate::{
+    limits::{CH5_MAX_VOLTAGE_MV, CH5_MIN_VOLTAGE_MV},
+    ui_content::{
+        AWG_ITEM_COUNT, HELP_MAX_SCROLL, HELP_SCROLL_STEP, MAIN_MENU_ITEMS, PROFILE_ITEM_COUNT,
+        SETTINGS_ITEM_COUNT,
+    },
+};
 
 const VOLTAGE_SLEW_STEP_MV: u16 = 200;
 
@@ -519,10 +522,10 @@ impl Reducer for AppReducer {
                     }
                 } else {
                     let count = match state.screen {
-                        Screen::MainMenu => 5,
-                        Screen::Settings => 5,
-                        Screen::ProfileSave | Screen::ProfileLoad => 4,
-                        Screen::Awg => 8,
+                        Screen::MainMenu => MAIN_MENU_ITEMS.len() as u8,
+                        Screen::Settings => SETTINGS_ITEM_COUNT,
+                        Screen::ProfileSave | Screen::ProfileLoad => PROFILE_ITEM_COUNT,
+                        Screen::Awg => AWG_ITEM_COUNT,
                         Screen::System | Screen::Help => 1,
                         _ => 0,
                     };

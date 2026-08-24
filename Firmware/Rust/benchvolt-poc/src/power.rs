@@ -1728,6 +1728,27 @@ mod tests {
     }
 
     #[test]
+    fn negotiated_current_caps_a_higher_user_sink_limit() {
+        let mut state = eligible_state();
+        state.channels[0].physical_enabled = true;
+        state.sink_current_limit_ma = 5_000;
+        state.pd_contract.as_mut().unwrap().operating_milliamps = 1_500;
+        let over_contract = Measurement {
+            millivolts: 5_000,
+            milliamps: 1_501,
+            valid: true,
+        };
+        let mut monitor = SinkProtectionMonitor::default();
+
+        assert_eq!(monitor.observe(&state, over_contract), None);
+        assert_eq!(monitor.observe(&state, over_contract), None);
+        assert_eq!(
+            monitor.observe(&state, over_contract),
+            Some(SinkProtectionEvent::Trip(Fault::OverCurrent))
+        );
+    }
+
+    #[test]
     fn sink_voltage_must_track_the_negotiated_contract() {
         for millivolts in [3_999, 6_001] {
             let mut state = eligible_state();

@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Flash a BenchVolt application through the unchanged stock CDC bootloader."""
+"""Flash a BenchVolt application through the hardened CDC bootloader."""
 
 import argparse
 import struct
 import time
 from pathlib import Path
-
-import serial
-
 
 CMD_START = 0x01
 CMD_DATA = 0x02
@@ -15,7 +12,7 @@ CMD_END = 0x03
 ACK = b"\x06"
 
 APP_ORIGIN = 0x0800_8000
-BOOT_METADATA = 0x0801_F800
+SETTINGS_ORIGIN = 0x0801_F000
 
 # The stock bootloader receives one 64-byte USB CDC packet at a time. The
 # three-byte DATA header leaves 61 bytes; 60 also keeps every write aligned.
@@ -34,7 +31,7 @@ def stm32_crc32(data: bytes) -> int:
     return crc
 
 
-def require_ack(port: serial.Serial, operation: str) -> None:
+def require_ack(port, operation: str) -> None:
     response = port.read(1)
     if response != ACK:
         received = "timeout" if not response else f"0x{response[0]:02x}"
@@ -42,23 +39,27 @@ def require_ack(port: serial.Serial, operation: str) -> None:
 
 
 def validate_image(image: bytes) -> None:
-    capacity = BOOT_METADATA - APP_ORIGIN
+    capacity = SETTINGS_ORIGIN - APP_ORIGIN
     if len(image) < 192:
         raise ValueError("image is smaller than the required 192-byte vector table")
     if len(image) > capacity:
         raise ValueError(
-            f"image ends at 0x{APP_ORIGIN + len(image):08x}, overlapping boot metadata"
+            f"image ends at 0x{APP_ORIGIN + len(image):08x}, overlapping settings"
         )
 
     initial_sp, reset_vector = struct.unpack_from("<II", image)
     if not 0x2000_0000 <= initial_sp <= 0x2000_4000:
         raise ValueError(f"initial stack pointer 0x{initial_sp:08x} is outside SRAM")
+    if reset_vector & 1 == 0:
+        raise ValueError(f"reset vector 0x{reset_vector:08x} is not a Thumb address")
     reset_address = reset_vector & ~1
     if not APP_ORIGIN <= reset_address < APP_ORIGIN + len(image):
         raise ValueError(f"reset vector 0x{reset_vector:08x} is outside the image")
 
 
 def flash(port_name: str, image: bytes) -> None:
+    import serial
+
     crc = stm32_crc32(image)
     print(f"image: {len(image)} bytes, end=0x{APP_ORIGIN + len(image):08x}, crc=0x{crc:08x}")
 

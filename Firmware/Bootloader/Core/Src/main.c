@@ -30,8 +30,6 @@
 
 // Flash Addresses
 #define BOOTLOADER_FLASH_ADDR       0x08000000
-#define PARAM_PAGE_ADDR			    0x0801F800    // Starts after 32KB Bootloader
-#define MAIN_APP_FLASH_ADDR         0x08008000    // Starts after 2KB Config Page
 #define VECTOR_TABLE_SIZE  0xC0U
 
 
@@ -44,11 +42,10 @@
 #define CMD_END                    0x03
 #define CMD_JUMP_ONLY              0x04
 #define CMD_ERASE_CRC              0x05
-#define CMD_JUMP_ONLY              0x04
-#define CMD_ERASE_CRC              0x05
 // Protocol Responses
 #define ACK                        0x06
 #define NACK                       0x15
+#define MAX_DATA_PAYLOAD           60U
 
 
 /* USER CODE END Includes */
@@ -100,6 +97,7 @@ volatile uint8_t usb_data_ready = 0;
 
 uint32_t write_address = MAIN_APP_FLASH_ADDR;
 uint32_t total_file_size = 0;
+uint32_t received_file_size = 0;
 uint8_t bootloader_active = 0;
 
 void SystemClock_Config(void);
@@ -116,6 +114,10 @@ void WriteAppSize(uint32_t size);
 uint32_t ReadAppSize(void);
 void Bootloader_Protocol_Handler(void);
 void Send_USB_Response(uint8_t res);
+uint8_t EraseBootParams(void);
+uint8_t WriteBootParams(uint32_t crc, uint32_t size);
+uint8_t ApplicationVectorsValid(uint32_t size);
+uint8_t ApplicationIsValid(void);
 
 void PrintBuildDate(void)
 {
@@ -133,11 +135,11 @@ void WriteToDevice(char* commandString)
 
 void JumpToMainApp(void)
 {
+    if (!ApplicationIsValid())
+        return;
+
     uint32_t appStack = *(volatile uint32_t*)MAIN_APP_FLASH_ADDR;
     uint32_t appEntry = *(volatile uint32_t*)(MAIN_APP_FLASH_ADDR + 4);
-
-    if ((appStack < 0x20000000U) || (appStack > 0x20004000U))
-        return;
 
     __disable_irq();
 
@@ -207,24 +209,38 @@ void WriteCRC(unsigned char *data)
     HAL_Delay(10);
 }
 
-void WriteBootParams(uint32_t crc, uint32_t size)
+uint8_t EraseBootParams(void)
 {
     FLASH_EraseInitTypeDef EraseInitStruct;
     uint32_t PageError = 0;
+    HAL_StatusTypeDef status;
 
     HAL_FLASH_Unlock();
-
-    // Sadece parametre sayfasını sil (Uygulamaya asla dokunmaz)
     EraseInitStruct.TypeErase = FLASH_TYPEERASE_PAGES;
     EraseInitStruct.PageAddress = PARAM_PAGE_ADDR;
     EraseInitStruct.NbPages = 1;
-    HAL_FLASHEx_Erase(&EraseInitStruct, &PageError);
+    status = HAL_FLASHEx_Erase(&EraseInitStruct, &PageError);
+    HAL_FLASH_Lock();
+    return status == HAL_OK && ReadCRC() == 0xFFFFFFFFU && ReadAppSize() == 0xFFFFFFFFU;
+}
 
-    // CRC ve Boyut bilgilerini mühürle
-    HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, PARAM_PAGE_ADDR, crc);
-    HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, PARAM_PAGE_ADDR + 4, size);
+uint8_t WriteBootParams(uint32_t crc, uint32_t size)
+{
+    if (size < VECTOR_TABLE_SIZE || size > MAIN_APP_SIZE_MAX_BYTES)
+        return 0;
+    if (!EraseBootParams())
+        return 0;
+
+    HAL_FLASH_Unlock();
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, PARAM_PAGE_ADDR, crc) != HAL_OK ||
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, PARAM_PAGE_ADDR + 4U, size) != HAL_OK)
+    {
+        HAL_FLASH_Lock();
+        return 0;
+    }
 
     HAL_FLASH_Lock();
+    return ReadCRC() == crc && ReadAppSize() == size;
 }
 
 
@@ -236,6 +252,31 @@ uint32_t ReadCRC(void)
 uint32_t ReadAppSize(void)
 {
     return *(volatile uint32_t*)(PARAM_PAGE_ADDR + 4);
+}
+
+uint8_t ApplicationVectorsValid(uint32_t size)
+{
+    uint32_t appStack;
+    uint32_t appEntry;
+    uint32_t entryAddress;
+
+    if (size < VECTOR_TABLE_SIZE || size > MAIN_APP_SIZE_MAX_BYTES)
+        return 0;
+    appStack = *(volatile uint32_t*)MAIN_APP_FLASH_ADDR;
+    appEntry = *(volatile uint32_t*)(MAIN_APP_FLASH_ADDR + 4U);
+    entryAddress = appEntry & ~1U;
+    return appStack >= 0x20000000U && appStack <= 0x20004000U &&
+           (appEntry & 1U) != 0U && entryAddress >= MAIN_APP_FLASH_ADDR &&
+           entryAddress < (MAIN_APP_FLASH_ADDR + size);
+}
+
+uint8_t ApplicationIsValid(void)
+{
+    uint32_t expected_crc = ReadCRC();
+    uint32_t size = ReadAppSize();
+    if (expected_crc == 0xFFFFFFFFU || !ApplicationVectorsValid(size))
+        return 0;
+    return calculate_crc32((uint8_t*)MAIN_APP_FLASH_ADDR, size) == expected_crc;
 }
 
 void WriteAppSize(uint32_t size)
@@ -267,61 +308,97 @@ void Bootloader_Protocol_Handler(void)
     uint8_t cmd = usb_rx_buffer[0];
 
     if (cmd == CMD_START)
+    {
+        uint32_t requested_size;
+        bootloader_active = 0;
+        received_file_size = 0;
+        if (usb_rx_len != 5U)
         {
-            total_file_size = usb_rx_buffer[1] | (usb_rx_buffer[2] << 8) | (usb_rx_buffer[3] << 16) | (usb_rx_buffer[4] << 24);
-            write_address = MAIN_APP_FLASH_ADDR;
-            bootloader_active = 1;
-
-            //Bootloader_ShowProgress(0, total_file_size);
-            WriteBootParams(0xFFFFFFFF, 0xFFFFFFFF);  // Delete existing CRC
-
-            if (Flash_EraseAppArea(MAIN_APP_FLASH_ADDR, total_file_size) == 0) Send_USB_Response(ACK);
-            else Send_USB_Response(NACK);
+            Send_USB_Response(NACK);
+            usb_data_ready = 0;
+            return;
         }
+        requested_size = (uint32_t)usb_rx_buffer[1] |
+                         ((uint32_t)usb_rx_buffer[2] << 8) |
+                         ((uint32_t)usb_rx_buffer[3] << 16) |
+                         ((uint32_t)usb_rx_buffer[4] << 24);
+        if (requested_size < VECTOR_TABLE_SIZE || requested_size > MAIN_APP_SIZE_MAX_BYTES ||
+            !EraseBootParams())
+        {
+            Send_USB_Response(NACK);
+            usb_data_ready = 0;
+            return;
+        }
+        if (Flash_EraseAppArea(MAIN_APP_FLASH_ADDR, requested_size) != 0U)
+        {
+            Send_USB_Response(NACK);
+            usb_data_ready = 0;
+            return;
+        }
+        total_file_size = requested_size;
+        write_address = MAIN_APP_FLASH_ADDR;
+        bootloader_active = 1;
+        Send_USB_Response(ACK);
+    }
 
     else if (cmd == CMD_DATA && bootloader_active)
-        {
-            uint16_t len = usb_rx_buffer[1] | (usb_rx_buffer[2] << 8);
-            uint8_t *payload = &usb_rx_buffer[3];
+    {
+        uint16_t len;
+        uint32_t word_count;
+        uint32_t aligned_buffer[(MAX_DATA_PAYLOAD + 3U) / 4U];
 
-            // DİKKAT: Veriyi 4'ün katına (Word Alignment) yuvarlıyoruz!
-            uint32_t word_count = (len + 3) / 4;
-            uint32_t aligned_buffer[64]; // Maksimum paket boyutunu kaldıracak havuz
+        if (usb_rx_len < 3U)
+            goto data_rejected;
+        len = (uint16_t)((uint16_t)usb_rx_buffer[1] |
+                         ((uint16_t)usb_rx_buffer[2] << 8));
+        if (len == 0U || len > MAX_DATA_PAYLOAD || usb_rx_len != (uint32_t)len + 3U ||
+            received_file_size > total_file_size ||
+            len > total_file_size - received_file_size ||
+            (received_file_size + len < total_file_size && (len & 3U) != 0U))
+            goto data_rejected;
 
-            // 1. Buffer'ı 0xFF ile doldur (Boş kalan byte'lar Flash'ta 0xFF olarak kalmalıdır)
-            memset(aligned_buffer, 0xFF, sizeof(aligned_buffer));
+        word_count = ((uint32_t)len + 3U) / 4U;
+        memset(aligned_buffer, 0xFF, sizeof(aligned_buffer));
+        memcpy(aligned_buffer, &usb_rx_buffer[3], len);
+        if (Flash_WriteWordsNoErase(write_address, aligned_buffer, word_count) != 0U)
+            goto data_rejected;
 
-            // 2. Gelen 8-bitlik raw veriyi güvenli 32-bitlik havuza kopyala
-            memcpy(aligned_buffer, payload, len);
+        received_file_size += len;
+        write_address += word_count * 4U;
+        Send_USB_Response(ACK);
+        goto protocol_done;
 
-            // 3. Özel Flash.c fonksiyonumuzu çağırarak veriyi donanıma kazı
-            if (Flash_WriteWordsNoErase(write_address, aligned_buffer, word_count) == 0)
-            {
-                write_address += (word_count * 4); // Adresi başarılı yazılan byte kadar ileri sar
-                uint32_t writtenBytes = write_address - MAIN_APP_FLASH_ADDR;
-                //Bootloader_ShowProgress(writtenBytes, total_file_size);
-                Send_USB_Response(ACK);
-            }
-            else
-            {
-                Send_USB_Response(NACK); // Yazma hatası oluştuysa Python'a bildir
-            }
-        }
+data_rejected:
+        bootloader_active = 0;
+        Send_USB_Response(NACK);
+    }
     else if (cmd == CMD_END && bootloader_active)
+    {
+        uint32_t received_crc;
+        uint32_t calculated_flash_crc;
+        if (usb_rx_len != 5U || received_file_size != total_file_size ||
+            !ApplicationVectorsValid(total_file_size))
         {
-            uint32_t received_crc = usb_rx_buffer[1] | (usb_rx_buffer[2] << 8) | (usb_rx_buffer[3] << 16) | (usb_rx_buffer[4] << 24);
-            uint32_t calculated_flash_crc = calculate_crc32((uint8_t*)MAIN_APP_FLASH_ADDR, total_file_size);
+            bootloader_active = 0;
+            Send_USB_Response(NACK);
+            goto protocol_done;
+        }
+        received_crc = (uint32_t)usb_rx_buffer[1] |
+                       ((uint32_t)usb_rx_buffer[2] << 8) |
+                       ((uint32_t)usb_rx_buffer[3] << 16) |
+                       ((uint32_t)usb_rx_buffer[4] << 24);
+        calculated_flash_crc = calculate_crc32((uint8_t*)MAIN_APP_FLASH_ADDR, total_file_size);
 
-            if (calculated_flash_crc == received_crc)
-            {
-                // Python'dan gelen ile hesaplanan eşleşti! Güvenle parametreyi mühürle ve zıpla!
-                WriteBootParams(calculated_flash_crc, total_file_size);
-                Send_USB_Response(ACK);
-                HAL_Delay(200);
-                JumpToMainApp();
-            }
-            else
-            {
+        if (calculated_flash_crc == received_crc &&
+            WriteBootParams(calculated_flash_crc, total_file_size))
+        {
+            bootloader_active = 0;
+            Send_USB_Response(ACK);
+            HAL_Delay(200);
+            JumpToMainApp();
+        }
+        else
+        {
             uint8_t error_packet[5] = {NACK};
             error_packet[1] = (uint8_t)(calculated_flash_crc & 0xFF);
             error_packet[2] = (uint8_t)((calculated_flash_crc >> 8) & 0xFF);
@@ -331,6 +408,13 @@ void Bootloader_Protocol_Handler(void)
         }
         bootloader_active = 0;
     }
+    else
+    {
+        bootloader_active = 0;
+        Send_USB_Response(NACK);
+    }
+
+protocol_done:
     usb_data_ready = 0;
 }
 
@@ -425,20 +509,9 @@ int main(void)
 	    // ====================================================================
 	    // 1. ADIM: OTOMATİK ATLAMA GÜVENLİK KONTROLÜ (GÜÇ AÇILIŞI)
 	    // ====================================================================
-	    uint32_t expected_crc = ReadCRC();
-	    uint32_t saved_app_size = ReadAppSize();
-
-	    // Hafızada geçerli bir CRC ve mantıklı bir uygulama boyutu var mı? (Örn: max 96KB)
-	    if (expected_crc != 0xFFFFFFFF && saved_app_size > 0 && saved_app_size <= (96 * 1024))
+	    if (ApplicationIsValid())
 	    {
-	        // Flash'taki uygulamanın gerçek CRC'sini hesapla
-	        uint32_t current_flash_crc = calculate_crc32((uint8_t*)MAIN_APP_FLASH_ADDR, saved_app_size);
-
-	        if (current_flash_crc == expected_crc)
-	        {
-	            // EĞER HER ŞEY DOĞRUYSA: Hiç bekleme yapmadan DOĞRUDAN ana uygulamaya zıpla!
-	            JumpToMainApp();
-	        }
+	        JumpToMainApp();
 	    }
 
 	    // ====================================================================
@@ -464,17 +537,22 @@ int main(void)
 
 	            if (cmd == CMD_JUMP_ONLY)
 	            {
-	                WriteToDevice("Ham Emir: Uygulamaya atlanıyor...\r\n");
-	                Send_USB_Response(ACK);
-	                HAL_Delay(100);
-	                JumpToMainApp();
+	                if (ApplicationIsValid())
+	                {
+	                    WriteToDevice("Validated app: jumping...\r\n");
+	                    Send_USB_Response(ACK);
+	                    HAL_Delay(100);
+	                    JumpToMainApp();
+	                }
+	                else
+	                {
+	                    Send_USB_Response(NACK);
+	                }
 	            }
 	            else if (cmd == CMD_ERASE_CRC)
 	            {
-	                WriteToDevice("Ham Emir: CRC Alanı temizleniyor...\r\n");
-	                uint8_t invalid_crc[4] = {0xFF, 0xFF, 0xFF, 0xFF};
-	                WriteCRC(invalid_crc);
-	                Send_USB_Response(ACK);
+	                WriteToDevice("Invalidating application seal...\r\n");
+	                Send_USB_Response(EraseBootParams() ? ACK : NACK);
 	            }
 	            else
 	            {

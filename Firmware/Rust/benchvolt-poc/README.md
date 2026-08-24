@@ -38,9 +38,10 @@ parsing, application state access, ADC/I2C work, and display drawing remain in
 the main loop. Queue overload fails boundedly with `ERR:BUSY`; display or sensor
 latency cannot prevent USB reset, enumeration, or endpoint servicing.
 
-The existing bootloader is not built or modified by this crate. This
-application links at `0x08008000` and is limited to the 92 KiB application
-partition ending before `0x0801f000`.
+The companion C bootloader and this crate share a hardened partition contract.
+This application links at `0x08008000` and is limited to the 92 KiB application
+partition ending before `0x0801f000`; upload erase/write validation cannot enter
+the settings page or final boot-metadata page.
 
 CH1–CH5 current limits, CH4/CH5 voltage setpoints, the CH4/CH5 CV/CC modes,
 USB-PD input protection limit, and temperature unit are persisted as versioned,
@@ -172,9 +173,10 @@ valid and at or below the limit; outputs do not automatically restart.
 ## Headless build and flash runbook
 
 Use the checked-in uploader rather than importing the desktop GUI. It uses the
-stock protocol's 60-byte payloads (one 64-byte CDC packet including the
+hardened protocol's 60-byte payloads (one 64-byte CDC packet including the
 header), validates every ACK, and computes the bootloader-compatible STM32
-CRC. It never writes the bootloader, option bytes, or protection settings.
+CRC. Both endpoints enforce the 92 KiB partition. It never writes the
+bootloader, option bytes, or protection settings.
 
 One-time Python setup:
 

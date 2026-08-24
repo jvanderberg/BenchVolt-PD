@@ -1,4 +1,5 @@
 #include "Flash.h"
+#include "main.h"
 #include "stm32f0xx_hal.h"
 #include "string.h"
 #include "stdio.h"
@@ -75,6 +76,11 @@ uint32_t Flash_EraseAppArea(uint32_t StartAddress, uint32_t SizeInBytes) {
     FLASH_EraseInitTypeDef EraseInitStruct;
     uint32_t PageError;
 
+    if (StartAddress != MAIN_APP_FLASH_ADDR || SizeInBytes == 0U ||
+        SizeInBytes > MAIN_APP_SIZE_MAX_BYTES) {
+        return HAL_FLASH_ERROR_PROG;
+    }
+
     HAL_FLASH_Unlock();
 
     // Calculate the number of pages to erase (Round up)
@@ -98,6 +104,16 @@ uint32_t Flash_EraseAppArea(uint32_t StartAddress, uint32_t SizeInBytes) {
   * @brief  Writes Word (32-bit) directly to the specified address without erasing.
   */
 uint32_t Flash_WriteWordsNoErase(uint32_t StartAddress, uint32_t *Data, uint32_t WordCount) {
+    uint32_t byte_count;
+    if (Data == NULL || WordCount == 0U || WordCount > (UINT32_MAX / 4U)) {
+        return HAL_FLASH_ERROR_PROG;
+    }
+    byte_count = WordCount * 4U;
+    if (StartAddress < MAIN_APP_FLASH_ADDR || StartAddress > MAIN_APP_END_ADDR ||
+        byte_count > (MAIN_APP_END_ADDR - StartAddress)) {
+        return HAL_FLASH_ERROR_PROG;
+    }
+
     HAL_FLASH_Unlock();
 
     for (uint32_t i = 0; i < WordCount; i++) {

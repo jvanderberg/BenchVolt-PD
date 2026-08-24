@@ -33,9 +33,20 @@ extern "C" {
 /* USER CODE BEGIN Includes */
 
 // Memory Map Definitions based on 128KB total Flash
-#define BOOTLOADER_SIZE_BYTES       (32 * 1024)   // 32 KB Bootloader
-#define PARAM_FLASH_SIZE_BYTES      (2 * 1024)    // 2 KB Configuration Page (1 Page)
-#define MAIN_APP_SIZE_MAX_BYTES     (94 * 1024)   // 94 KB Maximum allowed Main App size
+#define BOOTLOADER_SIZE_BYTES       (32U * 1024U)
+#define MAIN_APP_FLASH_ADDR         0x08008000U
+#define MAIN_APP_SIZE_MAX_BYTES     (92U * 1024U)
+#define MAIN_APP_END_ADDR           (MAIN_APP_FLASH_ADDR + MAIN_APP_SIZE_MAX_BYTES)
+#define SETTINGS_PAGE_ADDR          0x0801F000U
+#define PARAM_PAGE_ADDR             0x0801F800U
+#define FLASH_END_ADDR              0x08020000U
+
+#if MAIN_APP_END_ADDR != SETTINGS_PAGE_ADDR
+#error "Application partition must end at the settings page"
+#endif
+#if (PARAM_PAGE_ADDR + 0x800U) != FLASH_END_ADDR
+#error "Boot metadata must occupy the final flash page"
+#endif
 
 
 

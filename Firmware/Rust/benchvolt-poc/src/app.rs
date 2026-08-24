@@ -946,8 +946,17 @@ impl Reducer for AppReducer {
                                 } else {
                                     (800, 22_000)
                                 };
+                                // Preserve 10 mV single-step precision, but give
+                                // the wide CH4/CH5 ranges a useful fast-spin rate.
+                                // Other editors retain the shared acceleration
+                                // unchanged.
+                                let step_mv = if direction.unsigned_abs() >= 8 {
+                                    25
+                                } else {
+                                    10
+                                };
                                 let adjusted =
-                                    i32::from(output.setpoint_mv) + i32::from(direction) * 10;
+                                    i32::from(output.setpoint_mv) + i32::from(direction) * step_mv;
                                 let adjusted = adjusted.clamp(minimum, maximum) as u16;
                                 if adjusted == output.setpoint_mv {
                                     false
@@ -1442,6 +1451,22 @@ mod tests {
             assert_eq!(waveform.max_frequency_millihz(), 120_000);
         }
         assert_eq!(AwgWaveform::Square.max_frequency_millihz(), 125_000);
+    }
+
+    #[test]
+    fn voltage_edit_keeps_fine_steps_and_boosts_only_fast_spin() {
+        let mut state = AppState::new(true, None);
+        state.screen = Screen::Channel(4);
+        state.focus = ControlFocus::Voltage;
+
+        let fine = AppReducer::reduce(&state, Action::AdjustFocused(1));
+        assert_eq!(fine.channels[4].setpoint_mv, 12_010);
+
+        let fast = AppReducer::reduce(&fine, Action::AdjustFocused(16));
+        assert_eq!(fast.channels[4].setpoint_mv, 12_410);
+
+        let reverse = AppReducer::reduce(&fast, Action::AdjustFocused(-16));
+        assert_eq!(reverse.channels[4].setpoint_mv, 12_010);
     }
 
     #[test]

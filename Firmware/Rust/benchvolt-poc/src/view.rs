@@ -2,12 +2,12 @@ use core::fmt::Write as _;
 
 use embedded_graphics::{
     mono_font::{
-        ascii::{FONT_10X20, FONT_6X10, FONT_8X13_BOLD, FONT_9X18_BOLD},
+        ascii::{FONT_10X20, FONT_6X10, FONT_8X13_BOLD},
         MonoTextStyle,
     },
     pixelcolor::Rgb565,
     prelude::*,
-    primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
+    primitives::{Circle, PrimitiveStyle, Rectangle},
     text::{Baseline, Text},
 };
 use heapless::String;
@@ -142,8 +142,30 @@ where
         Self { display }
     }
 
+    fn fill_capsule(&mut self, top_left: Point, width: u32, height: u32, color: Rgb565) {
+        debug_assert!(width >= height);
+        let radius = height / 2;
+        let right = Point::new(top_left.x + (width - height) as i32, top_left.y);
+
+        for origin in [top_left, right] {
+            Circle::new(origin, height)
+                .into_styled(PrimitiveStyle::with_fill(color))
+                .draw(&mut self.display)
+                .ok();
+        }
+        self.display
+            .fill_solid(
+                &Rectangle::new(
+                    Point::new(top_left.x + radius as i32, top_left.y),
+                    Size::new(width - 2 * radius, height),
+                ),
+                color,
+            )
+            .ok();
+    }
+
     fn draw_temperature(&mut self, state: &AppState) {
-        let mut text: String<20> = String::new();
+        let mut text: String<32> = String::new();
         match temperature_projection(state) {
             TemperatureProjection::Invalid => {
                 text.push_str("T:--.-C").ok();
@@ -227,14 +249,14 @@ where
     }
 
     fn draw_channel_number(&mut self, index: usize) {
-        let mut text: String<2> = String::new();
+        let mut text: String<32> = String::new();
         write!(&mut text, "{}", index + 1).ok();
         self.clear_channel_cell(0, index);
         self.draw_channel_text(text.as_str(), 0, index, Rgb565::WHITE);
     }
 
     fn draw_fixed_value(&mut self, value: u16, column: usize, index: usize) {
-        let mut text: String<8> = String::new();
+        let mut text: String<32> = String::new();
         write!(&mut text, "{}.{:02}", value / 100, value % 100).ok();
         self.clear_channel_cell(column, index);
         self.draw_channel_text(text.as_str(), column, index, Rgb565::WHITE);
@@ -279,26 +301,23 @@ where
         const TRACK_WIDTH: i32 = 27;
         const KNOB_DIAMETER: i32 = 9;
         const KNOB_INSET: i32 = 2;
-        Rectangle::new(
+        self.fill_capsule(
             Point::new(TRACK_X, top + 6),
-            Size::new(TRACK_WIDTH as u32, 13),
-        )
-        .into_styled(
-            PrimitiveStyleBuilder::new()
-                .fill_color(track_color)
-                .stroke_color(if focused { Rgb565::CYAN } else { track_color })
-                .stroke_width(if focused { 1 } else { 0 })
-                .build(),
-        )
-        .draw(&mut self.display)
-        .ok();
+            TRACK_WIDTH as u32,
+            13,
+            track_color,
+        );
         let knob_x = match projection.status {
             StatusProjection::On => TRACK_X + TRACK_WIDTH - KNOB_INSET - KNOB_DIAMETER,
             StatusProjection::Wait => TRACK_X + (TRACK_WIDTH - KNOB_DIAMETER) / 2,
             StatusProjection::Off | StatusProjection::Fault => TRACK_X + KNOB_INSET,
         };
         Circle::new(Point::new(knob_x, top + 8), KNOB_DIAMETER as u32)
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .into_styled(PrimitiveStyle::with_fill(if focused {
+                Rgb565::CYAN
+            } else {
+                Rgb565::WHITE
+            }))
             .draw(&mut self.display)
             .ok();
         if projection.regulation_mode == RegulationMode::Cc {
@@ -395,7 +414,7 @@ where
     }
 
     fn draw_hero(&mut self, value: Option<u32>, x: i32, suffix: &str) {
-        let mut text: String<8> = String::new();
+        let mut text: String<32> = String::new();
         match value {
             Some(value) => write!(&mut text, "{}.{:02}", value / 100, value % 100).ok(),
             None => text.push_str("--.--").ok(),
@@ -462,7 +481,7 @@ where
     }
 
     fn draw_power(&mut self, power_centiwatts: Option<u32>) {
-        let mut text: String<16> = String::new();
+        let mut text: String<32> = String::new();
         match power_centiwatts {
             Some(value) => write!(&mut text, "{}.{:02} W", value / 100, value % 100).ok(),
             None => text.push_str("--.-- W").ok(),
@@ -516,7 +535,7 @@ where
         suffix: &str,
         focused: bool,
     ) {
-        let mut text: String<12> = String::new();
+        let mut text: String<32> = String::new();
         write!(&mut text, "{}.{:02}{}", value / 100, value % 100, suffix).ok();
         // Preserve the focus frame; value edits repaint only its interior.
         self.clear_detail_region(x + 2, 130, width - 4, 27);
@@ -524,7 +543,7 @@ where
             text.as_str(),
             Point::new(x + 8, 135),
             MonoTextStyle::new(
-                &FONT_9X18_BOLD,
+                &FONT_10X20,
                 if focused { Rgb565::CYAN } else { Rgb565::WHITE },
             ),
             Baseline::Top,
@@ -572,23 +591,18 @@ where
             StatusProjection::Wait => Rgb565::new(24, 38, 4),
             StatusProjection::Off | StatusProjection::Fault => Rgb565::new(24, 5, 5),
         };
-        Rectangle::new(Point::new(249, 130), Size::new(58, 28))
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .fill_color(track_color)
-                    .stroke_color(if focused { Rgb565::CYAN } else { track_color })
-                    .stroke_width(if focused { 2 } else { 0 })
-                    .build(),
-            )
-            .draw(&mut self.display)
-            .ok();
+        self.fill_capsule(Point::new(249, 130), 58, 28, track_color);
         let knob_x = if matches!(status, StatusProjection::On) {
             282
         } else {
             252
         };
         Circle::new(Point::new(knob_x, 132), 22)
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .into_styled(PrimitiveStyle::with_fill(if focused {
+                Rgb565::CYAN
+            } else {
+                Rgb565::WHITE
+            }))
             .draw(&mut self.display)
             .ok();
     }
@@ -609,7 +623,7 @@ where
             },
             Point::new(107, 135),
             MonoTextStyle::new(
-                &FONT_9X18_BOLD,
+                &FONT_10X20,
                 if projection.regulating_current {
                     Rgb565::GREEN
                 } else if focused {
@@ -629,7 +643,7 @@ where
         let projection = detail_projection(channel, state.focus);
         self.display.clear(Rgb565::BLACK).ok();
 
-        let mut title: String<12> = String::new();
+        let mut title: String<32> = String::new();
         write!(&mut title, "Channel {}", index + 1).ok();
         Text::with_baseline(
             title.as_str(),
@@ -670,7 +684,7 @@ where
 
     fn draw_sink_limit_value(&mut self, projection: SinkProjection) {
         self.clear_detail_region(112, 130, 98, 27);
-        let mut text: String<12> = String::new();
+        let mut text: String<32> = String::new();
         write!(
             &mut text,
             "{}.{:02}A",
@@ -682,7 +696,7 @@ where
             text.as_str(),
             Point::new(118, 135),
             MonoTextStyle::new(
-                &FONT_9X18_BOLD,
+                &FONT_10X20,
                 if projection.over_limit {
                     Rgb565::RED
                 } else if projection.focused {
@@ -699,7 +713,7 @@ where
 
     fn draw_sink_pd_status(&mut self, projection: SinkProjection) {
         self.clear_detail_region(214, 128, 106, 36);
-        let mut text: String<24> = String::new();
+        let mut text: String<32> = String::new();
         let color = match projection.pd_status {
             SinkPdStatus::Idle => {
                 text.push_str("PD IDLE").ok();
@@ -887,7 +901,7 @@ where
         Text::with_baseline(
             item,
             Point::new(30, y),
-            MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::WHITE),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
             Baseline::Top,
         )
         .draw(&mut self.display)
@@ -1163,7 +1177,7 @@ where
                 },
             )
             .ok();
-        let mut value: String<24> = String::new();
+        let mut value: String<32> = String::new();
         match index {
             0 => write!(&mut value, "CH{}", state.awg.channel + 1).ok(),
             1 => value
@@ -1277,7 +1291,7 @@ where
         } else {
             state.awg.channel + 1
         };
-        let mut heading: String<16> = String::new();
+        let mut heading: String<32> = String::new();
         write!(&mut heading, "CH{} LOAD", channel).ok();
         Text::with_baseline(
             heading.as_str(),
@@ -1296,7 +1310,7 @@ where
                 Rgb565::BLACK,
             )
             .ok();
-        let mut current: String<16> = String::new();
+        let mut current: String<32> = String::new();
         if state.awg_load.valid {
             write!(
                 &mut current,
@@ -1325,7 +1339,7 @@ where
                 Rgb565::BLACK,
             )
             .ok();
-        let mut power: String<16> = String::new();
+        let mut power: String<32> = String::new();
         if state.awg_load.valid {
             write!(
                 &mut power,
@@ -1352,7 +1366,7 @@ where
         Text::with_baseline(
             "BenchVolt Rust POC",
             Point::new(65, 72),
-            MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::WHITE),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
             Baseline::Top,
         )
         .draw(&mut self.display)

@@ -228,8 +228,10 @@ header), validates every ACK, and computes the bootloader-compatible STM32
 CRC. Both endpoints enforce the 92 KiB partition. It never writes the
 bootloader, option bytes, or protection settings.
 
-Before hardware work, run the repository-native regression gate from this
-directory:
+`tools/check.sh` is the single canonical test/build/image command. Do not run a
+bare `cargo test` here: `.cargo/config.toml` intentionally defaults Cargo to the
+Thumb target, while the test harness must use the detected host target. Before
+hardware work, run from this directory:
 
 ```sh
 tools/check.sh
@@ -238,42 +240,38 @@ tools/check.sh
 It runs the host reducer and service tests, Rust lints, uploader tests, the
 Thumb release build, exact binary partition validation, and host-Clang syntax
 checks for both C firmware projects. It does not connect to or flash a device.
+The gate rejects an otherwise valid release image if less than 1 KiB remains in
+the application partition, preserving room for safe maintenance changes.
 Whole-tree formatting is not part of this gate yet because committed legacy
 modules still carry pre-existing rustfmt differences.
 
-One-time Python setup:
+For a connected upload, use `tools/flash_latest.sh`. It runs the complete gate,
+builds a fresh binary, validates its partition bounds, then invokes the checked-
+in uploader. It also reuses an existing pyserial installation instead of
+reinstalling it. List serial ports or flash with:
 
 ```sh
-python3 -m venv /tmp/benchvolt-flash
-/tmp/benchvolt-flash/bin/pip install pyserial
+tools/flash_latest.sh --list
+tools/flash_latest.sh /dev/cu.usbmodemBOOTLOADER_PORT
+tools/flash_latest.sh --from-app /dev/cu.usbmodemRUST_APPLICATION_PORT
 ```
 
-Build against the published MIT-licensed Reducto crate and produce the binary:
+The `--from-app` form queries `MEAS:ALL?` and refuses to reset unless all five
+physical outputs and both arbitrary-waveform channels are off. It then uses the
+firmware's fail-closed `JUMP:BOOTLOADER` path and discovers the re-enumerated
+stock STM32 port before uploading.
+
+Only if none of the recognized Python environments has pyserial, create the
+project-local environment once:
 
 ```sh
-cargo build --release
-arm-none-eabi-objcopy -O binary \
-  target/thumbv6m-none-eabi/release/benchvolt-poc \
-  target/thumbv6m-none-eabi/release/benchvolt-poc.bin
+python3 -m venv .venv
+.venv/bin/pip install pyserial
 ```
 
-Run the reducer/power-service safety tests on the host before building for the
-MCU. They inject a failure at every driver boundary and run 10,000 randomized
-request/failure transitions:
-
-```sh
-host_triple=$(rustc -vV | sed -n 's/^host: //p')
-cargo test --lib --target "$host_triple"
-```
-
-If the Rust application is running, send `JUMP:BOOTLOADER\n` over its CDC port.
-Then identify the re-enumerated stock `STM32 Virtual ComPort` and flash:
-
-```sh
-/tmp/benchvolt-flash/bin/python tools/flash_poc.py \
-  /dev/cu.usbmodemBOOTLOADER_PORT \
-  target/thumbv6m-none-eabi/release/benchvolt-poc.bin
-```
+If the Rust application is running, prefer the `--from-app` form above so the
+output-state check, safe transition, port discovery, and upload remain one
+repeatable operation.
 
 On any missing ACK, NACK, or CRC mismatch, the uploader stops immediately and
 does not send `CMD_END` again. The device remains in the stock bootloader. The

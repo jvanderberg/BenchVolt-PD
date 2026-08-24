@@ -22,7 +22,7 @@ pub(crate) fn handle_usb_command(
 ) -> UsbIntent {
     let command = command.strip_suffix(b"\r").unwrap_or(command);
     for channel in 4..=5u8 {
-        let mut status_command: String<40> = String::new();
+        let mut status_command: String<64> = String::new();
         write!(&mut status_command, "SOUR:WAVE:CH{channel}:ARB:STAT?").ok();
         if command == status_command.as_bytes() {
             let owner = state.awg_source == AwgSource::Arbitrary
@@ -53,7 +53,7 @@ pub(crate) fn handle_usb_command(
             queue_usb_response(response.as_bytes());
             return UsbIntent::None;
         }
-        let mut stop_command: String<40> = String::new();
+        let mut stop_command: String<64> = String::new();
         write!(&mut stop_command, "SOUR:WAVE:CH{channel}:ARB:STOP").ok();
         if command == stop_command.as_bytes() {
             return UsbIntent::ArbStop(channel - 1);
@@ -171,7 +171,7 @@ pub(crate) fn handle_usb_command(
         }
         if rest.get(1..) == Some(b"?") {
             let limit = state.channels[usize::from(channel)].current_limit_ma;
-            let mut response: String<20> = String::new();
+            let mut response: String<32> = String::new();
             write!(&mut response, "{}.{:03}A\r\n", limit / 1_000, limit % 1_000).ok();
             queue_usb_response(response.as_bytes());
             return UsbIntent::None;
@@ -197,7 +197,7 @@ pub(crate) fn handle_usb_command(
         b"*IDN?" => queue_usb_response(b"BenchVolt-PD,RUST-POC,S/N:2026-01\r\n"),
         b"SYST:BUILD?" => queue_usb_response(b"Rust POC 0.1.0\r\n"),
         b"SYST:HWERR?" => {
-            let mut response: String<48> = String::new();
+            let mut response: String<64> = String::new();
             write!(
                 &mut response,
                 "OP{} ERR{} RETRIES{}\r\n",
@@ -235,7 +235,7 @@ pub(crate) fn handle_usb_command(
             queue_usb_response(response.as_bytes());
         }
         b"SYST:TPS:CH5?" => {
-            let mut response: String<16> = String::new();
+            let mut response: String<32> = String::new();
             write!(
                 &mut response,
                 "0x{:02X}\r\n",
@@ -275,7 +275,7 @@ pub(crate) fn handle_usb_command(
             queue_usb_response(response.as_bytes());
         }
         b"SYST:TICK?" => {
-            let mut response: String<16> = String::new();
+            let mut response: String<32> = String::new();
             write!(&mut response, "{}\r\n", monotonic_ms()).ok();
             queue_usb_response(response.as_bytes());
         }
@@ -286,7 +286,7 @@ pub(crate) fn handle_usb_command(
         b"MEAS:CH1?" | b"MEAS:CH2?" | b"MEAS:CH3?" | b"MEAS:CH4?" | b"MEAS:CH5?" => {
             let channel = usize::from(command[7] - b'1');
             let measurement = state.channels[channel].measurement;
-            let mut response: String<40> = String::new();
+            let mut response: String<64> = String::new();
             if measurement.valid {
                 write!(
                     &mut response,
@@ -304,7 +304,7 @@ pub(crate) fn handle_usb_command(
         }
         b"MEAS:SINK?" => {
             let measurement = state.sink;
-            let mut response: String<48> = String::new();
+            let mut response: String<64> = String::new();
             if measurement.valid {
                 let milliwatts = u32::from(measurement.millivolts)
                     .saturating_mul(u32::from(measurement.milliamps))
@@ -326,7 +326,7 @@ pub(crate) fn handle_usb_command(
             queue_usb_response(response.as_bytes());
         }
         b"SINK:LIMIT?" => {
-            let mut response: String<20> = String::new();
+            let mut response: String<32> = String::new();
             write!(
                 &mut response,
                 "{}.{:03}A\r\n",

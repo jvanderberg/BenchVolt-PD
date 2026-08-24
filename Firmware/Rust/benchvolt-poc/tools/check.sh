@@ -30,7 +30,7 @@ echo "Rust host lints"
 cargo clippy --locked --lib --target "$host_target" -- -D warnings
 
 echo "Uploader tests"
-PYTHONPATH="$tool_dir" python3 -m unittest tools/test_flash_poc.py
+PYTHONPATH="$tool_dir" python3 -m unittest discover -s tools -p 'test_*.py'
 
 echo "Thumb release lints and build"
 cargo clippy --locked --release --target "$thumb_target" -- -D warnings
@@ -47,7 +47,13 @@ firmware = path.read_bytes()
 flash_poc.validate_image(firmware)
 capacity = flash_poc.SETTINGS_ORIGIN - flash_poc.APP_ORIGIN
 end = flash_poc.APP_ORIGIN + len(firmware)
-print(f"image: {len(firmware)} bytes; end=0x{end:08x}; free={capacity - len(firmware)} bytes")
+free = capacity - len(firmware)
+minimum_free = 1024
+print(f"image: {len(firmware)} bytes; end=0x{end:08x}; free={free} bytes")
+if free < minimum_free:
+    raise SystemExit(
+        f"release image leaves {free} bytes; require at least {minimum_free} bytes free"
+    )
 ' "$image"
 
 common_c_flags=(

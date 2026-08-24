@@ -25,7 +25,7 @@ use benchvolt_poc::awg::Scheduler as AwgScheduler;
 use benchvolt_poc::input_policy::{encoder_action, ButtonTracker};
 use benchvolt_poc::measurement::MeasurementWindows;
 use benchvolt_poc::monitoring::{ProtectionService, TpsStatusObservation};
-use benchvolt_poc::pd::{Negotiator as PdNegotiator, PdEvent};
+use benchvolt_poc::pd::{Service as PdService, ServiceEvent as PdServiceEvent};
 use benchvolt_poc::power::{
     execute_effect, execute_global_shutdown, FirmwareEffectPlanner, PowerDriver, Rail,
     OVERTEMPERATURE_TRIP_SIXTEENTHS_C,
@@ -417,7 +417,6 @@ fn main() -> ! {
     cortex_m::peripheral::NVIC::pend(pac::Interrupt::USB);
 
     let mut temperature_ticks = 0u16;
-    let mut pd_ticks = 0u16;
     let mut measurement_ticks = 0u16;
     let mut display_measurement_ticks = 0u16;
     let mut awg_load_ticks = 0u16;
@@ -429,7 +428,7 @@ fn main() -> ! {
     let mut pending_arb_ack: Option<ArbStart> = None;
     let mut arb_upload = ArbUploadSession::new();
     let mut settings_effect = SettingsDebouncer::new(PersistentSettings::from_state(app.state()));
-    let mut pd_negotiator = PdNegotiator::new(app.state().sink_current_limit_ma);
+    let mut pd_service = PdService::new(app.state().sink_current_limit_ma);
     let mut input_ticks = monotonic_ms();
     let mut service_tick = input_ticks;
     let mut health_ticks = 0u32;
@@ -678,33 +677,36 @@ fn main() -> ! {
         service_tick = input_ticks;
         health_ticks = health_ticks.saturating_add(u32::from(elapsed_ms));
         temperature_ticks = temperature_ticks.wrapping_add(elapsed_ms);
-        pd_ticks = pd_ticks.wrapping_add(elapsed_ms);
         measurement_ticks = measurement_ticks.wrapping_add(elapsed_ms);
         display_measurement_ticks = display_measurement_ticks.wrapping_add(elapsed_ms);
         awg_load_ticks = awg_load_ticks.wrapping_add(elapsed_ms);
 
-        if pd_ticks >= 20 {
-            pd_ticks = 0;
-            let outputs_off = app
-                .state()
-                .channels
-                .iter()
-                .all(|output| !output.requested_enabled && !output.physical_enabled);
-            if outputs_off && pd_negotiator.current_cap_ma() != app.state().sink_current_limit_ma {
-                dispatch_app(&mut app, &mut power_driver, Action::PdNegotiationStarted);
-                pd_negotiator.restart(app.state().sink_current_limit_ma);
-            }
-            let event = pd_negotiator.step(
-                &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
+        let outputs_off = app
+            .state()
+            .channels
+            .iter()
+            .all(|output| !output.requested_enabled && !output.physical_enabled);
+        for event in pd_service
+            .tick(
+                elapsed_ms,
                 input_ticks,
-            );
-            if let Some(event) = event {
-                let action = match event {
-                    PdEvent::Negotiated(contract) => Action::PdNegotiated(contract),
-                    PdEvent::Lost(error) => Action::PdFailed(error),
-                };
-                dispatch_app(&mut app, &mut power_driver, action);
-            }
+                outputs_off,
+                app.state().sink_current_limit_ma,
+                &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
+            )
+            .into_iter()
+            .flatten()
+        {
+            let action = match event {
+                PdServiceEvent::NegotiationStarted => Action::PdNegotiationStarted,
+                PdServiceEvent::Pd(benchvolt_poc::pd::PdEvent::Negotiated(contract)) => {
+                    Action::PdNegotiated(contract)
+                }
+                PdServiceEvent::Pd(benchvolt_poc::pd::PdEvent::Lost(error)) => {
+                    Action::PdFailed(error)
+                }
+            };
+            dispatch_app(&mut app, &mut power_driver, action);
         }
 
         let (direction, accelerated) = take_encoder_adjustment(

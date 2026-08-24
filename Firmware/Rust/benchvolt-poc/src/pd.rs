@@ -170,6 +170,48 @@ pub enum PdEvent {
     Lost(PdError),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceEvent {
+    NegotiationStarted,
+    Pd(PdEvent),
+}
+
+pub struct Service {
+    negotiator: Negotiator,
+    cadence_ms: u16,
+}
+
+impl Service {
+    pub const fn new(current_cap_ma: u16) -> Self {
+        Self {
+            negotiator: Negotiator::new(current_cap_ma),
+            cadence_ms: 0,
+        }
+    }
+
+    pub fn tick<B: PdBus>(
+        &mut self,
+        elapsed_ms: u16,
+        now: u16,
+        outputs_off: bool,
+        requested_current_cap_ma: u16,
+        bus: &mut B,
+    ) -> [Option<ServiceEvent>; 2] {
+        self.cadence_ms = self.cadence_ms.wrapping_add(elapsed_ms);
+        if self.cadence_ms < 20 {
+            return [None; 2];
+        }
+        self.cadence_ms = 0;
+        let mut events = [None; 2];
+        if outputs_off && self.negotiator.current_cap_ma() != requested_current_cap_ma {
+            self.negotiator.restart(requested_current_cap_ma);
+            events[0] = Some(ServiceEvent::NegotiationStarted);
+        }
+        events[1] = self.negotiator.step(bus, now).map(ServiceEvent::Pd);
+        events
+    }
+}
+
 pub struct Negotiator {
     state: State,
     current_cap_ma: u16,
@@ -377,6 +419,32 @@ mod tests {
 
     use super::*;
     use std::{collections::VecDeque, vec, vec::Vec};
+
+    struct FailingBus;
+
+    impl PdBus for FailingBus {
+        fn read(&mut self, _: u8, _: &mut [u8]) -> Result<(), BusError> {
+            Err(BusError)
+        }
+
+        fn write(&mut self, _: u8, _: &[u8]) -> Result<(), BusError> {
+            Err(BusError)
+        }
+    }
+
+    #[test]
+    fn service_owns_cadence_and_only_restarts_current_limit_while_outputs_are_off() {
+        let mut service = Service::new(3_000);
+        let mut bus = FailingBus;
+        assert_eq!(service.tick(19, 19, true, 2_000, &mut bus), [None; 2]);
+        assert_eq!(
+            service.tick(1, 20, false, 2_000, &mut bus),
+            [None, Some(ServiceEvent::Pd(PdEvent::Lost(PdError::Bus)))]
+        );
+
+        let events = service.tick(20, 40, true, 2_000, &mut bus);
+        assert_eq!(events[0], Some(ServiceEvent::NegotiationStarted));
+    }
 
     fn fixed(millivolts: u16, milliamps: u16) -> u32 {
         encode_sink_fixed_pdo(millivolts, milliamps).unwrap()

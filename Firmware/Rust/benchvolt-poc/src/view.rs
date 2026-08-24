@@ -7,9 +7,7 @@ use embedded_graphics::{
     },
     pixelcolor::Rgb565,
     prelude::*,
-    primitives::{
-        Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle,
-    },
+    primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle},
     text::{Baseline, Text},
 };
 use heapless::String;
@@ -342,18 +340,22 @@ where
     }
 
     fn draw_table_grid(&mut self) {
-        let style = PrimitiveStyle::with_stroke(Rgb565::new(8, 16, 16), 1);
+        let color = Rgb565::new(8, 16, 16);
         for x in COLUMN_EDGES {
-            Line::new(Point::new(x, TABLE_TOP), Point::new(x, TABLE_BOTTOM))
-                .into_styled(style)
-                .draw(&mut self.display)
+            self.display
+                .fill_solid(
+                    &Rectangle::new(
+                        Point::new(x, TABLE_TOP),
+                        Size::new(1, (TABLE_BOTTOM - TABLE_TOP + 1) as u32),
+                    ),
+                    color,
+                )
                 .ok();
         }
         for row in 0..=5 {
             let y = HEADER_BOTTOM + row * ROW_HEIGHT;
-            Line::new(Point::new(0, y), Point::new(319, y))
-                .into_styled(style)
-                .draw(&mut self.display)
+            self.display
+                .fill_solid(&Rectangle::new(Point::new(0, y), Size::new(320, 1)), color)
                 .ok();
         }
     }
@@ -860,9 +862,11 @@ where
         .ok();
         self.draw_recovery_status(state);
         self.draw_temperature(state);
-        Line::new(Point::new(0, TABLE_TOP), Point::new(319, TABLE_TOP))
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
-            .draw(&mut self.display)
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(0, TABLE_TOP), Size::new(320, 1)),
+                Rgb565::WHITE,
+            )
             .ok();
         for (column, label) in ["CH", "SET", "LIM", "VOLTS", "AMPS", "STATE"]
             .iter()
@@ -891,9 +895,11 @@ where
         )
         .draw(&mut self.display)
         .ok();
-        Line::new(Point::new(0, 27), Point::new(319, 27))
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(8, 16, 16), 1))
-            .draw(&mut self.display)
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(0, 27), Size::new(320, 1)),
+                Rgb565::new(8, 16, 16),
+            )
             .ok();
         for (index, item) in items.iter().enumerate() {
             self.draw_menu_item(item, index, usize::from(state.menu_selection) == index);
@@ -1128,13 +1134,17 @@ where
         )
         .draw(&mut self.display)
         .ok();
-        Line::new(Point::new(0, 27), Point::new(319, 27))
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(8, 16, 16), 1))
-            .draw(&mut self.display)
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(0, 27), Size::new(320, 1)),
+                Rgb565::new(8, 16, 16),
+            )
             .ok();
-        Line::new(Point::new(198, 27), Point::new(198, 169))
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(8, 16, 16), 1))
-            .draw(&mut self.display)
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(198, 27), Size::new(1, 143)),
+                Rgb565::new(8, 16, 16),
+            )
             .ok();
         for index in 0..8 {
             self.draw_awg_row(state, index);

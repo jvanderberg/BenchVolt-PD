@@ -1,6 +1,14 @@
 use crate::app::AppState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SinkPdStatus {
+    Negotiating,
+    Ready(crate::pd::Contract),
+    Error(crate::pd::PdError),
+    Fault(crate::app::Fault),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SinkProjection {
     pub voltage_centivolts: Option<u16>,
     pub current_centiamps: Option<u16>,
@@ -8,6 +16,7 @@ pub struct SinkProjection {
     pub limit_centiamps: u16,
     pub focused: bool,
     pub over_limit: bool,
+    pub pd_status: SinkPdStatus,
 }
 
 pub fn sink_projection(state: &AppState) -> SinkProjection {
@@ -22,6 +31,15 @@ pub fn sink_projection(state: &AppState) -> SinkProjection {
         focused: state.focus == crate::app::ControlFocus::CurrentLimit,
         over_limit: state.sink_fault != crate::app::Fault::None
             || (state.sink.valid && state.sink.milliamps > state.sink_current_limit_ma),
+        pd_status: if state.sink_fault != crate::app::Fault::None {
+            SinkPdStatus::Fault(state.sink_fault)
+        } else if let Some(contract) = state.pd_contract {
+            SinkPdStatus::Ready(contract)
+        } else if let Some(error) = state.pd_error {
+            SinkPdStatus::Error(error)
+        } else {
+            SinkPdStatus::Negotiating
+        },
     }
 }
 
@@ -103,6 +121,21 @@ mod tests {
         let projection = sink_projection(&state);
         assert!(projection.over_limit);
         assert_eq!(projection.current_centiamps, Some(10));
+        assert_eq!(projection.pd_status, SinkPdStatus::Fault(crate::app::Fault::OverCurrent));
+    }
+
+    #[test]
+    fn sink_projection_exposes_negotiated_contract_status() {
+        let mut state = AppState::new(true, None);
+        let contract = crate::pd::Contract {
+            source_position: 3,
+            millivolts: 20_000,
+            operating_milliamps: 1_500,
+            maximum_milliamps: 2_000,
+        };
+        state.pd_contract = Some(contract);
+
+        assert_eq!(sink_projection(&state).pd_status, SinkPdStatus::Ready(contract));
     }
 
     #[test]

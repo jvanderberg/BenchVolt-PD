@@ -19,7 +19,9 @@ use benchvolt_poc::app::{
     AppState, AwgStatus, AwgWaveform, ChannelSnapshot, ControlFocus, Fault, OutputTransition,
     ProfileStatus, RegulationMode, Screen, TemperatureUnit, HELP_MAX_SCROLL,
 };
-use benchvolt_poc::view_projection::{awg_damage, sink_projection, SinkProjection};
+use benchvolt_poc::view_projection::{
+    awg_damage, sink_projection, SinkPdStatus, SinkProjection,
+};
 
 const TABLE_TOP: i32 = 24;
 const HEADER_BOTTOM: i32 = 45;
@@ -741,6 +743,64 @@ where
         .ok();
     }
 
+    fn draw_sink_pd_status(&mut self, projection: SinkProjection) {
+        self.clear_detail_region(214, 128, 106, 36);
+        let mut text: String<24> = String::new();
+        let color = match projection.pd_status {
+            SinkPdStatus::Negotiating => {
+                text.push_str("PD NEGOTIATING").ok();
+                Rgb565::YELLOW
+            }
+            SinkPdStatus::Ready(contract) => {
+                write!(
+                    &mut text,
+                    "PD{} {}.{}V {}.{}A",
+                    contract.source_position,
+                    contract.millivolts / 1_000,
+                    contract.millivolts % 1_000 / 100,
+                    contract.operating_milliamps / 1_000,
+                    contract.operating_milliamps % 1_000 / 100,
+                )
+                .ok();
+                Rgb565::GREEN
+            }
+            SinkPdStatus::Error(error) => {
+                text.push_str("PD ERR:").ok();
+                text.push_str(match error {
+                    benchvolt_poc::pd::PdError::Bus => "BUS",
+                    benchvolt_poc::pd::PdError::WrongDevice => "DEVICE",
+                    benchvolt_poc::pd::PdError::Detached => "DETACHED",
+                    benchvolt_poc::pd::PdError::Timeout => "TIMEOUT",
+                    benchvolt_poc::pd::PdError::MalformedCapabilities => "CAPS",
+                    benchvolt_poc::pd::PdError::NoSuitablePdo => "NO PDO",
+                    benchvolt_poc::pd::PdError::ContractMismatch => "CONTRACT",
+                })
+                .ok();
+                Rgb565::RED
+            }
+            SinkPdStatus::Fault(fault) => {
+                text.push_str("INPUT:").ok();
+                text.push_str(match fault {
+                    Fault::None => "OK",
+                    Fault::OverCurrent => "OVERCURRENT",
+                    Fault::OverTemperature => "OVERTEMP",
+                    Fault::Sensor => "SENSOR",
+                    Fault::Hardware => "HARDWARE",
+                })
+                .ok();
+                Rgb565::RED
+            }
+        };
+        Text::with_baseline(
+            text.as_str(),
+            Point::new(216, 139),
+            MonoTextStyle::new(&FONT_6X10, color),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
     fn draw_usb_pd_input(&mut self, state: &AppState) {
         let projection = sink_projection(state);
         self.display.clear(Rgb565::BLACK).ok();
@@ -757,6 +817,7 @@ where
         self.draw_sink_current(projection);
         self.draw_sink_power(projection);
         self.draw_sink_limit_frame(projection);
+        self.draw_sink_pd_status(projection);
     }
 
     fn draw_recovery_status(&mut self, state: &AppState) {
@@ -1556,6 +1617,9 @@ where
                     || old.over_limit != new.over_limit
                 {
                     self.draw_sink_limit_value(new);
+                }
+                if old.pd_status != new.pd_status {
+                    self.draw_sink_pd_status(new);
                 }
             }
         }

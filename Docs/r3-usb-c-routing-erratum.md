@@ -92,6 +92,11 @@ COM cable both disconnected:
    after flipping the plug at the board, even though the schematic routes both
    orientations.
 
+The diagnostic firmware boots directly to `USB PD Input`. After approximately
+500 ms it shows measured sink VBUS and either a passive error such as `PD
+ERR:DETACHED`/`PD ERR:BUS` or the verified PDO number, voltage, and current. It
+does not transmit a PD request during this boot diagnostic.
+
 The result separates the accessible fault boundary:
 
 - No board power in either orientation means the USB-C host is not recognizing

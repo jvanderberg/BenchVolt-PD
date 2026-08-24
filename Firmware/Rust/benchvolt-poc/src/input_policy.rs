@@ -114,6 +114,7 @@ mod tests {
     #[test]
     fn encoder_routes_navigation_editing_and_output_focus() {
         let mut state = AppState::new(true, None);
+        state.screen = Screen::MainMenu;
         assert!(encoder_action(&state, 0, 8).is_none());
         assert!(matches!(
             encoder_action(&state, 1, 4),

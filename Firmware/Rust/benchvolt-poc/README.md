@@ -163,7 +163,10 @@ use a resistor or an electronic load in constant-resistance mode for CC tests.
 The final screen is `USB PD Input`. It shows the measured sink voltage,
 current, and power in the same tabular format as the overview. A short press
 focuses the sink current protection limit; rotation adjusts it from 0 to 5 A in
-10 mA steps. Startup is deliberately passive: the firmware never transmits a
+10 mA steps. The firmware boots directly to this screen for cable-only hardware
+diagnosis. Passive discovery errors such as `DETACHED` or `BUS` remain visible
+there, while an imported contract displays its PDO number, voltage, and current.
+Startup is deliberately passive: the firmware never transmits a
 PD request or automatically retries one during boot, because some VBUS-powered
 sources hard-reset the supply in response and can create a reboot loop. After
 the recommended 500 ms attach interval, read-only status polling can import a

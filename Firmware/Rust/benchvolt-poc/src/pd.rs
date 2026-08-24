@@ -347,13 +347,18 @@ impl Service {
             self.cadence_ms = 0;
             if outputs_off {
                 if let Some(measured_vbus_mv) = measured_vbus_mv {
-                    if let Ok(contract) = self.negotiator.import_passive(
+                    match self.negotiator.import_passive(
                         bus,
                         measured_vbus_mv,
                         requested_current_cap_ma,
                     ) {
-                        self.active = true;
-                        events[1] = Some(ServiceEvent::Pd(PdEvent::Negotiated(contract)));
+                        Ok(contract) => {
+                            self.active = true;
+                            events[1] = Some(ServiceEvent::Pd(PdEvent::Negotiated(contract)));
+                        }
+                        Err(error) => {
+                            events[1] = Some(ServiceEvent::Pd(PdEvent::Lost(error)));
+                        }
                     }
                 }
             }
@@ -935,6 +940,24 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn passive_detach_is_visible_to_the_boot_diagnostic_without_transmitting() {
+        let mut bus = ScriptBus(VecDeque::from(vec![
+            Operation::Read(DEVICE_ID, vec![0x25]),
+            Operation::Read(PORT_STATUS, vec![0]),
+        ]));
+        let mut service = Service::new(5_000);
+
+        assert_eq!(
+            service.tick(500, 500, true, 5_000, Some(5_000), &mut bus),
+            [
+                None,
+                Some(ServiceEvent::Pd(PdEvent::Lost(PdError::Detached)))
+            ]
+        );
+        assert!(bus.0.is_empty());
     }
 
     #[test]

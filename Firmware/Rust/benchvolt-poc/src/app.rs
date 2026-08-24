@@ -296,7 +296,7 @@ impl AppState {
             None => (0, false),
         };
         Self {
-            screen: Screen::MainMenu,
+            screen: Screen::UsbPdInput,
             focus: ControlFocus::None,
             channels: [
                 ChannelSnapshot::disabled(1_800),
@@ -1524,14 +1524,20 @@ mod tests {
     }
 
     #[test]
-    fn main_menu_routes_without_enabling_hardware() {
+    fn boot_opens_pd_diagnostics_without_enabling_hardware() {
         let state = AppState::new(true, Some(25 * 16));
-        assert!(state.screen == Screen::MainMenu);
+        assert!(state.screen == Screen::UsbPdInput);
+        assert!(state.outputs_inactive());
+    }
+
+    #[test]
+    fn main_menu_routes_without_enabling_hardware() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        state.screen = Screen::MainMenu;
         let dc = AppReducer::reduce(&state, Action::ActivateMenu);
         assert!(dc.screen == Screen::Overview);
         assert!(dc.channels.iter().all(|channel| !channel.requested_enabled));
 
-        let mut state = state;
         state.menu_selection = 1;
         let awg = AppReducer::reduce(&state, Action::ActivateMenu);
         assert!(awg.screen == Screen::Awg);

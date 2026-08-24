@@ -27,7 +27,7 @@ use benchvolt_poc::power::{
     execute_global_shutdown, FirmwareEffectPlanner, PowerExecutor, Rail,
 };
 use benchvolt_poc::settings::{PersistentSettings, SettingsDebouncer};
-use benchvolt_poc::usb_command::UsbIntent;
+use benchvolt_poc::usb_command::{output_completion_response, UsbIntent};
 use benchvolt_poc::waveform::{Directive as WaveformDirective, Service as WaveformService};
 use board::{
     adc::{read_channel_measurement, BoundedAdc},
@@ -538,15 +538,7 @@ fn main() -> ! {
                     {
                         queue_usb_response(b"OK\r\n");
                     } else {
-                        let response = match output.fault {
-                            benchvolt_poc::app::Fault::OverCurrent => {
-                                b"ERR:OVERCURRENT\r\n" as &[u8]
-                            }
-                            benchvolt_poc::app::Fault::OverTemperature => b"ERR:OVERTEMP\r\n",
-                            benchvolt_poc::app::Fault::Sensor => b"ERR:SENSOR\r\n",
-                            _ => b"ERR:HARDWARE\r\n",
-                        };
-                        queue_usb_response(response);
+                        queue_usb_response(output_completion_response(Err(output.fault)));
                     }
                 }
                 UsbIntent::SetCurrentLimit { channel, milliamps } => {
@@ -1010,29 +1002,23 @@ fn main() -> ! {
                 Action::OutputApplied {
                     channel,
                     operation,
-                    enabled,
-                } => Some((channel, operation, enabled, None)),
+                    ..
+                } => Some((channel, operation, None)),
                 Action::OutputFailed {
                     channel,
                     operation,
                     fault,
-                } => Some((channel, operation, false, Some(fault))),
+                } => Some((channel, operation, Some(fault))),
                 _ => None,
             };
             dispatch_app(&mut app, &mut power_driver, action);
-            if let Some((channel, operation, _, fault)) = output_completion {
+            if let Some((channel, operation, fault)) = output_completion {
                 if matches!(
                     pending_usb_output,
                     Some((pending_channel, pending_operation, _))
                         if pending_channel == channel && pending_operation == operation
                 ) {
-                    queue_usb_response(match fault {
-                        None => b"OK\r\n",
-                        Some(benchvolt_poc::app::Fault::OverCurrent) => b"ERR:OVERCURRENT\r\n",
-                        Some(benchvolt_poc::app::Fault::OverTemperature) => b"ERR:OVERTEMP\r\n",
-                        Some(benchvolt_poc::app::Fault::Sensor) => b"ERR:SENSOR\r\n",
-                        Some(_) => b"ERR:HARDWARE\r\n",
-                    });
+                    queue_usb_response(output_completion_response(fault.map_or(Ok(()), Err)));
                     pending_usb_output = None;
                 }
             }

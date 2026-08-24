@@ -1,5 +1,5 @@
 use crate::{
-    app::{AppState, AwgSource, AwgStatus, Measurement, RegulationMode},
+    app::{AppState, AwgSource, AwgStatus, Fault, Measurement, RegulationMode},
     arb::{DataChunk as ArbDataChunk, Start as ArbStart},
     limits::{CH5_MAX_VOLTAGE_MV, CH5_MIN_VOLTAGE_MV},
     protocol::parse_milliunits,
@@ -89,6 +89,16 @@ pub enum UsbIntent {
 pub enum CommandError {
     Syntax,
     Range,
+}
+
+pub fn output_completion_response(result: Result<(), Fault>) -> &'static [u8] {
+    match result {
+        Ok(()) => b"OK\r\n",
+        Err(Fault::OverCurrent) => b"ERR:OVERCURRENT\r\n",
+        Err(Fault::OverTemperature) => b"ERR:OVERTEMP\r\n",
+        Err(Fault::Sensor) => b"ERR:SENSOR\r\n",
+        Err(_) => b"ERR:HARDWARE\r\n",
+    }
 }
 
 fn write_voltage(response: &mut Response, measurement: Measurement) -> Result<(), CommandError> {
@@ -282,6 +292,27 @@ mod tests {
     fn compatibility_parser_leaves_queries_and_unrelated_commands_untouched() {
         assert_eq!(parse_compat_mutation(b"OUTP:CH1?"), Ok(None));
         assert_eq!(parse_compat_mutation(b"MEAS:ALL?"), Ok(None));
+    }
+
+    #[test]
+    fn output_completion_responses_preserve_fault_specific_cli_errors() {
+        assert_eq!(output_completion_response(Ok(())), b"OK\r\n");
+        assert_eq!(
+            output_completion_response(Err(Fault::OverCurrent)),
+            b"ERR:OVERCURRENT\r\n"
+        );
+        assert_eq!(
+            output_completion_response(Err(Fault::OverTemperature)),
+            b"ERR:OVERTEMP\r\n"
+        );
+        assert_eq!(
+            output_completion_response(Err(Fault::Sensor)),
+            b"ERR:SENSOR\r\n"
+        );
+        assert_eq!(
+            output_completion_response(Err(Fault::Hardware)),
+            b"ERR:HARDWARE\r\n"
+        );
     }
 
     const fn measurement(millivolts: u16, milliamps: u16) -> Measurement {

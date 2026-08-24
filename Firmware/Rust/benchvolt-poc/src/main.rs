@@ -1191,9 +1191,28 @@ fn main() -> ! {
                     // A bootloader transition is also a global safety transition.
                     // Attempt every independent off control before resetting, even
                     // if one driver operation reports a failure.
-                    let _ = execute_global_shutdown(&mut power_driver);
-                    let _ = erase_flash_page(BOOT_METADATA_ADDR);
+                    if execute_global_shutdown(&mut power_driver).is_err() {
+                        unsafe { raw_emergency_shutdown() };
+                        dispatch_app(
+                            &mut app,
+                            &mut power_driver,
+                            Action::GlobalShutdownFailed,
+                        );
+                        queue_usb_response(b"ERR:HARDWARE\r\n");
+                        continue;
+                    }
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::GlobalShutdownApplied,
+                    );
+                    if !erase_flash_page(BOOT_METADATA_ADDR) {
+                        unsafe { raw_emergency_shutdown() };
+                        queue_usb_response(b"ERR:FLASH\r\n");
+                        continue;
+                    }
                     queue_usb_response(b"OK:JUMPING_TO_BOOTLOADER\r\n");
+                    unsafe { raw_emergency_shutdown() };
                     cortex_m::asm::delay(4_800_000);
                     cortex_m::peripheral::SCB::sys_reset();
                 }
@@ -1932,6 +1951,7 @@ fn main() -> ! {
             // control has been attempted. If health sealing failed, reset still
             // lands in the stock bootloader instead of risking a boot loop.
             let _ = execute_global_shutdown(&mut power_driver);
+            unsafe { raw_emergency_shutdown() };
             cortex_m::asm::delay(480_000);
             cortex_m::peripheral::SCB::sys_reset();
         }

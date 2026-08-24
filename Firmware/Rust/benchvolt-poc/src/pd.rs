@@ -224,6 +224,7 @@ pub struct Service {
     cadence_ms: u16,
     active: bool,
     started_pending: bool,
+    command_pending: bool,
 }
 
 impl Service {
@@ -233,6 +234,7 @@ impl Service {
             cadence_ms: 0,
             active: false,
             started_pending: false,
+            command_pending: false,
         }
     }
 
@@ -241,6 +243,22 @@ impl Service {
         self.cadence_ms = 20;
         self.active = true;
         self.started_pending = true;
+        self.command_pending = true;
+    }
+
+    pub const fn command_pending(&self) -> bool {
+        self.command_pending
+    }
+
+    pub fn take_command_completion(&mut self, event: PdEvent) -> Option<Result<(), PdError>> {
+        if !self.command_pending {
+            return None;
+        }
+        self.command_pending = false;
+        Some(match event {
+            PdEvent::Negotiated(_) => Ok(()),
+            PdEvent::Lost(error) => Err(error),
+        })
     }
 
     pub const fn current_cap_ma(&self) -> u16 {
@@ -568,13 +586,24 @@ mod tests {
         }
 
         service.request_negotiation(1_500);
+        assert!(service.command_pending());
+        let events = service.tick(0, 60_001, true, 5_000, None, &mut bus);
         assert_eq!(
-            service.tick(0, 60_001, true, 5_000, None, &mut bus),
+            events,
             [
                 Some(ServiceEvent::NegotiationStarted),
                 Some(ServiceEvent::Pd(PdEvent::Lost(PdError::Bus)))
             ]
         );
+        assert_eq!(
+            service.take_command_completion(PdEvent::Lost(PdError::Bus)),
+            Some(Err(PdError::Bus))
+        );
+        assert_eq!(
+            service.take_command_completion(PdEvent::Lost(PdError::Bus)),
+            None
+        );
+        assert!(!service.command_pending());
         assert_eq!(service.current_cap_ma(), 1_500);
     }
 
@@ -756,6 +785,15 @@ mod tests {
         );
         assert!(bus.0.is_empty());
         assert_eq!(service.current_cap_ma(), 2_500);
+        assert_eq!(
+            service.take_command_completion(PdEvent::Negotiated(Contract {
+                source_position: 3,
+                millivolts: 20_000,
+                operating_milliamps: 1_500,
+                maximum_milliamps: 2_000,
+            })),
+            None
+        );
     }
 
     #[test]

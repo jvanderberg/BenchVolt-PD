@@ -431,7 +431,6 @@ fn main() -> ! {
     let mut last_encoder_direction = 0i8;
     let mut encoder_velocity = 0u8;
     let mut usb_output = OutputTransaction::new();
-    let mut pending_usb_pd = false;
 
     loop {
         'usb_command: {
@@ -482,7 +481,7 @@ fn main() -> ! {
                         channel,
                         enabled,
                         power_driver.is_busy(),
-                        pending_usb_pd,
+                        pd_service.command_pending(),
                     ) {
                         Admission::Proceed => {}
                         Admission::ProceedAfterCancellation => {
@@ -619,7 +618,7 @@ fn main() -> ! {
                     }
                 }
                 UsbIntent::SetSinkCurrentLimit(milliamps) => {
-                    if pending_usb_pd {
+                    if pd_service.command_pending() {
                         queue_usb_response(b"ERR:BUSY\r\n");
                         break 'usb_command;
                     }
@@ -636,12 +635,11 @@ fn main() -> ! {
                 }
                 UsbIntent::PdNegotiate => {
                     let outputs_off = app.state().outputs_inactive();
-                    if pending_usb_pd || power_driver.is_busy() || !outputs_off {
+                    if pd_service.command_pending() || power_driver.is_busy() || !outputs_off {
                         queue_usb_response(b"ERR:BUSY\r\n");
                         break 'usb_command;
                     }
                     pd_service.request_negotiation(app.state().sink_current_limit_ma);
-                    pending_usb_pd = true;
                     dispatch_app(
                         &mut app,
                         &mut power_driver,
@@ -772,20 +770,25 @@ fn main() -> ! {
             .into_iter()
             .flatten()
         {
-            let (action, completion) = match event {
+            let (action, pd_event) = match event {
                 PdServiceEvent::NegotiationStarted => (Action::PdNegotiationStarted, None),
                 PdServiceEvent::Pd(benchvolt_poc::pd::PdEvent::Negotiated(contract)) => {
-                    (Action::PdNegotiated(contract), Some(Ok(())))
+                    (
+                        Action::PdNegotiated(contract),
+                        Some(benchvolt_poc::pd::PdEvent::Negotiated(contract)),
+                    )
                 }
                 PdServiceEvent::Pd(benchvolt_poc::pd::PdEvent::Lost(error)) => {
-                    (Action::PdFailed(error), Some(Err(error)))
+                    (
+                        Action::PdFailed(error),
+                        Some(benchvolt_poc::pd::PdEvent::Lost(error)),
+                    )
                 }
             };
             dispatch_app(&mut app, &mut power_driver, action);
-            if pending_usb_pd {
-                if let Some(result) = completion {
+            if let Some(pd_event) = pd_event {
+                if let Some(result) = pd_service.take_command_completion(pd_event) {
                     queue_usb_response(pd_completion_response(result));
-                    pending_usb_pd = false;
                 }
             }
         }

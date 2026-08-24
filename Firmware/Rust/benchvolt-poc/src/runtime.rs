@@ -1,6 +1,6 @@
 use benchvolt_poc::{
     app::{Action, AppReducer, AppState, ProfileRequest, ProfileStatus},
-    power::{execute_effect, execute_global_shutdown, FirmwareEffectPlanner, PowerDriver},
+    power::{execute_global_shutdown, FirmwareEffectPlanner, PowerDriver, PowerExecutor},
     settings::{PersistentSettings, RecordKind},
 };
 use reducto::EffectApp;
@@ -9,7 +9,7 @@ use crate::boot::{persist_settings_record, SettingsStore};
 
 pub(crate) fn dispatch_app<V, D, const Q: usize>(
     app: &mut EffectApp<AppReducer, V, FirmwareEffectPlanner, Q>,
-    power_driver: &mut D,
+    power_driver: &mut PowerExecutor<D>,
     action: Action,
 ) -> bool
 where
@@ -31,7 +31,7 @@ where
             }
             Some(effect) => effect
                 .power
-                .map(|power| execute_effect(power_driver, app.state(), power)),
+                .and_then(|power| power_driver.submit(app.state(), power)),
             None => None,
         };
     }
@@ -40,7 +40,7 @@ where
 
 pub(crate) fn service_profile_request<V, D, const Q: usize>(
     app: &mut EffectApp<AppReducer, V, FirmwareEffectPlanner, Q>,
-    power_driver: &mut D,
+    power_driver: &mut PowerExecutor<D>,
     settings_store: &mut SettingsStore,
 ) where
     V: reducto::View<State = AppState>,

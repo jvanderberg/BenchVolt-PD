@@ -4,7 +4,6 @@ use crate::{
     limits::{CH5_MAX_VOLTAGE_MV, CH5_MIN_VOLTAGE_MV},
     protocol::parse_milliunits,
 };
-use core::fmt::{self, Write as _};
 
 pub const RESPONSE_CAPACITY: usize = 192;
 
@@ -25,16 +24,49 @@ impl Response {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..usize::from(self.len)]
     }
-}
 
-impl fmt::Write for Response {
-    fn write_str(&mut self, value: &str) -> fmt::Result {
+    fn push_bytes(&mut self, value: &[u8]) -> Result<(), CommandError> {
         let start = usize::from(self.len);
-        let end = start.checked_add(value.len()).ok_or(fmt::Error)?;
-        let target = self.bytes.get_mut(start..end).ok_or(fmt::Error)?;
-        target.copy_from_slice(value.as_bytes());
+        let end = start.checked_add(value.len()).ok_or(CommandError::Range)?;
+        let target = self.bytes.get_mut(start..end).ok_or(CommandError::Range)?;
+        target.copy_from_slice(value);
         self.len = end as u16;
         Ok(())
+    }
+
+    fn push_byte(&mut self, value: u8) -> Result<(), CommandError> {
+        self.push_bytes(&[value])
+    }
+
+    fn push_unsigned(&mut self, mut value: u32) -> Result<(), CommandError> {
+        let mut digits = [0u8; 10];
+        let mut start = digits.len();
+        loop {
+            start -= 1;
+            digits[start] = b'0' + (value % 10) as u8;
+            value /= 10;
+            if value == 0 {
+                return self.push_bytes(&digits[start..]);
+            }
+        }
+    }
+
+    fn push_fixed(&mut self, scaled: u32, decimal_digits: u8) -> Result<(), CommandError> {
+        let divisor = match decimal_digits {
+            1 => 10,
+            2 => 100,
+            _ => 1_000,
+        };
+        self.push_unsigned(scaled / divisor)?;
+        self.push_byte(b'.')?;
+        let fraction = scaled % divisor;
+        if decimal_digits >= 2 && fraction < divisor / 10 {
+            self.push_byte(b'0')?;
+        }
+        if decimal_digits == 3 && fraction < 10 {
+            self.push_byte(b'0')?;
+        }
+        self.push_unsigned(fraction)
     }
 }
 
@@ -59,38 +91,32 @@ pub enum CommandError {
     Range,
 }
 
-fn write_voltage(response: &mut Response, measurement: Measurement) -> fmt::Result {
+fn write_voltage(response: &mut Response, measurement: Measurement) -> Result<(), CommandError> {
     if measurement.valid {
         let centivolts = (u32::from(measurement.millivolts) + 5) / 10;
-        write!(response, "{}.{:02}", centivolts / 100, centivolts % 100)
+        response.push_fixed(centivolts, 2)
     } else {
-        response.write_str("nan")
+        response.push_bytes(b"nan")
     }
 }
 
-fn write_current(response: &mut Response, measurement: Measurement) -> fmt::Result {
+fn write_current(response: &mut Response, measurement: Measurement) -> Result<(), CommandError> {
     if measurement.valid {
-        write!(
-            response,
-            "{}.{:03}",
-            measurement.milliamps / 1_000,
-            measurement.milliamps % 1_000
-        )
+        response.push_fixed(u32::from(measurement.milliamps), 3)
     } else {
-        response.write_str("nan")
+        response.push_bytes(b"nan")
     }
 }
 
-fn write_temperature(response: &mut Response, state: &AppState) -> fmt::Result {
+fn write_temperature(response: &mut Response, state: &AppState) -> Result<(), CommandError> {
     if state.temp_valid {
         let tenths = i32::from(state.temp_sixteenths_c) * 10 / 16;
         if tenths < 0 {
-            write!(response, "-{}.{:01}", tenths.abs() / 10, tenths.abs() % 10)
-        } else {
-            write!(response, "{}.{:01}", tenths / 10, tenths % 10)
+            response.push_byte(b'-')?;
         }
+        response.push_fixed(tenths.unsigned_abs(), 1)
     } else {
-        response.write_str("nan")
+        response.push_bytes(b"nan")
     }
 }
 
@@ -114,11 +140,8 @@ pub fn project_compat_query(
         write_voltage(
             &mut response,
             state.channels[usize::from(channel)].measurement,
-        )
-        .map_err(|_| CommandError::Range)?;
-        response
-            .write_str("\r\n")
-            .map_err(|_| CommandError::Range)?;
+        )?;
+        response.push_bytes(b"\r\n")?;
         return Ok(Some(response));
     }
 
@@ -128,44 +151,37 @@ pub fn project_compat_query(
 
     let mut response = Response::new();
     for channel in &state.channels {
-        write_voltage(&mut response, channel.measurement).map_err(|_| CommandError::Range)?;
-        response.write_char(',').map_err(|_| CommandError::Range)?;
-        write_current(&mut response, channel.measurement).map_err(|_| CommandError::Range)?;
-        response.write_char(',').map_err(|_| CommandError::Range)?;
+        write_voltage(&mut response, channel.measurement)?;
+        response.push_byte(b',')?;
+        write_current(&mut response, channel.measurement)?;
+        response.push_byte(b',')?;
     }
-    write_voltage(&mut response, state.sink).map_err(|_| CommandError::Range)?;
-    response.write_char(',').map_err(|_| CommandError::Range)?;
-    write_current(&mut response, state.sink).map_err(|_| CommandError::Range)?;
-    response.write_char(',').map_err(|_| CommandError::Range)?;
-    write_temperature(&mut response, state).map_err(|_| CommandError::Range)?;
+    write_voltage(&mut response, state.sink)?;
+    response.push_byte(b',')?;
+    write_current(&mut response, state.sink)?;
+    response.push_byte(b',')?;
+    write_temperature(&mut response, state)?;
 
     for channel in &state.channels {
-        write!(response, ",{}", u8::from(channel.physical_enabled))
-            .map_err(|_| CommandError::Range)?;
+        response.push_byte(b',')?;
+        response.push_byte(b'0' + u8::from(channel.physical_enabled))?;
     }
-    write!(
-        response,
-        ",{},{}",
-        u8::from(arbitrary_channel_active(state, 3)),
-        u8::from(arbitrary_channel_active(state, 4))
-    )
-    .map_err(|_| CommandError::Range)?;
+    response.push_byte(b',')?;
+    response.push_byte(b'0' + u8::from(arbitrary_channel_active(state, 3)))?;
+    response.push_byte(b',')?;
+    response.push_byte(b'0' + u8::from(arbitrary_channel_active(state, 4)))?;
     for channel in &state.channels {
         let centiamps = (u32::from(channel.current_limit_ma) + 5) / 10;
-        write!(response, ",{}.{:02}", centiamps / 100, centiamps % 100)
-            .map_err(|_| CommandError::Range)?;
+        response.push_byte(b',')?;
+        response.push_fixed(centiamps, 2)?;
     }
     let ch4_centivolts = (u32::from(state.channels[3].setpoint_mv) + 5) / 10;
     let ch5_centivolts = (u32::from(state.channels[4].setpoint_mv) + 5) / 10;
-    write!(
-        response,
-        ",{}.{:02},{}.{:02}\r\n",
-        ch4_centivolts / 100,
-        ch4_centivolts % 100,
-        ch5_centivolts / 100,
-        ch5_centivolts % 100,
-    )
-    .map_err(|_| CommandError::Range)?;
+    response.push_byte(b',')?;
+    response.push_fixed(ch4_centivolts, 2)?;
+    response.push_byte(b',')?;
+    response.push_fixed(ch5_centivolts, 2)?;
+    response.push_bytes(b"\r\n")?;
     Ok(Some(response))
 }
 

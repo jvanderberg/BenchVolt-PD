@@ -501,6 +501,397 @@ pub trait PowerDriver {
     type Error;
 
     fn apply(&mut self, operation: DriverOperation) -> Result<(), Self::Error>;
+
+    fn cancel_pending(&mut self) {}
+}
+
+const POWER_PLAN_CAPACITY: usize = 7;
+const HARDWARE_SETTLE_MS: u16 = 50;
+
+#[derive(Clone, Copy)]
+struct PowerPlan {
+    operations: [DriverOperation; POWER_PLAN_CAPACITY],
+    len: u8,
+    cursor: u8,
+    channel: u8,
+    operation: u16,
+    enabled: bool,
+    rail_to_disable_on_failure: Option<Rail>,
+}
+
+impl PowerPlan {
+    fn new(
+        channel: u8,
+        operation: u16,
+        enabled: bool,
+        rail_to_disable_on_failure: Option<Rail>,
+    ) -> Self {
+        Self {
+            operations: [DriverOperation::Ch5Enable(false); POWER_PLAN_CAPACITY],
+            len: 0,
+            cursor: 0,
+            channel,
+            operation,
+            enabled,
+            rail_to_disable_on_failure,
+        }
+    }
+
+    fn push(&mut self, operation: DriverOperation) {
+        self.operations[usize::from(self.len)] = operation;
+        self.len += 1;
+    }
+
+    fn next(&mut self) -> Option<DriverOperation> {
+        if self.cursor == self.len {
+            return None;
+        }
+        let operation = self.operations[usize::from(self.cursor)];
+        self.cursor += 1;
+        Some(operation)
+    }
+}
+
+/// Runs power-up sequencing one bounded stage at a time. Hardware settling is
+/// represented by a deadline, leaving the firmware loop free to service USB,
+/// PD, watchdog, and protection between stages.
+pub struct PowerExecutor<D> {
+    driver: D,
+    pending: Option<PowerPlan>,
+    deadline_ms: Option<u16>,
+    now_ms: u16,
+}
+
+impl<D> PowerExecutor<D> {
+    pub const fn new(driver: D, now_ms: u16) -> Self {
+        Self {
+            driver,
+            pending: None,
+            deadline_ms: None,
+            now_ms,
+        }
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
+impl<D> core::ops::Deref for PowerExecutor<D> {
+    type Target = D;
+
+    fn deref(&self) -> &Self::Target {
+        &self.driver
+    }
+}
+
+impl<D> core::ops::DerefMut for PowerExecutor<D> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.driver
+    }
+}
+
+fn operation_settle_ms(operation: DriverOperation) -> u16 {
+    match operation {
+        DriverOperation::RailEnable { enabled: true, .. }
+        | DriverOperation::ConfigureRail { .. }
+        | DriverOperation::Ch5Enable(true)
+        | DriverOperation::Ch5OutputEnable(true) => HARDWARE_SETTLE_MS,
+        _ => 0,
+    }
+}
+
+fn deadline_reached(now_ms: u16, deadline_ms: u16) -> bool {
+    now_ms.wrapping_sub(deadline_ms) < 0x8000
+}
+
+fn plan_output(
+    state: &AppState,
+    channel: u8,
+    operation: u16,
+    enabled: bool,
+) -> Result<PowerPlan, Fault> {
+    let output = state
+        .channels
+        .get(usize::from(channel))
+        .ok_or(Fault::Hardware)?;
+    let sibling_on = sibling_is_on(state, channel);
+    let rail = rail_for(channel);
+    let mut plan = PowerPlan::new(
+        channel,
+        operation,
+        enabled,
+        (!sibling_on).then_some(rail).flatten(),
+    );
+    if enabled {
+        enable_is_eligible(state, channel)?;
+        if channel == 4 {
+            plan.push(DriverOperation::Ch5Enable(false));
+            plan.push(DriverOperation::Ch5Enable(true));
+            plan.push(DriverOperation::ConfigureCh5 {
+                millivolts: output.drive_mv,
+                current_limit_ma: CH5_TPS_CONFIGURATION_LIMIT_MA,
+                forced_pwm: state.awg_status == AwgStatus::Starting
+                    && state.active_awg_channel() == 4,
+            });
+            plan.push(DriverOperation::ClearCh5Status);
+            plan.push(DriverOperation::ClearCh5Status);
+            plan.push(DriverOperation::Ch5OutputEnable(true));
+        } else {
+            let rail = rail.ok_or(Fault::Hardware)?;
+            plan.push(DriverOperation::ChannelGate {
+                channel,
+                enabled: false,
+            });
+            if !sibling_on {
+                plan.push(DriverOperation::RailEnable {
+                    rail,
+                    enabled: true,
+                });
+                plan.push(DriverOperation::ConfigureRail {
+                    rail,
+                    millivolts: rail_setpoint(rail),
+                });
+            }
+            plan.push(DriverOperation::VerifyRail { rail });
+            if channel == 3 {
+                plan.push(DriverOperation::SetAdjustableDac {
+                    millivolts: output.drive_mv,
+                });
+            }
+            plan.push(DriverOperation::ChannelGate {
+                channel,
+                enabled: true,
+            });
+        }
+        plan.push(DriverOperation::VerifyOutput {
+            channel,
+            millivolts: output.drive_mv,
+        });
+    } else if channel == 4 {
+        plan.push(DriverOperation::Ch5OutputEnable(false));
+        plan.push(DriverOperation::Ch5Enable(false));
+    } else {
+        plan.push(DriverOperation::ChannelGate {
+            channel,
+            enabled: false,
+        });
+        if !sibling_on {
+            plan.push(DriverOperation::RailEnable {
+                rail: rail.ok_or(Fault::Hardware)?,
+                enabled: false,
+            });
+        }
+    }
+    Ok(plan)
+}
+
+impl<D: PowerDriver> PowerExecutor<D> {
+    fn plan_matches_state(plan: PowerPlan, state: &AppState) -> Result<bool, Fault> {
+        let Some(output) = state.channels.get(usize::from(plan.channel)) else {
+            return Err(Fault::Hardware);
+        };
+        let expected = if plan.enabled {
+            OutputTransition::Enabling(plan.operation)
+        } else {
+            OutputTransition::Disabling(plan.operation)
+        };
+        if output.transition != expected || output.requested_enabled != plan.enabled {
+            return Ok(false);
+        }
+        if plan.enabled {
+            enable_is_eligible(state, plan.channel)?;
+        }
+        Ok(true)
+    }
+
+    fn shutdown_failed_plan(&mut self, plan: PowerPlan) {
+        if plan.channel == 4 {
+            let _ = self.driver.apply(DriverOperation::Ch5OutputEnable(false));
+            let _ = self.driver.apply(DriverOperation::Ch5Enable(false));
+        } else {
+            let _ = self.driver.apply(DriverOperation::ChannelGate {
+                channel: plan.channel,
+                enabled: false,
+            });
+            if let Some(rail) = plan.rail_to_disable_on_failure {
+                let _ = self.driver.apply(DriverOperation::RailEnable {
+                    rail,
+                    enabled: false,
+                });
+            }
+        }
+    }
+
+    fn completion(plan: PowerPlan) -> Action {
+        Action::OutputApplied {
+            channel: plan.channel,
+            operation: plan.operation,
+            enabled: plan.enabled,
+        }
+    }
+
+    fn failure(plan: PowerPlan) -> Action {
+        Action::OutputFailed {
+            channel: plan.channel,
+            operation: plan.operation,
+            fault: Fault::Hardware,
+        }
+    }
+
+    fn run_ready(&mut self, state: &AppState) -> Option<Action> {
+        let mut plan = self.pending.take()?;
+        match Self::plan_matches_state(plan, state) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.deadline_ms = None;
+                self.shutdown_failed_plan(plan);
+                return None;
+            }
+            Err(fault) => {
+                self.deadline_ms = None;
+                self.shutdown_failed_plan(plan);
+                let mut action = Self::failure(plan);
+                if let Action::OutputFailed { fault: value, .. } = &mut action {
+                    *value = fault;
+                }
+                return Some(action);
+            }
+        }
+        while let Some(operation) = plan.next() {
+            if self.driver.apply(operation).is_err() {
+                if !plan.enabled && matches!(operation, DriverOperation::Ch5OutputEnable(false)) {
+                    continue;
+                }
+                self.deadline_ms = None;
+                self.shutdown_failed_plan(plan);
+                return Some(Self::failure(plan));
+            }
+            let settle_ms = operation_settle_ms(operation);
+            if settle_ms != 0 {
+                self.deadline_ms = Some(self.now_ms.wrapping_add(settle_ms));
+                self.pending = Some(plan);
+                return matches!(operation, DriverOperation::Ch5OutputEnable(true)).then_some(
+                    Action::OutputEnergized {
+                        channel: plan.channel,
+                        operation: plan.operation,
+                    },
+                );
+            }
+        }
+        self.deadline_ms = None;
+        Some(Self::completion(plan))
+    }
+
+    pub fn submit(&mut self, state: &AppState, effect: PowerEffect) -> Option<Action> {
+        if let PowerEffect::Voltage {
+            channel,
+            millivolts,
+        } = effect
+        {
+            let result = match channel {
+                3 => self
+                    .driver
+                    .apply(DriverOperation::SetAdjustableDac { millivolts }),
+                4 => self.driver.apply(DriverOperation::Ch5Voltage(millivolts)),
+                _ => return Some(Action::HardwareSettingApplied),
+            };
+            return Some(if result.is_ok() {
+                Action::HardwareSettingApplied
+            } else {
+                best_effort_shutdown(&mut self.driver, state, channel);
+                Action::HardwareSettingFailed {
+                    channel,
+                    fault: Fault::Hardware,
+                }
+            });
+        }
+        let PowerEffect::Output {
+            channel,
+            operation,
+            enabled,
+        } = effect
+        else {
+            unreachable!()
+        };
+        if self.pending.is_some() {
+            let preempts = matches!(
+                self.pending,
+                Some(PowerPlan {
+                    channel: active_channel,
+                    enabled: true,
+                    ..
+                }) if active_channel == channel && !enabled
+            );
+            if preempts {
+                let active = self.pending.take().unwrap();
+                self.deadline_ms = None;
+                self.shutdown_failed_plan(active);
+            } else {
+                return Some(if enabled {
+                    best_effort_shutdown(&mut self.driver, state, channel);
+                    Action::OutputFailed {
+                        channel,
+                        operation,
+                        fault: Fault::Hardware,
+                    }
+                } else {
+                    match run_disable(&mut self.driver, state, channel) {
+                        Ok(()) => Action::OutputApplied {
+                            channel,
+                            operation,
+                            enabled: false,
+                        },
+                        Err(fault) => {
+                            best_effort_shutdown(&mut self.driver, state, channel);
+                            Action::OutputFailed {
+                                channel,
+                                operation,
+                                fault,
+                            }
+                        }
+                    }
+                });
+            }
+        }
+        if self.pending.is_some() {
+            return None;
+        }
+        match plan_output(state, channel, operation, enabled) {
+            Ok(plan) => self.pending = Some(plan),
+            Err(fault) => {
+                best_effort_shutdown(&mut self.driver, state, channel);
+                return Some(Action::OutputFailed {
+                    channel,
+                    operation,
+                    fault,
+                });
+            }
+        }
+        self.run_ready(state)
+    }
+
+    pub fn service(&mut self, now_ms: u16, state: &AppState) -> Option<Action> {
+        self.now_ms = now_ms;
+        match self.deadline_ms {
+            Some(deadline) if !deadline_reached(now_ms, deadline) => None,
+            _ => self.run_ready(state),
+        }
+    }
+}
+
+impl<D: PowerDriver> PowerDriver for PowerExecutor<D> {
+    type Error = D::Error;
+
+    fn apply(&mut self, operation: DriverOperation) -> Result<(), Self::Error> {
+        self.driver.apply(operation)
+    }
+
+    fn cancel_pending(&mut self) {
+        self.pending = None;
+        self.deadline_ms = None;
+        self.driver.cancel_pending();
+    }
 }
 
 pub const OVERTEMPERATURE_TRIP_SIXTEENTHS_C: i16 = 75 * 16;
@@ -736,6 +1127,7 @@ pub fn execute_effect<D: PowerDriver>(
 /// Immediate, best-effort physical shutdown used by global safety interlocks.
 /// Every independent off control is attempted even if an earlier driver call fails.
 pub fn execute_global_shutdown<D: PowerDriver>(driver: &mut D) -> Result<(), Fault> {
+    driver.cancel_pending();
     let mut failed = false;
     for channel in 0..4 {
         failed |= driver
@@ -916,6 +1308,292 @@ mod tests {
             };
         }
         state
+    }
+
+    fn enabling_state(channel: u8, operation: u16) -> AppState {
+        let mut state = eligible_state();
+        let output = &mut state.channels[usize::from(channel)];
+        output.requested_enabled = true;
+        output.transition = OutputTransition::Enabling(operation);
+        state
+    }
+
+    const fn enable_effect(channel: u8, operation: u16) -> PowerEffect {
+        PowerEffect::Output {
+            channel,
+            operation,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn staged_shared_rail_enable_obeys_both_deadlines_across_timer_wrap() {
+        let state = enabling_state(0, 7);
+        let mut executor = PowerExecutor::new(MockDriver::default(), u16::MAX - 15);
+
+        assert!(executor.submit(&state, enable_effect(0, 7)).is_none());
+        assert_eq!(
+            executor.calls,
+            [
+                DriverOperation::ChannelGate {
+                    channel: 0,
+                    enabled: false
+                },
+                DriverOperation::RailEnable {
+                    rail: Rail::Dc1,
+                    enabled: true
+                }
+            ]
+        );
+        assert!(executor.service(33, &state).is_none());
+        assert_eq!(executor.calls.len(), 2);
+
+        assert!(executor.service(34, &state).is_none());
+        assert!(matches!(
+            executor.calls.last(),
+            Some(DriverOperation::ConfigureRail {
+                rail: Rail::Dc1,
+                ..
+            })
+        ));
+        assert!(executor.service(83, &state).is_none());
+        assert_eq!(executor.calls.len(), 3);
+
+        let completion = executor.service(84, &state);
+        assert!(matches!(
+            completion,
+            Some(Action::OutputApplied {
+                channel: 0,
+                operation: 7,
+                enabled: true
+            })
+        ));
+        assert!(executor.gates[0]);
+        assert!(matches!(
+            executor.calls.as_slice(),
+            [
+                DriverOperation::ChannelGate { enabled: false, .. },
+                DriverOperation::RailEnable { enabled: true, .. },
+                DriverOperation::ConfigureRail { .. },
+                DriverOperation::VerifyRail { .. },
+                DriverOperation::ChannelGate { enabled: true, .. },
+                DriverOperation::VerifyOutput { .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn ch5_exposure_is_visible_to_protection_during_final_settle() {
+        let mut state = enabling_state(4, 9);
+        let mut executor = PowerExecutor::new(MockDriver::default(), 100);
+
+        assert!(executor.submit(&state, enable_effect(4, 9)).is_none());
+        assert_eq!(executor.calls.len(), 2);
+        assert!(!executor.ch5_oe);
+
+        let exposure = executor.service(150, &state).unwrap();
+        assert!(matches!(
+            exposure,
+            Action::OutputEnergized {
+                channel: 4,
+                operation: 9
+            }
+        ));
+        state = AppReducer::reduce(&state, exposure);
+        assert!(state.channels[4].physical_enabled);
+        assert!(state.channels[4].transition == OutputTransition::Enabling(9));
+        assert!(executor.ch5_oe);
+        assert!(executor.service(199, &state).is_none());
+
+        assert!(matches!(
+            executor.service(200, &state),
+            Some(Action::OutputApplied {
+                channel: 4,
+                operation: 9,
+                enabled: true
+            })
+        ));
+    }
+
+    #[test]
+    fn safety_state_change_preempts_a_due_energizing_stage() {
+        let mut state = enabling_state(0, 11);
+        let mut executor = PowerExecutor::new(MockDriver::default(), 0);
+        assert!(executor.submit(&state, enable_effect(0, 11)).is_none());
+
+        state.pd_contract = None;
+        let completion = executor.service(50, &state);
+
+        assert!(matches!(
+            completion,
+            Some(Action::OutputFailed {
+                channel: 0,
+                operation: 11,
+                fault: Fault::Hardware
+            })
+        ));
+        assert!(!executor.gates[0]);
+        assert!(!executor.rail_enabled[0]);
+        assert!(!executor.is_busy());
+    }
+
+    #[test]
+    fn global_shutdown_cancels_a_delayed_enable() {
+        let state = enabling_state(0, 1);
+        let mut executor = PowerExecutor::new(MockDriver::default(), 0);
+        assert!(executor.submit(&state, enable_effect(0, 1)).is_none());
+        assert!(executor.is_busy());
+
+        assert!(execute_global_shutdown(&mut executor).is_ok());
+
+        let calls_after_shutdown = executor.calls.len();
+        assert!(!executor.is_busy());
+        assert!(executor.service(1_000, &state).is_none());
+        assert_eq!(executor.calls.len(), calls_after_shutdown);
+        assert!(executor.safe());
+    }
+
+    #[test]
+    fn a_second_enable_is_rejected_without_bypassing_settle_stages() {
+        let mut state = enabling_state(0, 1);
+        state.channels[2].requested_enabled = true;
+        state.channels[2].transition = OutputTransition::Enabling(2);
+        let mut executor = PowerExecutor::new(MockDriver::default(), 0);
+        assert!(executor.submit(&state, enable_effect(0, 1)).is_none());
+
+        let second = executor.submit(&state, enable_effect(2, 2));
+
+        assert!(matches!(
+            second,
+            Some(Action::OutputFailed {
+                channel: 2,
+                operation: 2,
+                fault: Fault::Hardware
+            })
+        ));
+        assert!(!executor.gates[2]);
+        assert!(!executor.rail_enabled[1]);
+        assert!(executor.is_busy());
+    }
+
+    #[test]
+    fn reducer_serializes_output_enable_requests_before_the_executor_boundary() {
+        let state = enabling_state(0, 1);
+        let next = AppReducer::reduce(
+            &state,
+            Action::SetOutputRequested {
+                channel: 2,
+                enabled: true,
+            },
+        );
+
+        assert!(!next.channels[2].requested_enabled);
+        assert!(next.channels[2].transition == OutputTransition::Stable);
+    }
+
+    #[test]
+    fn stale_exposure_actions_cannot_mark_an_output_physical() {
+        let state = enabling_state(4, 3);
+        let stale = AppReducer::reduce(
+            &state,
+            Action::OutputEnergized {
+                channel: 4,
+                operation: 2,
+            },
+        );
+
+        assert!(!stale.channels[4].physical_enabled);
+        assert_eq!(FirmwareEffectPlanner::plan(&state, &stale), None);
+    }
+
+    fn run_executor_to_terminal(
+        executor: &mut PowerExecutor<MockDriver>,
+        state: &mut AppState,
+        effect: PowerEffect,
+    ) -> Action {
+        if let Some(action) = executor.submit(state, effect) {
+            return action;
+        }
+        for now in [50, 100, 150] {
+            if let Some(action) = executor.service(now, state) {
+                if matches!(action, Action::OutputEnergized { .. }) {
+                    *state = AppReducer::reduce(state, action);
+                } else {
+                    return action;
+                }
+            }
+        }
+        panic!("power sequence did not terminate");
+    }
+
+    #[test]
+    fn every_staged_enable_failure_still_shuts_the_target_down() {
+        for (channel, stages) in [(0, 6), (4, 7)] {
+            for fail_at in 0..stages {
+                let mut state = enabling_state(channel, 17);
+                let driver = MockDriver {
+                    fail_at: Some(fail_at),
+                    ..MockDriver::default()
+                };
+                let mut executor = PowerExecutor::new(driver, 0);
+
+                let action =
+                    run_executor_to_terminal(&mut executor, &mut state, enable_effect(channel, 17));
+
+                assert!(matches!(
+                    action,
+                    Action::OutputFailed {
+                        channel: failed_channel,
+                        operation: 17,
+                        ..
+                    } if failed_channel == channel
+                ));
+                assert!(executor.safe(), "channel {channel}, stage {fail_at}");
+                if channel == 4 {
+                    assert!(!executor.ch5_enable);
+                    assert!(!executor.ch5_oe);
+                } else {
+                    assert!(!executor.gates[usize::from(channel)]);
+                    assert!(!executor.rail_enabled[0]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ch5_disable_treats_oe_failure_as_best_effort_when_en_goes_low() {
+        let mut state = eligible_state();
+        state.channels[4].physical_enabled = true;
+        state.channels[4].requested_enabled = false;
+        state.channels[4].transition = OutputTransition::Disabling(4);
+        let driver = MockDriver {
+            fail_at: Some(0),
+            ch5_enable: true,
+            ch5_configured: true,
+            ch5_oe: true,
+            ..MockDriver::default()
+        };
+        let mut executor = PowerExecutor::new(driver, 0);
+
+        let completion = executor.submit(
+            &state,
+            PowerEffect::Output {
+                channel: 4,
+                operation: 4,
+                enabled: false,
+            },
+        );
+
+        assert!(matches!(
+            completion,
+            Some(Action::OutputApplied {
+                channel: 4,
+                operation: 4,
+                enabled: false
+            })
+        ));
+        assert!(!executor.ch5_enable);
+        assert!(!executor.ch5_oe);
     }
 
     #[test]

@@ -24,7 +24,7 @@ use benchvolt_poc::monitoring::{ProtectionService, TpsStatusObservation};
 use benchvolt_poc::pd::{Service as PdService, ServiceEvent as PdServiceEvent};
 use benchvolt_poc::reset_cause::ResetReason;
 use benchvolt_poc::power::{
-    execute_global_shutdown, FirmwareEffectPlanner, Rail,
+    execute_global_shutdown, FirmwareEffectPlanner, PowerExecutor, Rail,
 };
 use benchvolt_poc::settings::{PersistentSettings, SettingsDebouncer};
 use benchvolt_poc::usb_command::UsbIntent;
@@ -387,7 +387,7 @@ fn main() -> ! {
     feed_watchdog();
     let mut sensor = SoftI2c::new(scl, sda);
     let initial_temperature = sensor.read_tmp1075(&mut delay);
-    let mut power_driver = HardwarePowerDriver::new(sensor, SoftI2c::new(aux_scl, aux_sda), delay);
+    let power_driver = HardwarePowerDriver::new(sensor, SoftI2c::new(aux_scl, aux_sda), delay);
     let mut pd_bus = SoftI2c::<_, _, 1>::new(pd_scl, pd_sda);
     let mut initial_state = AppState::new(recovery_armed, initial_temperature);
     if let Some(record) = settings_store.latest {
@@ -395,6 +395,7 @@ fn main() -> ! {
     }
     initial_state.profile_present =
         core::array::from_fn(|index| settings_store.profiles[index].is_some());
+    let mut power_driver = PowerExecutor::new(power_driver, monotonic_ms());
     let mut app = EffectApp::<AppReducer, _, FirmwareEffectPlanner, 8>::new(
         BenchVoltView::new(display),
         initial_state,
@@ -429,6 +430,7 @@ fn main() -> ! {
     let mut last_encoder_tick = input_ticks;
     let mut last_encoder_direction = 0i8;
     let mut encoder_velocity = 0u8;
+    let mut pending_usb_output: Option<(u8, u16, bool)> = None;
 
     loop {
         while let Some(command) = take_usb_command() {
@@ -472,6 +474,19 @@ fn main() -> ! {
                     queue_usb_response(b"OK:REBOOTING\r\n");
                 }
                 UsbIntent::SetOutput { channel, enabled } => {
+                    if enabled && power_driver.is_busy() {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        continue;
+                    }
+                    if let Some((pending_channel, _, _)) = pending_usb_output {
+                        if pending_channel == channel && !enabled {
+                            queue_usb_response(b"ERR:CANCELLED\r\n");
+                            pending_usb_output = None;
+                        } else {
+                            queue_usb_response(b"ERR:BUSY\r\n");
+                            continue;
+                        }
+                    }
                     if enabled
                         && !matches!(
                             app.state().awg_status,
@@ -508,7 +523,16 @@ fn main() -> ! {
                         Action::SetOutputRequested { channel, enabled },
                     );
                     let output = &app.state().channels[usize::from(channel)];
-                    if output.physical_enabled == enabled
+                    let expected_transition = if enabled {
+                        benchvolt_poc::app::OutputTransition::Enabling(output.operation)
+                    } else {
+                        benchvolt_poc::app::OutputTransition::Disabling(output.operation)
+                    };
+                    if output.transition == expected_transition
+                        && output.requested_enabled == enabled
+                    {
+                        pending_usb_output = Some((channel, output.operation, enabled));
+                    } else if output.physical_enabled == enabled
                         && output.requested_enabled == enabled
                         && (!enabled || output.fault == benchvolt_poc::app::Fault::None)
                     {
@@ -526,6 +550,12 @@ fn main() -> ! {
                     }
                 }
                 UsbIntent::SetCurrentLimit { channel, milliamps } => {
+                    if power_driver.is_busy()
+                        && app.state().channels[usize::from(channel)].physical_enabled
+                    {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        continue;
+                    }
                     dispatch_app(
                         &mut app,
                         &mut power_driver,
@@ -544,6 +574,12 @@ fn main() -> ! {
                     channel,
                     millivolts,
                 } => {
+                    if power_driver.is_busy()
+                        && app.state().channels[usize::from(channel)].physical_enabled
+                    {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        continue;
+                    }
                     dispatch_app(
                         &mut app,
                         &mut power_driver,
@@ -567,6 +603,12 @@ fn main() -> ! {
                     }
                 }
                 UsbIntent::SetRegulationMode { channel, mode } => {
+                    if power_driver.is_busy()
+                        && app.state().channels[usize::from(channel)].physical_enabled
+                    {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        continue;
+                    }
                     if channel == app.state().active_awg_channel()
                         && !matches!(
                             app.state().awg_status,
@@ -958,6 +1000,46 @@ fn main() -> ! {
                 &mut power_driver,
                 Action::AwgLoadMeasurement(measurement_windows.take_awg_load()),
             );
+        }
+
+        // Safety observations above preempt a power-up stage that becomes due
+        // in this same pass. One bounded stage can then advance before the
+        // watchdog is fed, without blocking USB, PD, or protection cadence.
+        if let Some(action) = power_driver.service(monotonic_ms(), app.state()) {
+            let output_completion = match action {
+                Action::OutputApplied {
+                    channel,
+                    operation,
+                    enabled,
+                } => Some((channel, operation, enabled, None)),
+                Action::OutputFailed {
+                    channel,
+                    operation,
+                    fault,
+                } => Some((channel, operation, false, Some(fault))),
+                _ => None,
+            };
+            dispatch_app(&mut app, &mut power_driver, action);
+            if let Some((channel, operation, _, fault)) = output_completion {
+                if matches!(
+                    pending_usb_output,
+                    Some((pending_channel, pending_operation, _))
+                        if pending_channel == channel && pending_operation == operation
+                ) {
+                    queue_usb_response(match fault {
+                        None => b"OK\r\n",
+                        Some(benchvolt_poc::app::Fault::OverCurrent) => b"ERR:OVERCURRENT\r\n",
+                        Some(benchvolt_poc::app::Fault::OverTemperature) => b"ERR:OVERTEMP\r\n",
+                        Some(benchvolt_poc::app::Fault::Sensor) => b"ERR:SENSOR\r\n",
+                        Some(_) => b"ERR:HARDWARE\r\n",
+                    });
+                    pending_usb_output = None;
+                }
+            }
+        }
+        if pending_usb_output.is_some() && !power_driver.is_busy() {
+            queue_usb_response(b"ERR:CANCELLED\r\n");
+            pending_usb_output = None;
         }
 
         let current_settings = PersistentSettings::from_state(app.state());

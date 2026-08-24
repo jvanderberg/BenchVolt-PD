@@ -408,6 +408,10 @@ pub enum Action {
         operation: u16,
         enabled: bool,
     },
+    OutputEnergized {
+        channel: u8,
+        operation: u16,
+    },
     OutputFailed {
         channel: u8,
         operation: u16,
@@ -1024,6 +1028,12 @@ impl Reducer for AppReducer {
                 if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
                     next.awg_status = AwgStatus::StopRequested;
                     true
+                } else if state
+                    .channels
+                    .iter()
+                    .any(|output| output.transition != OutputTransition::Stable)
+                {
+                    false
                 } else {
                     let Some(output) = next.channels.get_mut(usize::from(channel)) else {
                         return Self::enforce_invariants(next);
@@ -1166,6 +1176,14 @@ impl Reducer for AppReducer {
                 }
             }
             Action::SetOutputRequested { channel, enabled } => {
+                if enabled
+                    && state
+                        .channels
+                        .iter()
+                        .any(|output| output.transition != OutputTransition::Stable)
+                {
+                    return Self::enforce_invariants(next);
+                }
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
                     return Self::enforce_invariants(next);
                 };
@@ -1221,6 +1239,19 @@ impl Reducer for AppReducer {
                     {
                         next.awg_status = AwgStatus::Running;
                     }
+                    true
+                }
+            }
+            Action::OutputEnergized { channel, operation } => {
+                let Some(output) = next.channels.get_mut(usize::from(channel)) else {
+                    return Self::enforce_invariants(next);
+                };
+                if output.transition != OutputTransition::Enabling(operation)
+                    || !output.requested_enabled
+                {
+                    false
+                } else {
+                    output.physical_enabled = true;
                     true
                 }
             }

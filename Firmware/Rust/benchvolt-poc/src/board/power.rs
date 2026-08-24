@@ -353,9 +353,6 @@ where
             }
             DriverOperation::RailEnable { rail, enabled } => {
                 Self::rail_enable(rail, enabled)?;
-                if enabled {
-                    self.delay.delay_ms(50u8);
-                }
                 Ok(())
             }
             DriverOperation::ConfigureRail { rail, millivolts } => {
@@ -372,7 +369,6 @@ where
                     true,
                     false,
                 )?;
-                self.delay.delay_ms(50u8);
                 Ok(())
             }
             DriverOperation::VerifyRail { rail } => Self::tps_verify(
@@ -410,9 +406,6 @@ where
                 if Self::gpio_is_set('B', 7) != enabled {
                     return Err(HardwareError::Verify);
                 }
-                if enabled {
-                    self.delay.delay_ms(50u8);
-                }
                 Ok(())
             }
             DriverOperation::ConfigureCh5 {
@@ -436,9 +429,6 @@ where
                     Self::TPS_CH5,
                     enabled,
                 )?;
-                if enabled {
-                    self.delay.delay_ms(50u8);
-                }
                 Ok(())
             }
             DriverOperation::Ch5Voltage(millivolts) => Self::tps_set_voltage(

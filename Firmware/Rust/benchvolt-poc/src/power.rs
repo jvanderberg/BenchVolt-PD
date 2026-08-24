@@ -6,6 +6,7 @@ use reducto::TransitionEffect;
 
 const STARTUP_GRACE_SAMPLES: u8 = 10;
 const FAULT_CONFIRM_SAMPLES: u8 = 3;
+const SINK_RECOVERY_SAMPLES: u8 = 10;
 const VOLTAGE_SETTING_SETTLE_SAMPLES: u8 = 25;
 // Board tests show IOUT_LIMIT is not a usable CH5 regulation loop. Keep this
 // fixed; user CC is implemented only by ADC feedback and voltage side effects.
@@ -186,6 +187,69 @@ impl ProtectionMonitor {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SinkProtectionEvent {
+    Trip(Fault),
+    Recovered,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct SinkProtectionMonitor {
+    overcurrent_samples: u8,
+    recovery_samples: u8,
+}
+
+impl SinkProtectionMonitor {
+    pub fn observe(
+        &mut self,
+        state: &AppState,
+        measurement: Measurement,
+    ) -> Option<SinkProtectionEvent> {
+        let output_active = state
+            .channels
+            .iter()
+            .any(|output| output.requested_enabled || output.physical_enabled);
+
+        if state.sink_fault != Fault::None {
+            self.overcurrent_samples = 0;
+            if !output_active
+                && measurement.valid
+                && measurement.milliamps <= state.sink_current_limit_ma
+            {
+                self.recovery_samples = self.recovery_samples.saturating_add(1);
+                if self.recovery_samples >= SINK_RECOVERY_SAMPLES {
+                    self.recovery_samples = 0;
+                    return Some(SinkProtectionEvent::Recovered);
+                }
+            } else {
+                self.recovery_samples = 0;
+            }
+            return None;
+        }
+
+        self.recovery_samples = 0;
+        if !output_active {
+            self.overcurrent_samples = 0;
+            return None;
+        }
+        if !measurement.valid {
+            self.overcurrent_samples = 0;
+            return Some(SinkProtectionEvent::Trip(Fault::Sensor));
+        }
+        if measurement.milliamps > state.sink_current_limit_ma {
+            self.overcurrent_samples = self.overcurrent_samples.saturating_add(1);
+        } else {
+            self.overcurrent_samples = 0;
+        }
+        if self.overcurrent_samples >= FAULT_CONFIRM_SAMPLES {
+            self.overcurrent_samples = 0;
+            Some(SinkProtectionEvent::Trip(Fault::OverCurrent))
+        } else {
+            None
+        }
+    }
+}
+
 /// Project application state into the semantics protection must validate.
 /// AWG owns the adjustable channel's voltage command, so comparing its live
 /// output with the saved DC compliance setpoint would create false faults
@@ -224,8 +288,10 @@ impl TransitionEffect<AppState> for FirmwareEffectPlanner {
     type Effect = FirmwareEffect;
 
     fn plan(old: &AppState, new: &AppState) -> Option<Self::Effect> {
-        let global_shutdown = old.screen != new.screen
+        let awg_boundary = old.screen != new.screen
             && (old.screen == crate::app::Screen::Awg || new.screen == crate::app::Screen::Awg);
+        let sink_trip = old.sink_fault != new.sink_fault && new.sink_fault != Fault::None;
+        let global_shutdown = awg_boundary || sink_trip;
         let power = if global_shutdown {
             None
         } else {
@@ -365,6 +431,9 @@ fn enable_is_eligible(state: &AppState, channel: u8) -> Result<(), Fault> {
     };
     if !state.recovery_armed || !state.temp_valid || !output.measurement.valid {
         return Err(Fault::Sensor);
+    }
+    if state.sink_fault != Fault::None {
+        return Err(state.sink_fault);
     }
     if state.temp_sixteenths_c >= OVERTEMPERATURE_REENABLE_SIXTEENTHS_C {
         return Err(Fault::OverTemperature);
@@ -721,6 +790,88 @@ mod tests {
     }
 
     #[test]
+    fn sink_limit_requires_three_consecutive_overcurrent_samples() {
+        let mut state = eligible_state();
+        state.channels[0].requested_enabled = true;
+        state.channels[0].physical_enabled = true;
+        state.sink_current_limit_ma = 1_000;
+        let over = Measurement {
+            millivolts: 5_000,
+            milliamps: 1_001,
+            valid: true,
+        };
+        let nominal = Measurement {
+            millivolts: 5_000,
+            milliamps: 1_000,
+            valid: true,
+        };
+        let mut monitor = SinkProtectionMonitor::default();
+
+        assert_eq!(monitor.observe(&state, over), None);
+        assert_eq!(monitor.observe(&state, nominal), None);
+        assert_eq!(monitor.observe(&state, over), None);
+        assert_eq!(monitor.observe(&state, over), None);
+        assert_eq!(
+            monitor.observe(&state, over),
+            Some(SinkProtectionEvent::Trip(Fault::OverCurrent))
+        );
+    }
+
+    #[test]
+    fn sink_sensor_failure_trips_only_while_an_output_is_active() {
+        let state = eligible_state();
+        let invalid = Measurement {
+            millivolts: 0,
+            milliamps: 0,
+            valid: false,
+        };
+        let mut monitor = SinkProtectionMonitor::default();
+        assert_eq!(monitor.observe(&state, invalid), None);
+
+        let mut active = state;
+        active.channels[2].requested_enabled = true;
+        assert_eq!(
+            monitor.observe(&active, invalid),
+            Some(SinkProtectionEvent::Trip(Fault::Sensor))
+        );
+    }
+
+    #[test]
+    fn sink_fault_recovers_only_after_outputs_are_off_and_input_is_stably_safe() {
+        let mut state = eligible_state();
+        state.sink_fault = Fault::OverCurrent;
+        state.channels[0].physical_enabled = true;
+        let safe = Measurement {
+            millivolts: 5_000,
+            milliamps: 500,
+            valid: true,
+        };
+        let mut monitor = SinkProtectionMonitor::default();
+        for _ in 0..SINK_RECOVERY_SAMPLES {
+            assert_eq!(monitor.observe(&state, safe), None);
+        }
+
+        state.channels[0].physical_enabled = false;
+        for _ in 1..SINK_RECOVERY_SAMPLES {
+            assert_eq!(monitor.observe(&state, safe), None);
+        }
+        assert_eq!(
+            monitor.observe(&state, safe),
+            Some(SinkProtectionEvent::Recovered)
+        );
+    }
+
+    #[test]
+    fn latched_sink_fault_blocks_output_enable() {
+        let mut state = eligible_state();
+        state.sink_fault = Fault::OverCurrent;
+        assert_eq!(
+            run_enable(&mut MockDriver::default(), &state, 0),
+            Err(Fault::OverCurrent)
+        );
+    }
+
+    #[test]
     fn ch5_uses_forced_pwm_only_for_awg_start() {
         let mut dc = eligible_state();
         let mut driver = MockDriver::default();
@@ -864,6 +1015,16 @@ mod tests {
         let mut temperature = old;
         temperature.temp_sixteenths_c += 1;
         assert_eq!(FirmwareEffectPlanner::plan(&old, &temperature), None);
+
+        let mut sink_trip = old;
+        sink_trip.sink_fault = Fault::OverCurrent;
+        assert_eq!(
+            FirmwareEffectPlanner::plan(&old, &sink_trip),
+            Some(FirmwareEffect {
+                power: None,
+                global_shutdown: true,
+            })
+        );
     }
 
     #[test]
@@ -991,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn usb_pd_input_limit_is_a_pure_bounded_alarm_setting() {
+    fn usb_pd_input_limit_edit_is_bounded_and_has_no_direct_bus_effect() {
         let mut state = eligible_state();
         state.screen = crate::app::Screen::UsbPdInput;
 

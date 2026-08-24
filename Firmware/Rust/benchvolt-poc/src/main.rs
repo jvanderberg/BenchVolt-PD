@@ -23,7 +23,7 @@ use benchvolt_poc::load::LoadAccumulator;
 use benchvolt_poc::power::{
     execute_effect, execute_global_shutdown, protection_output, tps55289_status_fault,
     DriverOperation, FirmwareEffectPlanner, PowerDriver, ProtectionMonitor, Rail,
-    OVERTEMPERATURE_TRIP_SIXTEENTHS_C,
+    SinkProtectionEvent, SinkProtectionMonitor, OVERTEMPERATURE_TRIP_SIXTEENTHS_C,
 };
 use benchvolt_poc::protocol::parse_milliunits;
 use benchvolt_poc::settings::{
@@ -125,7 +125,13 @@ fn feed_watchdog() {
     unsafe { core::ptr::write_volatile(0x4000_3000 as *mut u32, 0xaaaa) };
 }
 
-fn wait_for_flash_ready(status: *const u32) -> bool {
+// STM32F0 stalls instruction fetches from flash while the same bank is busy.
+// Keep the bounded wait in the copied-to-RAM `.data` output section so its
+// timeout and the watchdog remain meaningful during erase/program operations.
+#[inline(never)]
+#[link_section = ".data.flash_wait"]
+#[no_mangle]
+fn benchvolt_wait_for_flash_ready(status: *const u32) -> bool {
     for _ in 0..FLASH_READY_SPINS {
         if unsafe { core::ptr::read_volatile(status) } & 1 == 0 {
             return true;
@@ -1171,7 +1177,7 @@ fn invalidate_boot_metadata() -> (bool, Option<BootSeal>) {
         }
         let seal = (size >= 192 && size <= (SETTINGS_ADDR - 0x0800_8000) as u32)
             .then_some(BootSeal { crc, size });
-        if !wait_for_flash_ready(SR) {
+        if !benchvolt_wait_for_flash_ready(SR) {
             return (false, seal);
         }
         if core::ptr::read_volatile(CR) & CR_LOCK != 0 {
@@ -1182,7 +1188,7 @@ fn invalidate_boot_metadata() -> (bool, Option<BootSeal>) {
         core::ptr::write_volatile(CR, core::ptr::read_volatile(CR) | CR_PER);
         core::ptr::write_volatile(AR, BOOT_METADATA_ADDR as u32);
         core::ptr::write_volatile(CR, core::ptr::read_volatile(CR) | CR_STRT);
-        let ready = wait_for_flash_ready(SR);
+        let ready = benchvolt_wait_for_flash_ready(SR);
         let ok = ready
             && core::ptr::read_volatile(SR) & SR_ERRORS == 0
             && core::ptr::read_volatile(BOOT_METADATA_ADDR as *const u32) == u32::MAX;
@@ -1210,7 +1216,7 @@ fn restore_boot_seal(seal: BootSeal) -> bool {
         (BOOT_METADATA_ADDR, seal.crc.to_le_bytes()),
     ];
     unsafe {
-        if !wait_for_flash_ready(SR) {
+        if !benchvolt_wait_for_flash_ready(SR) {
             return false;
         }
         if core::ptr::read_volatile(CR) & CR_LOCK != 0 {
@@ -1224,7 +1230,9 @@ fn restore_boot_seal(seal: BootSeal) -> bool {
                 let offset = half * 2;
                 let value = u16::from_le_bytes([source[offset], source[offset + 1]]);
                 core::ptr::write_volatile((address + offset) as *mut u16, value);
-                if !wait_for_flash_ready(SR) || core::ptr::read_volatile(SR) & SR_ERRORS != 0 {
+                if !benchvolt_wait_for_flash_ready(SR)
+                    || core::ptr::read_volatile(SR) & SR_ERRORS != 0
+                {
                     core::ptr::write_volatile(
                         CR,
                         (core::ptr::read_volatile(CR) & !CR_PG) | CR_LOCK,
@@ -1296,7 +1304,7 @@ fn erase_flash_page(address: usize) -> bool {
     const CR_STRT: u32 = 1 << 6;
     const CR_LOCK: u32 = 1 << 7;
     unsafe {
-        if !wait_for_flash_ready(SR) {
+        if !benchvolt_wait_for_flash_ready(SR) {
             return false;
         }
         if core::ptr::read_volatile(CR) & CR_LOCK != 0 {
@@ -1307,7 +1315,7 @@ fn erase_flash_page(address: usize) -> bool {
         core::ptr::write_volatile(CR, core::ptr::read_volatile(CR) | CR_PER);
         core::ptr::write_volatile(AR, address as u32);
         core::ptr::write_volatile(CR, core::ptr::read_volatile(CR) | CR_STRT);
-        let ready = wait_for_flash_ready(SR);
+        let ready = benchvolt_wait_for_flash_ready(SR);
         let ok = ready
             && core::ptr::read_volatile(SR) & SR_ERRORS == 0
             && (0..FLASH_PAGE_SIZE)
@@ -1338,7 +1346,7 @@ fn program_settings_slot(slot: usize, record: SettingsRecord) -> bool {
     let bytes = encode_settings(record);
     let mut ok = true;
     unsafe {
-        if !wait_for_flash_ready(SR) {
+        if !benchvolt_wait_for_flash_ready(SR) {
             return false;
         }
         if core::ptr::read_volatile(CR) & CR_LOCK != 0 {
@@ -1350,7 +1358,8 @@ fn program_settings_slot(slot: usize, record: SettingsRecord) -> bool {
         for offset in (0..RECORD_SIZE).step_by(2) {
             let value = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
             core::ptr::write_volatile((address + offset) as *mut u16, value);
-            if !wait_for_flash_ready(SR) || core::ptr::read_volatile(SR) & SR_ERRORS != 0 {
+            if !benchvolt_wait_for_flash_ready(SR) || core::ptr::read_volatile(SR) & SR_ERRORS != 0
+            {
                 ok = false;
                 break;
             }
@@ -2134,6 +2143,7 @@ fn main() -> ! {
     let mut sink_accumulator = MeasurementAccumulator::new();
     let mut awg_load_accumulator = LoadAccumulator::new();
     let mut protection_monitors = [ProtectionMonitor::default(); 5];
+    let mut sink_protection_monitor = SinkProtectionMonitor::default();
     // TPS STATUS is latched and read-to-clear. A single observation can be a
     // completed startup/current-regulation event; only a same-class
     // reassertion on the following poll represents a persistent fault.
@@ -2718,6 +2728,13 @@ fn main() -> ! {
             ];
             let sink_measurement =
                 read_channel_measurement(&mut adc, &mut sink_voltage, &mut sink_current, 67, 10);
+            if let Some(event) = sink_protection_monitor.observe(app.state(), sink_measurement) {
+                let action = match event {
+                    SinkProtectionEvent::Trip(fault) => Action::SinkProtectionTrip(fault),
+                    SinkProtectionEvent::Recovered => Action::SinkProtectionRecovered,
+                };
+                dispatch_app(&mut app, &mut power_driver, action);
+            }
             for (accumulator, measurement) in channel_accumulators.iter_mut().zip(measurements) {
                 accumulator.push(measurement);
             }

@@ -262,6 +262,7 @@ pub struct AppState {
     pub channels: [ChannelSnapshot; 5],
     pub sink: Measurement,
     pub sink_current_limit_ma: u16,
+    pub sink_fault: Fault,
     pub temp_sixteenths_c: i16,
     pub temp_valid: bool,
     pub recovery_armed: bool,
@@ -298,6 +299,7 @@ impl AppState {
             ],
             sink: Measurement::INVALID,
             sink_current_limit_ma: 5_000,
+            sink_fault: Fault::None,
             temp_sixteenths_c,
             temp_valid,
             recovery_armed,
@@ -412,6 +414,8 @@ pub enum Action {
     Temperature(Option<i16>),
     Measurements([Measurement; 5]),
     SinkMeasurement(Measurement),
+    SinkProtectionTrip(Fault),
+    SinkProtectionRecovered,
 }
 
 pub struct AppReducer;
@@ -1266,6 +1270,23 @@ impl Reducer for AppReducer {
                 next.sink = measurement;
                 true
             }
+            Action::SinkProtectionTrip(fault)
+                if fault == Fault::None || state.sink_fault == fault =>
+            {
+                false
+            }
+            Action::SinkProtectionTrip(fault) => {
+                next.sink_fault = fault;
+                if !matches!(state.awg_status, AwgStatus::Stopped) {
+                    next.awg_status = AwgStatus::Fault;
+                }
+                true
+            }
+            Action::SinkProtectionRecovered if state.sink_fault == Fault::None => false,
+            Action::SinkProtectionRecovered => {
+                next.sink_fault = Fault::None;
+                true
+            }
         };
 
         Self::enforce_invariants(next)
@@ -1357,6 +1378,24 @@ mod tests {
             },
         );
         assert!(next.awg_load == LoadMeasurement::INVALID);
+    }
+
+    #[test]
+    fn sink_fault_latches_and_stops_awg_until_explicit_recovery() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        state.awg_status = AwgStatus::Running;
+
+        let tripped = AppReducer::reduce(&state, Action::SinkProtectionTrip(Fault::OverCurrent));
+        assert_eq!(tripped.sink_fault, Fault::OverCurrent);
+        assert!(tripped.awg_status == AwgStatus::Fault);
+
+        let unchanged =
+            AppReducer::reduce(&tripped, Action::SinkProtectionTrip(Fault::OverCurrent));
+        assert!(unchanged == tripped);
+
+        let recovered = AppReducer::reduce(&tripped, Action::SinkProtectionRecovered);
+        assert_eq!(recovered.sink_fault, Fault::None);
+        assert!(recovered.awg_status == AwgStatus::Fault);
     }
 
     #[test]

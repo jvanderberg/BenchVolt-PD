@@ -43,7 +43,7 @@ application links at `0x08008000` and is limited to the 92 KiB application
 partition ending before `0x0801f000`.
 
 CH1–CH5 current limits, CH4/CH5 voltage setpoints, the CH4/CH5 CV/CC modes,
-USB-PD input alarm limit, and temperature unit are persisted as versioned,
+USB-PD input protection limit, and temperature unit are persisted as versioned,
 CRC-checked append-only records in the
 reserved `0x0801f000..0x0801f7ff` settings page after an edit has remained
 quiet. Torn or corrupt records are ignored. Runtime saves only program a blank
@@ -161,12 +161,13 @@ use a resistor or an electronic load in constant-resistance mode for CC tests.
 
 The final screen is `USB PD Input`. It shows the measured sink voltage,
 current, and power in the same tabular format as the overview. A short press
-focuses the sink current alarm limit; rotation adjusts it from 0 to 5 A in
-10 mA steps. This intentionally matches the original firmware's behavior:
-`CurrlimitVSink` only changes the over-limit display warning. It does not
-disconnect VBUS, program the STUSB4500, or renegotiate the USB PD contract.
-The setting remains a pure reducer state change and emits no hardware side
-effect.
+focuses the sink current protection limit; rotation adjusts it from 0 to 5 A in
+10 mA steps. The edit itself does not program the STUSB4500 or renegotiate the
+USB PD contract. While an output is active, however, three consecutive valid
+ADC samples above the configured limit latch an input overcurrent fault and
+run the global hardware shutdown. A missing sink-current sample fails closed.
+The latch clears only after every output is off and ten consecutive samples are
+valid and at or below the limit; outputs do not automatically restart.
 
 ## Headless build and flash runbook
 
@@ -182,10 +183,10 @@ python3 -m venv /tmp/benchvolt-flash
 /tmp/benchvolt-flash/bin/pip install pyserial
 ```
 
-Build against an unpublished local Reducto checkout and produce the binary:
+Build against the published MIT-licensed Reducto crate and produce the binary:
 
 ```sh
-cargo --config 'patch."https://github.com/jvanderberg/reducto".reducto.path="/Users/joshv/projects/reducto"' build --release
+cargo build --release
 arm-none-eabi-objcopy -O binary \
   target/thumbv6m-none-eabi/release/benchvolt-poc \
   target/thumbv6m-none-eabi/release/benchvolt-poc.bin
@@ -197,8 +198,7 @@ request/failure transitions:
 
 ```sh
 host_triple=$(rustc -vV | sed -n 's/^host: //p')
-cargo --config 'patch."https://github.com/jvanderberg/reducto".reducto.path="/Users/joshv/projects/reducto"' \
-  test --lib --target "$host_triple"
+cargo test --lib --target "$host_triple"
 ```
 
 If the Rust application is running, send `JUMP:BOOTLOADER\n` over its CDC port.

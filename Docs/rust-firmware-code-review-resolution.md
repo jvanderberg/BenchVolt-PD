@@ -83,12 +83,16 @@ executor.
   without transmitting. Rust retains the same attach guard as the reference C
   driver. The same tuple remained stable after flashing the slower I2C build,
   ruling out the prior out-of-spec requested clock as the detach cause. The r3
-  schematic uses a stacked dual USB-C assembly: VBUS is shared, but only the
-  receptacle labelled `USB PD/COMM` routes CC1 and CC2 to the STUSB4500. That
-  makes the wrong physical receptacle, its footprint or solder joints, D3, or
-  an open CC trace the leading explanations for VBUS being present without
-  Type-C attachment. Test both plug orientations, then continuity/probe CC1
-  and CC2 from the intended receptacle through D3 to STUSB4500 pins 2 and 4.
+  schematic reveals the hardware defect: the stacked connector's CC contacts
+  are split between receptacles. STUSB4500 `CC1` reaches only upper-receptacle
+  pin `1A5`; that receptacle's `2B5/CC2` contact is unconnected. STUSB4500
+  `CC2` reaches only lower-receptacle pin `1B5`; that receptacle's `2A5/CC1`
+  contact is unconnected. The intended PD receptacle can therefore attach in
+  only one plug orientation. All VBUS contacts on both receptacles also share
+  the same `VBUS` net before Q1, so an ordinary powered COM cable and the PD
+  source are not isolated from one another. Board rework must route both CC
+  contacts of the intended PD receptacle to the corresponding STUSB4500 pins;
+  the COM connection must not introduce a second source onto shared VBUS.
 
 - Passive startup can recover RDO current exactly, but the RDO contains no
   nominal voltage. If the transient Source Capabilities message was missed,

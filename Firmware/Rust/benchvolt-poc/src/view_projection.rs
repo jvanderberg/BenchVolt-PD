@@ -1,5 +1,25 @@
 use crate::app::AppState;
 
+pub const fn seven_segment_mask(character: char) -> Option<u8> {
+    const DIGITS: [u8; 10] = [
+        0b111_0111,
+        0b010_0100,
+        0b101_1101,
+        0b110_1101,
+        0b010_1110,
+        0b110_1011,
+        0b111_1011,
+        0b010_0101,
+        0b111_1111,
+        0b110_1111,
+    ];
+    match character {
+        '0'..='9' => Some(DIGITS[character as usize - '0' as usize]),
+        '-' => Some(1 << 3),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FramedValueDamage {
     None,
@@ -128,6 +148,15 @@ pub fn awg_damage(old: &AppState, new: &AppState) -> AwgDamage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seven_segment_masks_cover_digits_and_minus_without_aliases() {
+        assert_eq!(seven_segment_mask('0'), Some(0b111_0111));
+        assert_eq!(seven_segment_mask('1'), Some(0b010_0100));
+        assert_eq!(seven_segment_mask('8'), Some(0b111_1111));
+        assert_eq!(seven_segment_mask('-'), Some(0b000_1000));
+        assert_eq!(seven_segment_mask('.'), None);
+    }
 
     #[test]
     fn value_edits_preserve_the_existing_focus_frame() {

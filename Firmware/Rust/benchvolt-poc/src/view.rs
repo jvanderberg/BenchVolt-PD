@@ -18,8 +18,8 @@ use benchvolt_poc::app::{
     ProfileStatus, RegulationMode, Screen, TemperatureUnit, HELP_MAX_SCROLL,
 };
 use benchvolt_poc::view_projection::{
-    awg_damage, framed_value_damage, sink_projection, FramedValueDamage, SinkPdStatus,
-    SinkProjection,
+    awg_damage, framed_value_damage, seven_segment_mask, sink_projection, FramedValueDamage,
+    SinkPdStatus, SinkProjection,
 };
 
 const TABLE_TOP: i32 = 24;
@@ -368,18 +368,6 @@ where
     }
 
     fn draw_hero_digit(&mut self, digit: char, origin: Point, color: Rgb565) {
-        const SEGMENTS: [[bool; 7]; 10] = [
-            [true, true, true, false, true, true, true],
-            [false, false, true, false, false, true, false],
-            [true, false, true, true, true, false, true],
-            [true, false, true, true, false, true, true],
-            [false, true, true, true, false, true, false],
-            [true, true, false, true, false, true, true],
-            [true, true, false, true, true, true, true],
-            [true, false, true, false, false, true, false],
-            [true, true, true, true, true, true, true],
-            [true, true, true, true, false, true, true],
-        ];
         const RECTS: [(i32, i32, u32, u32); 7] = [
             (4, 0, 14, 4),
             (0, 4, 4, 13),
@@ -390,19 +378,11 @@ where
             (4, 34, 14, 4),
         ];
 
-        if digit == '-' {
-            let (x, y, width, height) = RECTS[3];
-            Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
-                .into_styled(PrimitiveStyle::with_fill(color))
-                .draw(&mut self.display)
-                .ok();
-            return;
-        }
-        let Some(index) = digit.to_digit(10).map(|value| value as usize) else {
+        let Some(segments) = seven_segment_mask(digit) else {
             return;
         };
-        for (enabled, &(x, y, width, height)) in SEGMENTS[index].iter().zip(RECTS.iter()) {
-            if *enabled {
+        for (index, &(x, y, width, height)) in RECTS.iter().enumerate() {
+            if segments & (1 << index) != 0 {
                 Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
                     .into_styled(PrimitiveStyle::with_fill(color))
                     .draw(&mut self.display)
@@ -455,18 +435,6 @@ where
     }
 
     fn draw_power_digit(&mut self, digit: char, origin: Point) {
-        const SEGMENTS: [[bool; 7]; 10] = [
-            [true, true, true, false, true, true, true],
-            [false, false, true, false, false, true, false],
-            [true, false, true, true, true, false, true],
-            [true, false, true, true, false, true, true],
-            [false, true, true, true, false, true, false],
-            [true, true, false, true, false, true, true],
-            [true, true, false, true, true, true, true],
-            [true, false, true, false, false, true, false],
-            [true, true, true, true, true, true, true],
-            [true, true, true, true, false, true, true],
-        ];
         const RECTS: [(i32, i32, u32, u32); 7] = [
             (3, 0, 9, 3),
             (0, 3, 3, 9),
@@ -477,19 +445,11 @@ where
             (3, 24, 9, 3),
         ];
 
-        if digit == '-' {
-            let (x, y, width, height) = RECTS[3];
-            Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
-                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
-                .draw(&mut self.display)
-                .ok();
-            return;
-        }
-        let Some(index) = digit.to_digit(10).map(|value| value as usize) else {
+        let Some(segments) = seven_segment_mask(digit) else {
             return;
         };
-        for (enabled, &(x, y, width, height)) in SEGMENTS[index].iter().zip(RECTS.iter()) {
-            if *enabled {
+        for (index, &(x, y, width, height)) in RECTS.iter().enumerate() {
+            if segments & (1 << index) != 0 {
                 Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
                     .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
                     .draw(&mut self.display)

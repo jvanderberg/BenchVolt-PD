@@ -3,7 +3,7 @@
 This ledger reconciles the Claude review dated 2026-08-23 (performed against
 `explore/benchvolt-firmware` at `63ce8e7`) with the test-first hardening work on
 `benchvolt/review-hardening`. Line numbers in the original review are stale
-because `main.rs` has been reduced from 2,663 to 1,066 lines.
+because `main.rs` has been reduced from 2,663 to 1,012 lines.
 
 ## Resolved safety findings
 

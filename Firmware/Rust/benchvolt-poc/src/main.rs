@@ -24,8 +24,8 @@ use benchvolt_poc::load::LoadAccumulator;
 use benchvolt_poc::pd::{Negotiator as PdNegotiator, PdEvent};
 use benchvolt_poc::power::{
     execute_effect, execute_global_shutdown, protection_output, tps55289_status_fault,
-    FirmwareEffectPlanner, PowerDriver, ProtectionMonitor, SinkProtectionEvent,
-    SinkProtectionMonitor, OVERTEMPERATURE_TRIP_SIXTEENTHS_C,
+    FirmwareEffectPlanner, PowerDriver, ProtectionMonitor, Rail, SharedRailProtectionMonitor,
+    SinkProtectionEvent, SinkProtectionMonitor, OVERTEMPERATURE_TRIP_SIXTEENTHS_C,
 };
 use benchvolt_poc::protocol::parse_milliunits;
 use benchvolt_poc::settings::{
@@ -1444,11 +1444,13 @@ fn main() -> ! {
     let mut sink_accumulator = MeasurementAccumulator::new();
     let mut awg_load_accumulator = LoadAccumulator::new();
     let mut protection_monitors = [ProtectionMonitor::default(); 5];
+    let mut shared_rail_protection_monitor = SharedRailProtectionMonitor::default();
     let mut sink_protection_monitor = SinkProtectionMonitor::default();
     // TPS STATUS is latched and read-to-clear. A single observation can be a
     // completed startup/current-regulation event; only a same-class
     // reassertion on the following poll represents a persistent fault.
     let mut ch5_pending_tps_fault = None;
+    let mut shared_pending_tps_faults = [None; 2];
     let mut awg_scheduler = AwgScheduler::new();
     let mut arb_scheduler = ArbScheduler::new();
     let mut active_arb_start: Option<ArbStart> = None;
@@ -2012,6 +2014,41 @@ fn main() -> ! {
         }
         if measurement_ticks >= 20 {
             measurement_ticks = 0;
+            for (rail_index, rail, channels) in [
+                (0usize, Rail::Dc1, [0u8, 1]),
+                (1usize, Rail::Dc2, [2u8, 3]),
+            ] {
+                let active = channels.map(|channel| {
+                    let output = &app.state().channels[usize::from(channel)];
+                    output.requested_enabled || output.physical_enabled
+                });
+                if active.into_iter().any(|enabled| enabled) {
+                    let fault = match power_driver.read_rail_status(rail) {
+                        Ok(status) => tps55289_status_fault(status),
+                        Err(_) => Some(benchvolt_poc::app::Fault::Hardware),
+                    };
+                    if let Some(fault) = fault {
+                        if shared_pending_tps_faults[rail_index] == Some(fault) {
+                            shared_pending_tps_faults[rail_index] = None;
+                            for (channel, active) in channels.into_iter().zip(active) {
+                                if active {
+                                    dispatch_app(
+                                        &mut app,
+                                        &mut power_driver,
+                                        Action::ProtectionTrip { channel, fault },
+                                    );
+                                }
+                            }
+                        } else {
+                            shared_pending_tps_faults[rail_index] = Some(fault);
+                        }
+                    } else {
+                        shared_pending_tps_faults[rail_index] = None;
+                    }
+                } else {
+                    shared_pending_tps_faults[rail_index] = None;
+                }
+            }
             if app.state().channels[4].physical_enabled {
                 match power_driver.read_ch5_status() {
                     Ok(status) => {
@@ -2055,6 +2092,25 @@ fn main() -> ! {
             ];
             let sink_measurement =
                 read_channel_measurement(&mut adc, &mut sink_voltage, &mut sink_current, 67, 10);
+            for (rail, channels) in [(Rail::Dc1, [0u8, 1]), (Rail::Dc2, [2u8, 3])] {
+                if let Some(fault) =
+                    shared_rail_protection_monitor.observe(app.state(), &measurements, rail)
+                {
+                    let active = channels.map(|channel| {
+                        let output = &app.state().channels[usize::from(channel)];
+                        output.requested_enabled || output.physical_enabled
+                    });
+                    for (channel, active) in channels.into_iter().zip(active) {
+                        if active {
+                            dispatch_app(
+                                &mut app,
+                                &mut power_driver,
+                                Action::ProtectionTrip { channel, fault },
+                            );
+                        }
+                    }
+                }
+            }
             if let Some(event) = sink_protection_monitor.observe(app.state(), sink_measurement) {
                 let action = match event {
                     SinkProtectionEvent::Trip(fault) => Action::SinkProtectionTrip(fault),

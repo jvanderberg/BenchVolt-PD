@@ -61,6 +61,19 @@ where
             .map_err(|_| HardwareError::Bus)
     }
 
+    pub(crate) fn read_rail_status(&mut self, rail: Rail) -> Result<u8, HardwareError> {
+        self.shared_bus
+            .read_register(
+                match rail {
+                    Rail::Dc1 => Self::TPS_DC1,
+                    Rail::Dc2 => Self::TPS_DC2,
+                },
+                0x07,
+                &mut self.delay,
+            )
+            .map_err(|_| HardwareError::Bus)
+    }
+
     fn write_gpio(port: char, pin: u8, enabled: bool) {
         let bits = if enabled {
             1u32 << pin

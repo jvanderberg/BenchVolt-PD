@@ -207,6 +207,52 @@ pub struct SinkProtectionMonitor {
     recovery_samples: u8,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct SharedRailProtectionMonitor {
+    overcurrent_samples: [u8; 2],
+}
+
+impl SharedRailProtectionMonitor {
+    pub fn observe(
+        &mut self,
+        state: &AppState,
+        measurements: &[Measurement; 5],
+        rail: Rail,
+    ) -> Option<Fault> {
+        let (rail_index, channels) = match rail {
+            Rail::Dc1 => (0, [0usize, 1]),
+            Rail::Dc2 => (1, [2usize, 3]),
+        };
+        let mut active = false;
+        let mut total_ma = 0u32;
+        for channel in channels {
+            if state.channels[channel].physical_enabled {
+                active = true;
+                if !measurements[channel].valid {
+                    self.overcurrent_samples[rail_index] = 0;
+                    return Some(Fault::Sensor);
+                }
+                total_ma = total_ma.saturating_add(u32::from(measurements[channel].milliamps));
+            }
+        }
+        if !active {
+            self.overcurrent_samples[rail_index] = 0;
+            return None;
+        }
+        if total_ma > 5_000 {
+            self.overcurrent_samples[rail_index] =
+                self.overcurrent_samples[rail_index].saturating_add(1);
+        } else {
+            self.overcurrent_samples[rail_index] = 0;
+        }
+        if self.overcurrent_samples[rail_index] >= FAULT_CONFIRM_SAMPLES {
+            Some(Fault::OverCurrent)
+        } else {
+            None
+        }
+    }
+}
+
 impl SinkProtectionMonitor {
     pub fn observe(
         &mut self,
@@ -1702,6 +1748,50 @@ mod tests {
                 channel: 0,
                 enabled: false,
             }]
+        );
+    }
+
+    #[test]
+    fn shared_rail_limit_requires_three_summed_overcurrent_samples() {
+        let mut state = eligible_state();
+        state.channels[0].physical_enabled = true;
+        state.channels[1].physical_enabled = true;
+        let mut measurements = [Measurement {
+            millivolts: 3_000,
+            milliamps: 0,
+            valid: true,
+        }; 5];
+        measurements[0].milliamps = 2_600;
+        measurements[1].milliamps = 2_500;
+
+        let mut monitor = SharedRailProtectionMonitor::default();
+        assert!(monitor.observe(&state, &measurements, Rail::Dc1).is_none());
+        assert!(monitor.observe(&state, &measurements, Rail::Dc1).is_none());
+        assert_eq!(
+            monitor.observe(&state, &measurements, Rail::Dc1),
+            Some(Fault::OverCurrent)
+        );
+    }
+
+    #[test]
+    fn shared_rail_monitor_ignores_inactive_sibling_current_and_fails_closed_active_sensors() {
+        let mut state = eligible_state();
+        state.channels[0].physical_enabled = true;
+        let mut measurements = [Measurement {
+            millivolts: 3_000,
+            milliamps: 2_900,
+            valid: true,
+        }; 5];
+        measurements[1].milliamps = 6_000;
+
+        let mut monitor = SharedRailProtectionMonitor::default();
+        for _ in 0..3 {
+            assert!(monitor.observe(&state, &measurements, Rail::Dc1).is_none());
+        }
+        measurements[0].valid = false;
+        assert_eq!(
+            monitor.observe(&state, &measurements, Rail::Dc1),
+            Some(Fault::Sensor)
         );
     }
 

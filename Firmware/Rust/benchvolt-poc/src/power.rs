@@ -2044,6 +2044,24 @@ mod tests {
     }
 
     #[test]
+    fn active_pd_contract_loss_plans_global_shutdown_before_any_power_effect() {
+        let mut active = eligible_state();
+        active.channels[0].requested_enabled = true;
+        active.channels[0].physical_enabled = true;
+
+        let lost = AppReducer::reduce(&active, Action::PdFailed(crate::pd::PdError::Detached));
+        assert_eq!(lost.pd_contract, None);
+        assert_eq!(lost.sink_fault, Fault::Hardware);
+        assert_eq!(
+            FirmwareEffectPlanner::plan(&active, &lost),
+            Some(FirmwareEffect {
+                power: None,
+                global_shutdown: true,
+            })
+        );
+    }
+
+    #[test]
     fn every_single_driver_failure_fails_closed() {
         for channel in 0..5 {
             let state = requested(&eligible_state(), channel, true);

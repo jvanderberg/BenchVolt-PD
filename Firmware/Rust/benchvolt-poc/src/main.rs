@@ -23,7 +23,7 @@ use benchvolt_poc::arb::{
 };
 use benchvolt_poc::awg::Scheduler as AwgScheduler;
 use benchvolt_poc::input_policy::{encoder_action, ButtonTracker};
-use benchvolt_poc::load::LoadAccumulator;
+use benchvolt_poc::measurement::MeasurementWindows;
 use benchvolt_poc::monitoring::{ProtectionService, TpsStatusObservation};
 use benchvolt_poc::pd::{Negotiator as PdNegotiator, PdEvent};
 use benchvolt_poc::power::{
@@ -32,7 +32,7 @@ use benchvolt_poc::power::{
 };
 use benchvolt_poc::settings::{PersistentSettings, RecordKind, SettingsDebouncer};
 use board::{
-    adc::{read_channel_measurement, BoundedAdc, MeasurementAccumulator},
+    adc::{read_channel_measurement, BoundedAdc},
     i2c::{SoftI2c, SoftPdBus},
     power::HardwarePowerDriver,
 };
@@ -421,9 +421,7 @@ fn main() -> ! {
     let mut measurement_ticks = 0u16;
     let mut display_measurement_ticks = 0u16;
     let mut awg_load_ticks = 0u16;
-    let mut channel_accumulators = [MeasurementAccumulator::new(); 5];
-    let mut sink_accumulator = MeasurementAccumulator::new();
-    let mut awg_load_accumulator = LoadAccumulator::new();
+    let mut measurement_windows = MeasurementWindows::new();
     let mut protection = ProtectionService::default();
     let mut awg_scheduler = AwgScheduler::new();
     let mut arb_scheduler = ArbScheduler::new();
@@ -996,15 +994,7 @@ fn main() -> ! {
             if let Some(action) = protection.observe_sink(app.state(), sink_measurement) {
                 dispatch_app(&mut app, &mut power_driver, action);
             }
-            for (accumulator, measurement) in channel_accumulators.iter_mut().zip(measurements) {
-                accumulator.push(measurement);
-            }
-            sink_accumulator.push(sink_measurement);
-            if app.state().awg_status == AwgStatus::Running {
-                awg_load_accumulator
-                    .push(measurements[usize::from(app.state().active_awg_channel())]);
-            } else {
-                awg_load_accumulator.reset();
+            if !measurement_windows.record(app.state(), measurements, sink_measurement) {
                 awg_load_ticks = 0;
             }
             for channel in 0..5u8 {
@@ -1032,21 +1022,16 @@ fn main() -> ! {
         }
         if display_measurement_ticks >= 200 {
             display_measurement_ticks = 0;
+            let (measurements, sink_measurement) = measurement_windows.take_display();
             dispatch_app(
                 &mut app,
                 &mut power_driver,
-                Action::Measurements([
-                    channel_accumulators[0].take(),
-                    channel_accumulators[1].take(),
-                    channel_accumulators[2].take(),
-                    channel_accumulators[3].take(),
-                    channel_accumulators[4].take(),
-                ]),
+                Action::Measurements(measurements),
             );
             dispatch_app(
                 &mut app,
                 &mut power_driver,
-                Action::SinkMeasurement(sink_accumulator.take()),
+                Action::SinkMeasurement(sink_measurement),
             );
         }
         if awg_load_ticks >= 1_000 {
@@ -1054,7 +1039,7 @@ fn main() -> ! {
             dispatch_app(
                 &mut app,
                 &mut power_driver,
-                Action::AwgLoadMeasurement(awg_load_accumulator.take()),
+                Action::AwgLoadMeasurement(measurement_windows.take_awg_load()),
             );
         }
 

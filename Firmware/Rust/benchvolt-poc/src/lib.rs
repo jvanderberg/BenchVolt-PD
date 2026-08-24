@@ -6,6 +6,7 @@ pub mod awg;
 pub mod input_policy;
 pub mod limits;
 pub mod load;
+pub mod measurement;
 pub mod monitoring;
 pub mod pd;
 pub mod power;

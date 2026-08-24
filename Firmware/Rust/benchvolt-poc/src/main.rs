@@ -705,25 +705,6 @@ fn main() -> ! {
         service_tick = input_ticks;
         let mut due = cadence.advance(elapsed_ms);
 
-        let protection_stale = cadence.protection_stale(!app.state().outputs_inactive());
-        let stale_actions =
-            ProtectionService::stale_sample_trip_actions(app.state(), protection_stale);
-        if stale_actions.iter().any(Option::is_some) {
-            let shutdown_ok = execute_global_shutdown(&mut power_driver).is_ok();
-            for action in stale_actions.into_iter().flatten() {
-                dispatch_app(&mut app, &mut power_driver, action);
-            }
-            dispatch_app(
-                &mut app,
-                &mut power_driver,
-                if shutdown_ok {
-                    Action::GlobalShutdownApplied
-                } else {
-                    Action::GlobalShutdownFailed
-                },
-            );
-        }
-
         let outputs_off = app.state().outputs_inactive();
         for event in pd_service
             .tick(

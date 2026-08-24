@@ -6,16 +6,12 @@ pub struct Due {
     pub awg_load: bool,
 }
 
-pub const PROTECTION_STALE_MS: u16 = 100;
-
 #[derive(Default)]
 pub struct ServiceCadence {
     temperature_ms: u16,
     measurement_ms: u16,
     display_measurement_ms: u16,
     awg_load_ms: u16,
-    measurement_age_ms: u16,
-    protection_late_ms: u16,
     health_ms: u32,
 }
 
@@ -23,24 +19,12 @@ impl ServiceCadence {
     #[inline(always)]
     pub fn advance(&mut self, elapsed_ms: u16) -> Due {
         self.health_ms = self.health_ms.saturating_add(u32::from(elapsed_ms));
-        self.measurement_age_ms = self.measurement_age_ms.saturating_add(elapsed_ms);
-        let due = Due {
+        Due {
             temperature: tick(&mut self.temperature_ms, elapsed_ms, 100),
             measurement: tick(&mut self.measurement_ms, elapsed_ms, 20),
             display_measurement: tick(&mut self.display_measurement_ms, elapsed_ms, 200),
             awg_load: tick(&mut self.awg_load_ms, elapsed_ms, 1_000),
-        };
-        if due.measurement {
-            if self.measurement_age_ms > 20 {
-                self.protection_late_ms = self
-                    .protection_late_ms
-                    .saturating_add(self.measurement_age_ms);
-            } else {
-                self.protection_late_ms = 0;
-            }
-            self.measurement_age_ms = 0;
         }
-        due
     }
 
     #[inline(always)]
@@ -54,14 +38,6 @@ impl ServiceCadence {
         self.health_ms >= milliseconds
     }
 
-    pub fn protection_stale(&mut self, outputs_active: bool) -> bool {
-        if !outputs_active {
-            self.measurement_age_ms = 0;
-            self.protection_late_ms = 0;
-            return false;
-        }
-        self.protection_late_ms >= PROTECTION_STALE_MS
-    }
 }
 
 #[inline(always)]
@@ -117,25 +93,6 @@ mod tests {
         assert!(next.temperature);
         assert!(!cadence.advance(19).measurement);
         assert!(cadence.advance(1).measurement);
-    }
-
-    #[test]
-    fn repeated_late_measurements_fail_closed_but_one_late_pass_can_recover() {
-        let mut cadence = ServiceCadence::default();
-        assert!(cadence.advance(99).measurement);
-        assert!(!cadence.protection_stale(true));
-        assert!(cadence.advance(1).measurement);
-        assert!(!cadence.protection_stale(true));
-
-        assert!(cadence.advance(99).measurement);
-        assert!(!cadence.protection_stale(true));
-        assert!(cadence.advance(99).measurement);
-        assert!(cadence.protection_stale(true));
-
-        // Timing history accumulated while powered down cannot fault a later
-        // output request.
-        assert!(!cadence.protection_stale(false));
-        assert!(!cadence.protection_stale(true));
     }
 
     #[test]

@@ -2044,6 +2044,26 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_screen_navigation_preserves_an_active_output_without_power_effects() {
+        let mut overview = eligible_state();
+        overview.screen = crate::app::Screen::Overview;
+        overview.channels[0].requested_enabled = true;
+        overview.channels[0].physical_enabled = true;
+
+        let detail = AppReducer::reduce(&overview, Action::NextScreen);
+        assert!(detail.screen == crate::app::Screen::Channel(0));
+        assert!(detail.channels[0].requested_enabled);
+        assert!(detail.channels[0].physical_enabled);
+        assert_eq!(detail.channels[0].fault, Fault::None);
+        assert_eq!(FirmwareEffectPlanner::plan(&overview, &detail), None);
+
+        let returned = AppReducer::reduce(&detail, Action::PreviousScreen);
+        assert!(returned.screen == crate::app::Screen::Overview);
+        assert!(returned.channels == overview.channels);
+        assert_eq!(FirmwareEffectPlanner::plan(&detail, &returned), None);
+    }
+
+    #[test]
     fn active_pd_contract_loss_plans_global_shutdown_before_any_power_effect() {
         let mut active = eligible_state();
         active.channels[0].requested_enabled = true;

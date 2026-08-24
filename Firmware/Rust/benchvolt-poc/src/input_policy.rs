@@ -7,13 +7,14 @@ const BUTTON_CLICK_MIN_MS: u16 = 30;
 const OVERVIEW_HOLD_MS: u16 = 500;
 const REBOOT_HOLD_MS: u16 = 3_000;
 
-/// Match the r3 encoder wiring and the legacy C convention: PB13 high on the
-/// PB12 rising edge is an upward/positive adjustment.
+/// Match the direction observed on the assembled r3 unit: PB13 low on the
+/// PB12 rising edge is clockwise/upward. The legacy C callback names the
+/// opposite electrical phase `OnRotaryUP`, but traverses menus in reverse.
 pub const fn encoder_direction(dt_high: bool) -> i8 {
     if dt_high {
-        1
-    } else {
         -1
+    } else {
+        1
     }
 }
 
@@ -146,8 +147,9 @@ mod tests {
 
     #[test]
     fn encoder_direction_matches_the_legacy_hardware_mapping() {
-        assert_eq!(encoder_direction(true), 1);
-        assert_eq!(encoder_direction(false), -1);
+        // Device-observed clockwise rotation has PB13 low at PB12's rising edge.
+        assert_eq!(encoder_direction(false), 1);
+        assert_eq!(encoder_direction(true), -1);
     }
 
     #[test]

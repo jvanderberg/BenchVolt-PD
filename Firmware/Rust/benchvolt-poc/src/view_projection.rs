@@ -1,5 +1,9 @@
 use crate::app::AppState;
 
+pub const fn centered_origin(container_origin: i32, container_size: u32, item_size: u32) -> i32 {
+    container_origin + ((container_size - item_size) / 2) as i32
+}
+
 pub const fn seven_segment_mask(character: char) -> Option<u8> {
     const DIGITS: [u8; 10] = [
         0b111_0111,
@@ -151,6 +155,16 @@ pub fn awg_damage(old: &AppState, new: &AppState) -> AwgDamage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toggle_knobs_share_the_track_center_at_both_sizes() {
+        assert_eq!(centered_origin(5, 14, 10), 7);
+        assert_eq!(centered_origin(130, 28, 22), 133);
+
+        // Compare doubled centers to avoid fractional-pixel arithmetic.
+        assert_eq!(2 * 5 + 14, 2 * 7 + 10);
+        assert_eq!(2 * 130 + 28, 2 * 133 + 22);
+    }
 
     #[test]
     fn seven_segment_masks_cover_digits_and_minus_without_aliases() {

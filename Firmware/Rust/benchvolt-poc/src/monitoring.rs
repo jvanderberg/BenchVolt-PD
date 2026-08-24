@@ -50,17 +50,6 @@ impl ProtectionService {
         })
     }
 
-    pub fn stale_sample_trip_actions(state: &AppState, stale: bool) -> [Option<Action>; 5] {
-        core::array::from_fn(|index| {
-            let output = &state.channels[index];
-            (stale && (output.requested_enabled || output.physical_enabled))
-                .then_some(Action::ProtectionTrip {
-                    channel: index as u8,
-                    fault: Fault::Hardware,
-                })
-        })
-    }
-
     /// TPS STATUS is latched and read-to-clear. Require the same fault to
     /// reassert on the next active-rail poll before tripping either sibling.
     pub fn observe_shared_status(
@@ -276,29 +265,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn stale_sampling_fails_closed_only_for_active_outputs() {
-        let mut state = active_state(2);
-        state.channels[4].requested_enabled = true;
-        assert!(ProtectionService::stale_sample_trip_actions(&state, false)
-            .iter()
-            .all(Option::is_none));
-
-        let actions = ProtectionService::stale_sample_trip_actions(&state, true);
-        assert!(actions[0].is_none());
-        assert!(matches!(
-            actions[2],
-            Some(Action::ProtectionTrip {
-                channel: 2,
-                fault: Fault::Hardware
-            })
-        ));
-        assert!(matches!(
-            actions[4],
-            Some(Action::ProtectionTrip {
-                channel: 4,
-                fault: Fault::Hardware
-            })
-        ));
-    }
 }

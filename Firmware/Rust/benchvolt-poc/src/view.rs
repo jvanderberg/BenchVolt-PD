@@ -21,8 +21,8 @@ use benchvolt_poc::ui_content::{
     HELP_MAX_SCROLL, HELP_TEXT, HELP_VISIBLE_LINES, MAIN_MENU_ITEMS,
 };
 use benchvolt_poc::view_projection::{
-    awg_damage, framed_value_damage, seven_segment_mask, sink_projection, FramedValueDamage,
-    SinkPdStatus, SinkProjection,
+    awg_damage, centered_origin, framed_value_damage, seven_segment_mask, sink_projection,
+    FramedValueDamage, SinkPdStatus, SinkProjection,
 };
 
 const TABLE_TOP: i32 = 24;
@@ -299,12 +299,14 @@ where
         let top = Self::channel_row_top(index);
         const TRACK_X: i32 = 248;
         const TRACK_WIDTH: i32 = 27;
-        const KNOB_DIAMETER: i32 = 9;
+        const TRACK_HEIGHT: u32 = 14;
+        const KNOB_DIAMETER: i32 = 10;
         const KNOB_INSET: i32 = 2;
+        let track_y = top + 5;
         self.fill_capsule(
-            Point::new(TRACK_X, top + 6),
+            Point::new(TRACK_X, track_y),
             TRACK_WIDTH as u32,
-            13,
+            TRACK_HEIGHT,
             track_color,
         );
         let knob_x = match projection.status {
@@ -312,7 +314,13 @@ where
             StatusProjection::Wait => TRACK_X + (TRACK_WIDTH - KNOB_DIAMETER) / 2,
             StatusProjection::Off | StatusProjection::Fault => TRACK_X + KNOB_INSET,
         };
-        Circle::new(Point::new(knob_x, top + 8), KNOB_DIAMETER as u32)
+        Circle::new(
+            Point::new(
+                knob_x,
+                centered_origin(track_y, TRACK_HEIGHT, KNOB_DIAMETER as u32),
+            ),
+            KNOB_DIAMETER as u32,
+        )
             .into_styled(PrimitiveStyle::with_fill(if focused {
                 Rgb565::CYAN
             } else {
@@ -590,13 +598,22 @@ where
             StatusProjection::Wait => Rgb565::new(24, 38, 4),
             StatusProjection::Off | StatusProjection::Fault => Rgb565::new(24, 5, 5),
         };
-        self.fill_capsule(Point::new(249, 130), 58, 28, track_color);
+        const TRACK_Y: i32 = 130;
+        const TRACK_HEIGHT: u32 = 28;
+        const KNOB_DIAMETER: u32 = 22;
+        self.fill_capsule(Point::new(249, TRACK_Y), 58, TRACK_HEIGHT, track_color);
         let knob_x = if matches!(status, StatusProjection::On) {
             282
         } else {
             252
         };
-        Circle::new(Point::new(knob_x, 132), 22)
+        Circle::new(
+            Point::new(
+                knob_x,
+                centered_origin(TRACK_Y, TRACK_HEIGHT, KNOB_DIAMETER),
+            ),
+            KNOB_DIAMETER,
+        )
             .into_styled(PrimitiveStyle::with_fill(if focused {
                 Rgb565::CYAN
             } else {

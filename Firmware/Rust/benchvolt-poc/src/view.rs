@@ -19,7 +19,7 @@ use benchvolt_poc::app::{
     AppState, AwgStatus, AwgWaveform, ChannelSnapshot, ControlFocus, Fault, OutputTransition,
     ProfileStatus, RegulationMode, Screen, TemperatureUnit, HELP_MAX_SCROLL,
 };
-use benchvolt_poc::view_projection::awg_damage;
+use benchvolt_poc::view_projection::{awg_damage, sink_projection, SinkProjection};
 
 const TABLE_TOP: i32 = 24;
 const HEADER_BOTTOM: i32 = 45;
@@ -123,30 +123,6 @@ fn detail_projection(channel: &ChannelSnapshot, focus: ControlFocus) -> DetailPr
         focus,
         regulation_mode: channel.regulation_mode,
         regulating_current: row.regulating_current,
-    }
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-struct SinkProjection {
-    voltage_centivolts: Option<u16>,
-    current_centiamps: Option<u16>,
-    power_centiwatts: Option<u32>,
-    limit_centiamps: u16,
-    focused: bool,
-    over_limit: bool,
-}
-
-fn sink_projection(state: &AppState) -> SinkProjection {
-    SinkProjection {
-        voltage_centivolts: state.sink.valid.then_some(state.sink.millivolts / 10),
-        current_centiamps: state.sink.valid.then_some(state.sink.milliamps / 10),
-        power_centiwatts: state
-            .sink
-            .valid
-            .then_some(u32::from(state.sink.millivolts) * u32::from(state.sink.milliamps) / 10_000),
-        limit_centiamps: state.sink_current_limit_ma / 10,
-        focused: state.focus == ControlFocus::CurrentLimit,
-        over_limit: state.sink.valid && state.sink.milliamps > state.sink_current_limit_ma,
     }
 }
 

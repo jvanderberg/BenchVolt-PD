@@ -1,5 +1,30 @@
 use crate::app::AppState;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SinkProjection {
+    pub voltage_centivolts: Option<u16>,
+    pub current_centiamps: Option<u16>,
+    pub power_centiwatts: Option<u32>,
+    pub limit_centiamps: u16,
+    pub focused: bool,
+    pub over_limit: bool,
+}
+
+pub fn sink_projection(state: &AppState) -> SinkProjection {
+    SinkProjection {
+        voltage_centivolts: state.sink.valid.then_some(state.sink.millivolts / 10),
+        current_centiamps: state.sink.valid.then_some(state.sink.milliamps / 10),
+        power_centiwatts: state
+            .sink
+            .valid
+            .then_some(u32::from(state.sink.millivolts) * u32::from(state.sink.milliamps) / 10_000),
+        limit_centiamps: state.sink_current_limit_ma / 10,
+        focused: state.focus == crate::app::ControlFocus::CurrentLimit,
+        over_limit: state.sink_fault != crate::app::Fault::None
+            || (state.sink.valid && state.sink.milliamps > state.sink_current_limit_ma),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AwgDamage {
     pub rows: u8,
@@ -63,6 +88,22 @@ pub fn awg_damage(old: &AppState, new: &AppState) -> AwgDamage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sink_projection_keeps_latched_fault_visibly_asserted() {
+        let mut state = AppState::new(true, None);
+        state.sink = crate::app::Measurement {
+            millivolts: 5_000,
+            milliamps: 100,
+            valid: true,
+        };
+        state.sink_current_limit_ma = 1_000;
+        state.sink_fault = crate::app::Fault::OverCurrent;
+
+        let projection = sink_projection(&state);
+        assert!(projection.over_limit);
+        assert_eq!(projection.current_centiamps, Some(10));
+    }
 
     #[test]
     fn encoder_edit_invalidates_only_the_changed_value() {

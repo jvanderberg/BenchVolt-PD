@@ -5,6 +5,7 @@ pub mod arb;
 pub mod awg;
 pub mod limits;
 pub mod load;
+pub mod monitoring;
 pub mod pd;
 pub mod power;
 pub mod protocol;

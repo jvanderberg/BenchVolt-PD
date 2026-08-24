@@ -79,6 +79,35 @@ cable before connecting the PPS source.
 
 ## Required hardware checks and correction
 
+### Non-invasive diagnosis when the board cannot be probed
+
+The tested board is installed such that continuity probing and connector rework
+are not practical. Use this cable-only test with the PPS source and receptacle-B
+COM cable both disconnected:
+
+1. Put S2 in the receptacle-A (`USB_A`) position.
+2. Connect only receptacle A to a known USB-C computer port with a known
+   data-capable USB-C cable.
+3. Observe whether the display powers and whether a CDC device appears. Repeat
+   after flipping the plug at the board, even though the schematic routes both
+   orientations.
+
+The result separates the accessible fault boundary:
+
+- No board power in either orientation means the USB-C host is not recognizing
+  a sink attachment; the receptacle-A CC/STUSB path is the primary failure.
+- Board power with no CDC device in either S2 position means attachment and
+  VBUS are present but the receptacle-A `USB_A` data path is failing.
+- CDC enumeration allows `SYST:PD:RAW?` to verify attach and contract state
+  directly over the same cable.
+
+No firmware change can make a USB-C host enable its port when the host cannot
+see the physical Rd/CC attachment. Until the one-cable mode enumerates or a
+VBUS-blocking COM adapter is available, connected PPS diagnostics cannot be
+performed safely over USB CDC on this board revision.
+
+### Probe/rework procedure when the board becomes accessible
+
 With all cables and power removed:
 
 1. Verify continuity from receptacle-A `1A5/CC1` and `1B5/CC2` through D3 to

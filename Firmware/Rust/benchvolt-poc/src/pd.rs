@@ -98,6 +98,7 @@ pub struct Diagnostics {
     pub vbus_ctrl: u8,
     pub pe_fsm: u8,
     pub sink_pdo_count: u8,
+    pub sink_pdos: [u8; 12],
     pub active_rdo: [u8; 4],
 }
 
@@ -118,6 +119,8 @@ pub fn read_diagnostics(bus: &mut impl PdBus) -> Result<Diagnostics, BusError> {
     let vbus_ctrl = read_byte(bus, VBUS_CTRL)?;
     let pe_fsm = read_byte(bus, PE_FSM)?;
     let sink_pdo_count = read_byte(bus, SINK_PDO_COUNT)?;
+    let mut sink_pdos = [0; 12];
+    bus.read(SINK_PDO1, &mut sink_pdos)?;
     let mut active_rdo = [0; 4];
     bus.read(ACTIVE_RDO, &mut active_rdo)?;
     Ok(Diagnostics {
@@ -131,6 +134,7 @@ pub fn read_diagnostics(bus: &mut impl PdBus) -> Result<Diagnostics, BusError> {
         vbus_ctrl,
         pe_fsm,
         sink_pdo_count,
+        sink_pdos,
         active_rdo,
     })
 }
@@ -826,6 +830,12 @@ mod tests {
             Operation::Read(VBUS_CTRL, vec![0x02]),
             Operation::Read(PE_FSM, vec![PE_SINK_READY]),
             Operation::Read(SINK_PDO_COUNT, vec![0x03]),
+            Operation::Read(
+                SINK_PDO1,
+                vec![
+                    0x2c, 0x91, 0x01, 0x00, 0x2c, 0xd1, 0x02, 0x00, 0xc8, 0x40, 0x06, 0x00,
+                ],
+            ),
             Operation::Read(ACTIVE_RDO, vec![0xc8, 0x58, 0x02, 0x30]),
         ]));
 
@@ -842,6 +852,9 @@ mod tests {
                 vbus_ctrl: 0x02,
                 pe_fsm: PE_SINK_READY,
                 sink_pdo_count: 0x03,
+                sink_pdos: [
+                    0x2c, 0x91, 0x01, 0x00, 0x2c, 0xd1, 0x02, 0x00, 0xc8, 0x40, 0x06, 0x00,
+                ],
                 active_rdo: [0xc8, 0x58, 0x02, 0x30],
             })
         );

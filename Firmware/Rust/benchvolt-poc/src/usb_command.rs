@@ -140,6 +140,14 @@ pub fn pd_diagnostics_response(snapshot: crate::pd::Diagnostics) -> Response {
         response.push_bytes(b"0x").ok();
         push_hex(&mut response, value);
     }
+    for (index, pdo) in snapshot.sink_pdos.chunks_exact(4).enumerate() {
+        response.push_bytes(b" SNK").ok();
+        response.push_byte(b'1' + index as u8).ok();
+        response.push_bytes(b"=0x").ok();
+        for value in pdo.iter().rev() {
+            push_hex(&mut response, *value);
+        }
+    }
     response.push_bytes(b" RDO0x").ok();
     for value in snapshot.active_rdo.iter().rev() {
         push_hex(&mut response, *value);
@@ -393,11 +401,14 @@ mod tests {
             vbus_ctrl: 0x02,
             pe_fsm: 0x18,
             sink_pdo_count: 0x03,
+            sink_pdos: [
+                0x2c, 0x91, 0x01, 0x00, 0x2c, 0xd1, 0x02, 0x00, 0xc8, 0x40, 0x06, 0x00,
+            ],
             active_rdo: [0xc8, 0x58, 0x02, 0x30],
         });
         assert_eq!(
             response.as_bytes(),
-            b"ID0x25 PORT0x01 MON0x08 CC0x11 CCF0x40 TYPEC0x82 RESET0x00 VBUS0x02 PE0x18 PDO0x03 RDO0x300258C8\r\n"
+            b"ID0x25 PORT0x01 MON0x08 CC0x11 CCF0x40 TYPEC0x82 RESET0x00 VBUS0x02 PE0x18 PDO0x03 SNK1=0x0001912C SNK2=0x0002D12C SNK3=0x000640C8 RDO0x300258C8\r\n"
         );
     }
 

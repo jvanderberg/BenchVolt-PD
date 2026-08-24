@@ -49,7 +49,6 @@ dependencies = [
  "embedded-hal 0.2.7",
  "heapless 0.8.0",
  "mipidsi",
- "panic-halt",
  "reducto",
  "stm32-usbd",
  "stm32f0xx-hal",
@@ -318,12 +317,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "panic-halt"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a513e167849a384b7f9b746e517604398518590a9142f4846a32e3c2a4de7b11"
-
-[[package]]
 name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -350,6 +343,8 @@ dependencies = [
 [[package]]
 name = "reducto"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56b7b56c1485c662576991ac5f1aa3c012d019d63102b6eb8325931510e1e866"
 dependencies = [
  "heapless 0.8.0",
 ]

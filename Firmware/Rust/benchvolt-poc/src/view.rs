@@ -1486,7 +1486,11 @@ where
                     self.draw_profile_status(new);
                 }
             }
-            Screen::System => {}
+            Screen::System => {
+                if old.recovery_armed != new.recovery_armed {
+                    self.draw_system(new);
+                }
+            }
             Screen::Help => {
                 if old.help_scroll != new.help_scroll {
                     self.draw_help_content(new);

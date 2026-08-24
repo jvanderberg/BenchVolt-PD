@@ -63,7 +63,7 @@ pub struct SettingsRecord {
 pub struct SettingsDebouncer {
     observed: PersistentSettings,
     saved: PersistentSettings,
-    quiet_ticks: u16,
+    quiet_ms: u16,
 }
 
 impl SettingsDebouncer {
@@ -71,7 +71,7 @@ impl SettingsDebouncer {
         Self {
             observed: initial,
             saved: initial,
-            quiet_ticks: 0,
+            quiet_ms: 0,
         }
     }
 
@@ -79,18 +79,19 @@ impl SettingsDebouncer {
         &mut self,
         current: PersistentSettings,
         transitions_stable: bool,
+        elapsed_ms: u16,
     ) -> Option<PersistentSettings> {
         if current != self.observed {
             self.observed = current;
-            self.quiet_ticks = 0;
+            self.quiet_ms = 0;
             return None;
         }
         if current == self.saved {
             return None;
         }
-        self.quiet_ticks = self.quiet_ticks.saturating_add(1);
-        if self.quiet_ticks >= 1_000 && transitions_stable {
-            self.quiet_ticks = 0;
+        self.quiet_ms = self.quiet_ms.saturating_add(elapsed_ms);
+        if self.quiet_ms >= 1_000 && transitions_stable {
+            self.quiet_ms = 0;
             Some(current)
         } else {
             None
@@ -319,27 +320,21 @@ mod tests {
         state.channels[4].current_limit_ma = 400;
         let edited = PersistentSettings::from_state(&state);
 
-        assert!(effect.tick(edited, true).is_none());
-        for _ in 0..999 {
-            assert!(effect.tick(edited, true).is_none());
-        }
-        assert!(effect.tick(edited, false).is_none());
-        assert!(effect.tick(edited, true) == Some(edited));
+        assert!(effect.tick(edited, true, 400).is_none());
+        assert!(effect.tick(edited, true, 999).is_none());
+        assert!(effect.tick(edited, false, 1).is_none());
+        assert!(effect.tick(edited, true, 0) == Some(edited));
         effect.mark_saved(edited);
-        assert!(effect.tick(edited, true).is_none());
+        assert!(effect.tick(edited, true, 5_000).is_none());
 
         state.channels[4].current_limit_ma = 410;
         let first = PersistentSettings::from_state(&state);
-        assert!(effect.tick(first, true).is_none());
-        for _ in 0..500 {
-            assert!(effect.tick(first, true).is_none());
-        }
+        assert!(effect.tick(first, true, 500).is_none());
+        assert!(effect.tick(first, true, 500).is_none());
         state.channels[4].current_limit_ma = 420;
         let second = PersistentSettings::from_state(&state);
-        assert!(effect.tick(second, true).is_none());
-        for _ in 0..999 {
-            assert!(effect.tick(second, true).is_none());
-        }
-        assert!(effect.tick(second, true) == Some(second));
+        assert!(effect.tick(second, true, 500).is_none());
+        assert!(effect.tick(second, true, 999).is_none());
+        assert!(effect.tick(second, true, 1) == Some(second));
     }
 }

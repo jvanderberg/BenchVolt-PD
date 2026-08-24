@@ -21,15 +21,17 @@ use benchvolt_poc::arb::{
 use benchvolt_poc::awg::Scheduler as AwgScheduler;
 use benchvolt_poc::load::LoadAccumulator;
 use benchvolt_poc::power::{
-    effect_for_transition, execute_effect, execute_global_shutdown, protection_output,
-    tps55289_status_fault, DriverOperation, PowerDriver, ProtectionMonitor, Rail,
+    execute_effect, execute_global_shutdown, protection_output, tps55289_status_fault,
+    DriverOperation, FirmwareEffectPlanner, PowerDriver, ProtectionMonitor, Rail,
+    OVERTEMPERATURE_TRIP_SIXTEENTHS_C,
 };
+use benchvolt_poc::protocol::parse_milliunits;
 use benchvolt_poc::settings::{
     decode as decode_settings, encode as encode_settings, PersistentSettings, RecordKind,
     SettingsDebouncer, SettingsRecord, RECORD_SIZE,
 };
 use cortex_m::interrupt::Mutex;
-use cortex_m_rt::entry;
+use cortex_m_rt::{entry, exception, ExceptionFrame};
 use display_interface_spi::SPIInterface;
 use embedded_hal::{
     adc::{Channel, OneShot},
@@ -38,7 +40,7 @@ use embedded_hal::{
 };
 use heapless::{Deque, String};
 use mipidsi::{Builder, ColorInversion, ModelOptions, Orientation};
-use panic_halt as _;
+use reducto::EffectApp;
 use stm32_usbd::{MemoryAccess, UsbBus, UsbPeripheral};
 use stm32f0xx_hal::{
     adc::{Adc, AdcSampleTime},
@@ -66,6 +68,72 @@ const USB_PID: u16 = 0x5740;
 const OVERVIEW_HOLD_MS: u16 = 500;
 const REBOOT_HOLD_MS: u16 = 3_000;
 const ENCODER_ACCELERATION_IDLE_MS: u16 = 80;
+const FLASH_READY_SPINS: u32 = 12_000_000;
+
+/// Turn off every independent output control without relying on initialized
+/// drivers, interrupts, or either I2C bus.
+unsafe fn raw_emergency_shutdown() {
+    const GPIOA_BSRR: *mut u32 = 0x4800_0018 as *mut u32;
+    const GPIOB_BSRR: *mut u32 = 0x4800_0418 as *mut u32;
+    const GPIOC_BSRR: *mut u32 = 0x4800_0818 as *mut u32;
+    core::ptr::write_volatile(GPIOA_BSRR, 1 << (15 + 16));
+    core::ptr::write_volatile(
+        GPIOB_BSRR,
+        (1 << (2 + 16)) | (1 << (6 + 16)) | (1 << (7 + 16)) | (1 << (15 + 16)),
+    );
+    core::ptr::write_volatile(GPIOC_BSRR, (1 << (12 + 16)) | (1 << (13 + 16)));
+}
+
+fn emergency_reset() -> ! {
+    cortex_m::interrupt::disable();
+    unsafe { raw_emergency_shutdown() };
+    cortex_m::peripheral::SCB::sys_reset()
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
+    emergency_reset()
+}
+
+#[exception]
+unsafe fn HardFault(_frame: &ExceptionFrame) -> ! {
+    emergency_reset()
+}
+
+fn start_watchdog() {
+    const IWDG_BASE: usize = 0x4000_3000;
+    const KR: *mut u32 = IWDG_BASE as *mut u32;
+    const PR: *mut u32 = (IWDG_BASE + 0x04) as *mut u32;
+    const RLR: *mut u32 = (IWDG_BASE + 0x08) as *mut u32;
+    const SR: *const u32 = (IWDG_BASE + 0x0c) as *const u32;
+    unsafe {
+        // 40 kHz LSI / 256 / (624 + 1) gives a nominal four-second timeout.
+        core::ptr::write_volatile(KR, 0xcccc);
+        core::ptr::write_volatile(KR, 0x5555);
+        core::ptr::write_volatile(PR, 6);
+        core::ptr::write_volatile(RLR, 624);
+        for _ in 0..FLASH_READY_SPINS {
+            if core::ptr::read_volatile(SR) & 0b11 == 0 {
+                break;
+            }
+        }
+        core::ptr::write_volatile(KR, 0xaaaa);
+    }
+}
+
+fn feed_watchdog() {
+    unsafe { core::ptr::write_volatile(0x4000_3000 as *mut u32, 0xaaaa) };
+}
+
+fn wait_for_flash_ready(status: *const u32) -> bool {
+    for _ in 0..FLASH_READY_SPINS {
+        if unsafe { core::ptr::read_volatile(status) } & 1 == 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
 
 static LAST_HW_OPERATION: AtomicU8 = AtomicU8::new(0);
 static LAST_HW_ERROR: AtomicU8 = AtomicU8::new(0);
@@ -1089,7 +1157,6 @@ fn invalidate_boot_metadata() -> (bool, Option<BootSeal>) {
     const SR: *mut u32 = (FLASH_BASE + 0x0c) as *mut u32;
     const CR: *mut u32 = (FLASH_BASE + 0x10) as *mut u32;
     const AR: *mut u32 = (FLASH_BASE + 0x14) as *mut u32;
-    const SR_BSY: u32 = 1 << 0;
     const SR_ERRORS: u32 = (1 << 2) | (1 << 4);
     const SR_EOP: u32 = 1 << 5;
     const CR_PER: u32 = 1 << 1;
@@ -1104,7 +1171,9 @@ fn invalidate_boot_metadata() -> (bool, Option<BootSeal>) {
         }
         let seal = (size >= 192 && size <= (SETTINGS_ADDR - 0x0800_8000) as u32)
             .then_some(BootSeal { crc, size });
-        while core::ptr::read_volatile(SR) & SR_BSY != 0 {}
+        if !wait_for_flash_ready(SR) {
+            return (false, seal);
+        }
         if core::ptr::read_volatile(CR) & CR_LOCK != 0 {
             core::ptr::write_volatile(KEYR, 0x4567_0123);
             core::ptr::write_volatile(KEYR, 0xcdef_89ab);
@@ -1113,8 +1182,9 @@ fn invalidate_boot_metadata() -> (bool, Option<BootSeal>) {
         core::ptr::write_volatile(CR, core::ptr::read_volatile(CR) | CR_PER);
         core::ptr::write_volatile(AR, BOOT_METADATA_ADDR as u32);
         core::ptr::write_volatile(CR, core::ptr::read_volatile(CR) | CR_STRT);
-        while core::ptr::read_volatile(SR) & SR_BSY != 0 {}
-        let ok = core::ptr::read_volatile(SR) & SR_ERRORS == 0
+        let ready = wait_for_flash_ready(SR);
+        let ok = ready
+            && core::ptr::read_volatile(SR) & SR_ERRORS == 0
             && core::ptr::read_volatile(BOOT_METADATA_ADDR as *const u32) == u32::MAX;
         core::ptr::write_volatile(CR, (core::ptr::read_volatile(CR) & !CR_PER) | CR_LOCK);
         (ok, seal)
@@ -1126,7 +1196,6 @@ fn restore_boot_seal(seal: BootSeal) -> bool {
     const KEYR: *mut u32 = (FLASH_BASE + 0x04) as *mut u32;
     const SR: *mut u32 = (FLASH_BASE + 0x0c) as *mut u32;
     const CR: *mut u32 = (FLASH_BASE + 0x10) as *mut u32;
-    const SR_BSY: u32 = 1 << 0;
     const SR_ERRORS: u32 = (1 << 2) | (1 << 4);
     const SR_EOP: u32 = 1 << 5;
     const CR_PG: u32 = 1 << 0;
@@ -1141,7 +1210,9 @@ fn restore_boot_seal(seal: BootSeal) -> bool {
         (BOOT_METADATA_ADDR, seal.crc.to_le_bytes()),
     ];
     unsafe {
-        while core::ptr::read_volatile(SR) & SR_BSY != 0 {}
+        if !wait_for_flash_ready(SR) {
+            return false;
+        }
         if core::ptr::read_volatile(CR) & CR_LOCK != 0 {
             core::ptr::write_volatile(KEYR, 0x4567_0123);
             core::ptr::write_volatile(KEYR, 0xcdef_89ab);
@@ -1153,8 +1224,7 @@ fn restore_boot_seal(seal: BootSeal) -> bool {
                 let offset = half * 2;
                 let value = u16::from_le_bytes([source[offset], source[offset + 1]]);
                 core::ptr::write_volatile((address + offset) as *mut u16, value);
-                while core::ptr::read_volatile(SR) & SR_BSY != 0 {}
-                if core::ptr::read_volatile(SR) & SR_ERRORS != 0 {
+                if !wait_for_flash_ready(SR) || core::ptr::read_volatile(SR) & SR_ERRORS != 0 {
                     core::ptr::write_volatile(
                         CR,
                         (core::ptr::read_volatile(CR) & !CR_PG) | CR_LOCK,
@@ -1220,14 +1290,15 @@ fn erase_flash_page(address: usize) -> bool {
     const SR: *mut u32 = (FLASH_BASE + 0x0c) as *mut u32;
     const CR: *mut u32 = (FLASH_BASE + 0x10) as *mut u32;
     const AR: *mut u32 = (FLASH_BASE + 0x14) as *mut u32;
-    const SR_BSY: u32 = 1 << 0;
     const SR_ERRORS: u32 = (1 << 2) | (1 << 4);
     const SR_EOP: u32 = 1 << 5;
     const CR_PER: u32 = 1 << 1;
     const CR_STRT: u32 = 1 << 6;
     const CR_LOCK: u32 = 1 << 7;
     unsafe {
-        while core::ptr::read_volatile(SR) & SR_BSY != 0 {}
+        if !wait_for_flash_ready(SR) {
+            return false;
+        }
         if core::ptr::read_volatile(CR) & CR_LOCK != 0 {
             core::ptr::write_volatile(KEYR, 0x4567_0123);
             core::ptr::write_volatile(KEYR, 0xcdef_89ab);
@@ -1236,8 +1307,9 @@ fn erase_flash_page(address: usize) -> bool {
         core::ptr::write_volatile(CR, core::ptr::read_volatile(CR) | CR_PER);
         core::ptr::write_volatile(AR, address as u32);
         core::ptr::write_volatile(CR, core::ptr::read_volatile(CR) | CR_STRT);
-        while core::ptr::read_volatile(SR) & SR_BSY != 0 {}
-        let ok = core::ptr::read_volatile(SR) & SR_ERRORS == 0
+        let ready = wait_for_flash_ready(SR);
+        let ok = ready
+            && core::ptr::read_volatile(SR) & SR_ERRORS == 0
             && (0..FLASH_PAGE_SIZE)
                 .all(|offset| core::ptr::read_volatile((address + offset) as *const u8) == 0xff);
         core::ptr::write_volatile(CR, (core::ptr::read_volatile(CR) & !CR_PER) | CR_LOCK);
@@ -1259,7 +1331,6 @@ fn program_settings_slot(slot: usize, record: SettingsRecord) -> bool {
     const KEYR: *mut u32 = (FLASH_BASE + 0x04) as *mut u32;
     const SR: *mut u32 = (FLASH_BASE + 0x0c) as *mut u32;
     const CR: *mut u32 = (FLASH_BASE + 0x10) as *mut u32;
-    const SR_BSY: u32 = 1 << 0;
     const SR_ERRORS: u32 = (1 << 2) | (1 << 4);
     const SR_EOP: u32 = 1 << 5;
     const CR_PG: u32 = 1 << 0;
@@ -1267,7 +1338,9 @@ fn program_settings_slot(slot: usize, record: SettingsRecord) -> bool {
     let bytes = encode_settings(record);
     let mut ok = true;
     unsafe {
-        while core::ptr::read_volatile(SR) & SR_BSY != 0 {}
+        if !wait_for_flash_ready(SR) {
+            return false;
+        }
         if core::ptr::read_volatile(CR) & CR_LOCK != 0 {
             core::ptr::write_volatile(KEYR, 0x4567_0123);
             core::ptr::write_volatile(KEYR, 0xcdef_89ab);
@@ -1277,8 +1350,7 @@ fn program_settings_slot(slot: usize, record: SettingsRecord) -> bool {
         for offset in (0..RECORD_SIZE).step_by(2) {
             let value = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
             core::ptr::write_volatile((address + offset) as *mut u16, value);
-            while core::ptr::read_volatile(SR) & SR_BSY != 0 {}
-            if core::ptr::read_volatile(SR) & SR_ERRORS != 0 {
+            if !wait_for_flash_ready(SR) || core::ptr::read_volatile(SR) & SR_ERRORS != 0 {
                 ok = false;
                 break;
             }
@@ -1368,31 +1440,6 @@ enum UsbIntent {
     ArbData(ArbDataChunk),
     ArbStart(ArbStart),
     ArbStop(u8),
-}
-
-fn parse_milliamps(text: &[u8]) -> Option<u16> {
-    let (whole, fraction) = match text.iter().position(|byte| *byte == b'.') {
-        Some(dot) => (&text[..dot], &text[dot + 1..]),
-        None => (text, &[][..]),
-    };
-    if whole.is_empty()
-        || whole.iter().any(|byte| !byte.is_ascii_digit())
-        || fraction.len() > 3
-        || fraction.iter().any(|byte| !byte.is_ascii_digit())
-    {
-        return None;
-    }
-    let whole = whole.iter().try_fold(0u32, |value, byte| {
-        value.checked_mul(10)?.checked_add(u32::from(*byte - b'0'))
-    })?;
-    let mut fractional = 0u32;
-    for byte in fraction {
-        fractional = fractional * 10 + u32::from(*byte - b'0');
-    }
-    for _ in fraction.len()..3 {
-        fractional *= 10;
-    }
-    u16::try_from(whole.checked_mul(1_000)?.checked_add(fractional)?).ok()
 }
 
 fn handle_usb_command(
@@ -1532,14 +1579,14 @@ fn handle_usb_command(
             queue_usb_response(b"ERR:SYNTAX\r\n");
             return UsbIntent::None;
         };
-        let Some(milliamps) = parse_milliamps(value).filter(|value| *value <= 3_000) else {
+        let Some(milliamps) = parse_milliunits(value).filter(|value| *value <= 3_000) else {
             queue_usb_response(b"ERR:RANGE\r\n");
             return UsbIntent::None;
         };
         return UsbIntent::SetCurrentLimit { channel, milliamps };
     }
     if let Some(value) = command.strip_prefix(b"SINK:LIMIT ") {
-        let Some(milliamps) = parse_milliamps(value).filter(|value| *value <= 5_000) else {
+        let Some(milliamps) = parse_milliunits(value).filter(|value| *value <= 5_000) else {
             queue_usb_response(b"ERR:RANGE\r\n");
             return UsbIntent::None;
         };
@@ -1811,10 +1858,46 @@ fn handle_usb_command(
     UsbIntent::None
 }
 
+fn dispatch_app<V, D, const Q: usize>(
+    app: &mut EffectApp<AppReducer, V, FirmwareEffectPlanner, Q>,
+    power_driver: &mut D,
+    action: Action,
+) -> bool
+where
+    V: reducto::View<State = AppState>,
+    D: PowerDriver,
+{
+    let mut pending_action = Some(action);
+    let mut changed = false;
+    while let Some(action) = pending_action.take() {
+        let outcome = app.dispatch(action);
+        changed |= outcome.changed();
+        pending_action = match outcome.effect() {
+            Some(effect) if effect.global_shutdown => {
+                Some(if execute_global_shutdown(power_driver).is_ok() {
+                    Action::GlobalShutdownApplied
+                } else {
+                    Action::GlobalShutdownFailed
+                })
+            }
+            Some(effect) => effect
+                .power
+                .map(|power| execute_effect(power_driver, app.state(), power)),
+            None => None,
+        };
+    }
+    changed
+}
+
 #[entry]
 fn main() -> ! {
     let mut dp = pac::Peripherals::take().unwrap();
     let mut cp = cortex_m::Peripherals::take().unwrap();
+
+    // Start recovery supervision before boot-metadata flash access. Startup is
+    // bounded and feeds explicitly; steady-state feeds only after a complete
+    // foreground pass.
+    start_watchdog();
 
     // USB has the highest urgency. Encoder capture is deliberately lowest and
     // performs only a pending-bit clear, GPIO read, and bounded queue push.
@@ -1825,6 +1908,7 @@ fn main() -> ! {
 
     // Arm reset recovery before clock, display, sensor, or USB initialization can fail.
     let (recovery_armed, boot_seal) = invalidate_boot_metadata();
+    feed_watchdog();
 
     let mut rcc = dp
         .RCC
@@ -1987,6 +2071,7 @@ fn main() -> ! {
         .with_invert_colors(ColorInversion::Inverted)
         .init(&mut delay, Some(rst))
         .unwrap();
+    feed_watchdog();
     let mut sensor = SoftI2c::new(scl, sda);
     let initial_temperature = sensor.read_tmp1075(&mut delay);
     let mut power_driver = HardwarePowerDriver::new(sensor, SoftI2c::new(aux_scl, aux_sda), delay);
@@ -1996,7 +2081,10 @@ fn main() -> ! {
     }
     initial_state.profile_present =
         core::array::from_fn(|index| settings_store.profiles[index].is_some());
-    let mut app = reducto::App::<AppReducer, _, 8>::new(BenchVoltView::new(display), initial_state);
+    let mut app = EffectApp::<AppReducer, _, FirmwareEffectPlanner, 8>::new(
+        BenchVoltView::new(display),
+        initial_state,
+    );
     app.render_full();
 
     // USB transport is interrupt-owned so display and I2C work cannot starve it.
@@ -2030,6 +2118,7 @@ fn main() -> ! {
             response_offset: 0,
         }));
     });
+    feed_watchdog();
     unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USB) };
     unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::EXTI4_15) };
     // The stock bootloader jumps with PRIMASK set after disabling all IRQs.
@@ -2067,40 +2156,6 @@ fn main() -> ! {
     let mut last_encoder_direction = 0i8;
     let mut encoder_velocity = 0u8;
 
-    macro_rules! dispatch_with_power_effects {
-        ($action:expr) => {{
-            let mut pending_effect = None;
-            app.dispatch_with($action, |old, new| {
-                pending_effect = effect_for_transition(old, new);
-            });
-            if let Some(effect) = pending_effect {
-                let completion = execute_effect(&mut power_driver, app.state(), effect);
-                app.dispatch(completion);
-            }
-        }};
-    }
-
-    macro_rules! dispatch_navigation {
-        ($action:expr) => {{
-            let mut shutdown_result = None;
-            app.dispatch_with($action, |old, new| {
-                let crosses_awg_boundary = old.screen != new.screen
-                    && (old.screen == benchvolt_poc::app::Screen::Awg
-                        || new.screen == benchvolt_poc::app::Screen::Awg);
-                if crosses_awg_boundary {
-                    shutdown_result = Some(execute_global_shutdown(&mut power_driver));
-                }
-            });
-            if let Some(result) = shutdown_result {
-                app.dispatch(if result.is_ok() {
-                    Action::GlobalShutdownApplied
-                } else {
-                    Action::GlobalShutdownFailed
-                });
-            }
-        }};
-    }
-
     loop {
         while let Some(command) = take_usb_command() {
             match handle_usb_command(command.as_slice(), app.state(), &protection_monitors) {
@@ -2116,7 +2171,7 @@ fn main() -> ! {
                     cortex_m::peripheral::SCB::sys_reset();
                 }
                 UsbIntent::Reboot => {
-                    app.dispatch(Action::RequestReboot);
+                    dispatch_app(&mut app, &mut power_driver, Action::RequestReboot);
                     queue_usb_response(b"OK:REBOOTING\r\n");
                 }
                 UsbIntent::SetOutput { channel, enabled } => {
@@ -2134,16 +2189,24 @@ fn main() -> ! {
                         && app.state().awg_status == AwgStatus::Running
                     {
                         if execute_global_shutdown(&mut power_driver).is_ok() {
-                            app.dispatch(Action::GlobalShutdownApplied);
-                            app.dispatch(Action::AwgStopped);
+                            dispatch_app(
+                                &mut app,
+                                &mut power_driver,
+                                Action::GlobalShutdownApplied,
+                            );
+                            dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
                             queue_usb_response(b"OK\r\n");
                         } else {
-                            app.dispatch(Action::GlobalShutdownFailed);
+                            dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                             queue_usb_response(b"ERR:HARDWARE\r\n");
                         }
                         continue;
                     }
-                    dispatch_with_power_effects!(Action::SetOutputRequested { channel, enabled });
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::SetOutputRequested { channel, enabled },
+                    );
                     let output = &app.state().channels[usize::from(channel)];
                     if output.physical_enabled == enabled
                         && output.requested_enabled == enabled
@@ -2163,7 +2226,11 @@ fn main() -> ! {
                     }
                 }
                 UsbIntent::SetCurrentLimit { channel, milliamps } => {
-                    dispatch_with_power_effects!(Action::SetCurrentLimit { channel, milliamps });
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::SetCurrentLimit { channel, milliamps },
+                    );
                     let output = &app.state().channels[usize::from(channel)];
                     if output.current_limit_ma == milliamps
                         && output.fault != benchvolt_poc::app::Fault::Hardware
@@ -2183,7 +2250,11 @@ fn main() -> ! {
                         queue_usb_response(b"ERR:BUSY\r\n");
                         continue;
                     }
-                    dispatch_with_power_effects!(Action::SetRegulationMode { channel, mode });
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::SetRegulationMode { channel, mode },
+                    );
                     let output = &app.state().channels[usize::from(channel)];
                     if output.regulation_mode == mode
                         && output.fault != benchvolt_poc::app::Fault::Hardware
@@ -2194,7 +2265,11 @@ fn main() -> ! {
                     }
                 }
                 UsbIntent::SetSinkCurrentLimit(milliamps) => {
-                    app.dispatch(Action::SetSinkCurrentLimit(milliamps));
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::SetSinkCurrentLimit(milliamps),
+                    );
                     if app.state().sink_current_limit_ma == milliamps {
                         queue_usb_response(b"OK\r\n");
                     } else {
@@ -2239,12 +2314,16 @@ fn main() -> ! {
                         queue_usb_response(b"ERR:RANGE\r\n");
                         continue;
                     };
-                    app.dispatch(Action::RequestArbStart {
-                        channel: start.channel,
-                        initial_mv,
-                        low_mv,
-                        high_mv,
-                    });
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::RequestArbStart {
+                            channel: start.channel,
+                            initial_mv,
+                            low_mv,
+                            high_mv,
+                        },
+                    );
                     if app.state().awg_status == AwgStatus::StartRequested
                         && app.state().awg_source == AwgSource::Arbitrary
                     {
@@ -2265,13 +2344,17 @@ fn main() -> ! {
                         && !matches!(app.state().awg_status, AwgStatus::Stopped)
                     {
                         if execute_global_shutdown(&mut power_driver).is_ok() {
-                            app.dispatch(Action::GlobalShutdownApplied);
-                            app.dispatch(Action::AwgStopped);
+                            dispatch_app(
+                                &mut app,
+                                &mut power_driver,
+                                Action::GlobalShutdownApplied,
+                            );
+                            dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
                             active_arb_start = None;
                             arb_scheduler.stop();
                             queue_usb_response(b"OK\r\n");
                         } else {
-                            app.dispatch(Action::GlobalShutdownFailed);
+                            dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                             queue_usb_response(b"ERR:HARDWARE\r\n");
                         }
                     } else {
@@ -2321,19 +2404,31 @@ fn main() -> ! {
                     } else {
                         Action::NextScreen
                     };
-                    app.dispatch(action)
+                    dispatch_app(&mut app, &mut power_driver, action)
                 }
                 benchvolt_poc::app::ControlFocus::Output => {
                     if let benchvolt_poc::app::Screen::Channel(channel) = app.state().screen {
-                        dispatch_with_power_effects!(Action::ToggleOutputRequested { channel });
+                        dispatch_app(
+                            &mut app,
+                            &mut power_driver,
+                            Action::ToggleOutputRequested { channel },
+                        );
                     }
                     true
                 }
                 benchvolt_poc::app::ControlFocus::OverviewOutput(channel) => {
-                    dispatch_with_power_effects!(Action::ToggleOutputRequested { channel });
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::ToggleOutputRequested { channel },
+                    );
                     true
                 }
-                _ => app.dispatch(Action::AdjustFocused(accelerated)),
+                _ => dispatch_app(
+                    &mut app,
+                    &mut power_driver,
+                    Action::AdjustFocused(accelerated),
+                ),
             };
         }
 
@@ -2347,10 +2442,10 @@ fn main() -> ! {
                 let held_ms = input_ticks.wrapping_sub(pressed_at);
                 if held_ms >= REBOOT_HOLD_MS {
                     button_press_tick = None;
-                    app.dispatch(Action::RequestReboot);
+                    dispatch_app(&mut app, &mut power_driver, Action::RequestReboot);
                 } else if held_ms >= OVERVIEW_HOLD_MS && !overview_hold_fired {
                     overview_hold_fired = true;
-                    dispatch_navigation!(Action::GoMainMenu);
+                    dispatch_app(&mut app, &mut power_driver, Action::GoMainMenu);
                 }
             }
         } else if !encoder_sw_high && next_sw_high {
@@ -2358,9 +2453,9 @@ fn main() -> ! {
                 let held_ms = input_ticks.wrapping_sub(pressed_at);
                 last_button_tick = input_ticks;
                 if held_ms >= OVERVIEW_HOLD_MS {
-                    dispatch_navigation!(Action::GoMainMenu);
+                    dispatch_app(&mut app, &mut power_driver, Action::GoMainMenu);
                 } else if held_ms >= 30 {
-                    dispatch_navigation!(Action::NextControl);
+                    dispatch_app(&mut app, &mut power_driver, Action::NextControl);
                 }
             }
         }
@@ -2385,33 +2480,54 @@ fn main() -> ! {
                 } else {
                     ProfileStatus::Failed
                 };
-                app.dispatch(Action::ProfileOperationFinished(status));
+                dispatch_app(
+                    &mut app,
+                    &mut power_driver,
+                    Action::ProfileOperationFinished(status),
+                );
             }
             ProfileRequest::Load(slot) => {
-                let Some(record) = settings_store.profiles[usize::from(slot)] else {
-                    app.dispatch(Action::ProfileOperationFinished(ProfileStatus::Empty(slot)));
-                    continue;
-                };
-                if execute_global_shutdown(&mut power_driver).is_ok() {
-                    app.dispatch(Action::ApplyProfile(
-                        record.settings,
-                        ProfileStatus::Loaded(slot),
-                    ));
+                if let Some(record) = settings_store.profiles[usize::from(slot)] {
+                    if execute_global_shutdown(&mut power_driver).is_ok() {
+                        dispatch_app(
+                            &mut app,
+                            &mut power_driver,
+                            Action::ApplyProfile(record.settings, ProfileStatus::Loaded(slot)),
+                        );
+                    } else {
+                        dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
+                        dispatch_app(
+                            &mut app,
+                            &mut power_driver,
+                            Action::ProfileOperationFinished(ProfileStatus::Failed),
+                        );
+                    }
                 } else {
-                    app.dispatch(Action::GlobalShutdownFailed);
-                    app.dispatch(Action::ProfileOperationFinished(ProfileStatus::Failed));
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::ProfileOperationFinished(ProfileStatus::Empty(slot)),
+                    );
                 }
             }
             ProfileRequest::FactoryDefaults => {
                 if execute_global_shutdown(&mut power_driver).is_ok() {
                     let defaults = AppState::new(app.state().recovery_armed, None);
-                    app.dispatch(Action::ApplyProfile(
-                        PersistentSettings::from_state(&defaults),
-                        ProfileStatus::DefaultsLoaded,
-                    ));
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::ApplyProfile(
+                            PersistentSettings::from_state(&defaults),
+                            ProfileStatus::DefaultsLoaded,
+                        ),
+                    );
                 } else {
-                    app.dispatch(Action::GlobalShutdownFailed);
-                    app.dispatch(Action::ProfileOperationFinished(ProfileStatus::Failed));
+                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::ProfileOperationFinished(ProfileStatus::Failed),
+                    );
                 }
             }
         }
@@ -2421,19 +2537,19 @@ fn main() -> ! {
                 awg_scheduler.stop();
                 arb_scheduler.stop();
                 if execute_global_shutdown(&mut power_driver).is_ok() {
-                    app.dispatch(Action::GlobalShutdownApplied);
-                    dispatch_with_power_effects!(Action::AwgStartPrepared);
+                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
+                    dispatch_app(&mut app, &mut power_driver, Action::AwgStartPrepared);
                 } else {
-                    app.dispatch(Action::GlobalShutdownFailed);
+                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                 }
             }
             AwgStatus::StopRequested => {
                 awg_scheduler.stop();
                 arb_scheduler.stop();
                 if execute_global_shutdown(&mut power_driver).is_ok() {
-                    app.dispatch(Action::GlobalShutdownApplied);
+                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
                 } else {
-                    app.dispatch(Action::GlobalShutdownFailed);
+                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                 }
             }
             AwgStatus::Running => match app.state().awg_source {
@@ -2442,7 +2558,7 @@ fn main() -> ! {
                     if let Some(millivolts) =
                         awg_scheduler.tick(monotonic_awg_tick(), app.state().awg)
                     {
-                        dispatch_with_power_effects!(Action::AwgSample(millivolts));
+                        dispatch_app(&mut app, &mut power_driver, Action::AwgSample(millivolts));
                     }
                 }
                 AwgSource::Arbitrary => {
@@ -2459,20 +2575,32 @@ fn main() -> ! {
                         ARB_SKIPPED_CYCLES.store(status.skipped_cycles, Ordering::Relaxed);
                         match tick {
                             Some(ArbTick::Sample(millivolts)) => {
-                                dispatch_with_power_effects!(Action::AwgSample(millivolts));
+                                dispatch_app(
+                                    &mut app,
+                                    &mut power_driver,
+                                    Action::AwgSample(millivolts),
+                                );
                             }
                             Some(ArbTick::Finished) => {
                                 if execute_global_shutdown(&mut power_driver).is_ok() {
-                                    app.dispatch(Action::GlobalShutdownApplied);
-                                    app.dispatch(Action::AwgStopped);
+                                    dispatch_app(
+                                        &mut app,
+                                        &mut power_driver,
+                                        Action::GlobalShutdownApplied,
+                                    );
+                                    dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
                                 } else {
-                                    app.dispatch(Action::GlobalShutdownFailed);
+                                    dispatch_app(
+                                        &mut app,
+                                        &mut power_driver,
+                                        Action::GlobalShutdownFailed,
+                                    );
                                 }
                             }
                             None => {}
                         }
                     } else {
-                        app.dispatch(Action::GlobalShutdownFailed);
+                        dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                     }
                 }
             },
@@ -2519,9 +2647,15 @@ fn main() -> ! {
         if temperature_ticks >= 100 {
             temperature_ticks = 0;
             let temperature = power_driver.read_temperature();
-            app.dispatch(Action::Temperature(temperature));
+            dispatch_app(
+                &mut app,
+                &mut power_driver,
+                Action::Temperature(temperature),
+            );
             let fault = match temperature {
-                Some(raw) if raw >= 75 * 16 => Some(benchvolt_poc::app::Fault::OverTemperature),
+                Some(raw) if raw >= OVERTEMPERATURE_TRIP_SIXTEENTHS_C => {
+                    Some(benchvolt_poc::app::Fault::OverTemperature)
+                }
                 None => Some(benchvolt_poc::app::Fault::Sensor),
                 _ => None,
             };
@@ -2529,7 +2663,11 @@ fn main() -> ! {
                 for channel in 0..5u8 {
                     let output = &app.state().channels[usize::from(channel)];
                     if output.requested_enabled || output.physical_enabled {
-                        dispatch_with_power_effects!(Action::ProtectionTrip { channel, fault });
+                        dispatch_app(
+                            &mut app,
+                            &mut power_driver,
+                            Action::ProtectionTrip { channel, fault },
+                        );
                     }
                 }
                 let _ = execute_global_shutdown(&mut power_driver);
@@ -2544,10 +2682,11 @@ fn main() -> ! {
                         if let Some(fault) = tps55289_status_fault(status) {
                             if ch5_pending_tps_fault == Some(fault) {
                                 ch5_pending_tps_fault = None;
-                                dispatch_with_power_effects!(Action::ProtectionTrip {
-                                    channel: 4,
-                                    fault,
-                                });
+                                dispatch_app(
+                                    &mut app,
+                                    &mut power_driver,
+                                    Action::ProtectionTrip { channel: 4, fault },
+                                );
                             } else {
                                 ch5_pending_tps_fault = Some(fault);
                             }
@@ -2557,10 +2696,14 @@ fn main() -> ! {
                     }
                     Err(_) => {
                         CH5_TPS_STATUS.store(0xff, Ordering::Relaxed);
-                        dispatch_with_power_effects!(Action::ProtectionTrip {
-                            channel: 4,
-                            fault: benchvolt_poc::app::Fault::Hardware,
-                        });
+                        dispatch_app(
+                            &mut app,
+                            &mut power_driver,
+                            Action::ProtectionTrip {
+                                channel: 4,
+                                fault: benchvolt_poc::app::Fault::Hardware,
+                            },
+                        );
                     }
                 }
             } else {
@@ -2598,34 +2741,54 @@ fn main() -> ! {
                         voltage_tracking,
                     );
                 if let Some(fault) = fault {
-                    dispatch_with_power_effects!(Action::ProtectionTrip { channel, fault });
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::ProtectionTrip { channel, fault },
+                    );
                 }
             }
             for channel in 3..=4u8 {
                 if app.state().awg_status != AwgStatus::Running
                     || channel != app.state().active_awg_channel()
                 {
-                    dispatch_with_power_effects!(Action::RegulateChannel {
-                        channel,
-                        measurement: measurements[usize::from(channel)],
-                    });
+                    dispatch_app(
+                        &mut app,
+                        &mut power_driver,
+                        Action::RegulateChannel {
+                            channel,
+                            measurement: measurements[usize::from(channel)],
+                        },
+                    );
                 }
             }
         }
         if display_measurement_ticks >= 200 {
             display_measurement_ticks = 0;
-            app.dispatch(Action::Measurements([
-                channel_accumulators[0].take(),
-                channel_accumulators[1].take(),
-                channel_accumulators[2].take(),
-                channel_accumulators[3].take(),
-                channel_accumulators[4].take(),
-            ]));
-            app.dispatch(Action::SinkMeasurement(sink_accumulator.take()));
+            dispatch_app(
+                &mut app,
+                &mut power_driver,
+                Action::Measurements([
+                    channel_accumulators[0].take(),
+                    channel_accumulators[1].take(),
+                    channel_accumulators[2].take(),
+                    channel_accumulators[3].take(),
+                    channel_accumulators[4].take(),
+                ]),
+            );
+            dispatch_app(
+                &mut app,
+                &mut power_driver,
+                Action::SinkMeasurement(sink_accumulator.take()),
+            );
         }
         if awg_load_ticks >= 1_000 {
             awg_load_ticks = 0;
-            app.dispatch(Action::AwgLoadMeasurement(awg_load_accumulator.take()));
+            dispatch_app(
+                &mut app,
+                &mut power_driver,
+                Action::AwgLoadMeasurement(awg_load_accumulator.take()),
+            );
         }
 
         let current_settings = PersistentSettings::from_state(app.state());
@@ -2639,7 +2802,7 @@ fn main() -> ! {
             .channels
             .iter()
             .all(|channel| !channel.physical_enabled);
-        if let Some(settings) = settings_effect.tick(current_settings, outputs_stable) {
+        if let Some(settings) = settings_effect.tick(current_settings, outputs_stable, elapsed_ms) {
             if persist_settings(&mut settings_store, settings, outputs_physically_off) {
                 settings_effect.mark_saved(settings);
             }
@@ -2659,5 +2822,6 @@ fn main() -> ! {
             cortex_m::asm::delay(480_000);
             cortex_m::peripheral::SCB::sys_reset();
         }
+        feed_watchdog();
     }
 }

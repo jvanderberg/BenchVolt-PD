@@ -2,6 +2,7 @@ use crate::app::{
     Action, AppState, AwgStatus, ChannelSnapshot, Fault, Measurement, OutputTransition,
     RegulationMode,
 };
+use reducto::TransitionEffect;
 
 const STARTUP_GRACE_SAMPLES: u8 = 10;
 const FAULT_CONFIRM_SAMPLES: u8 = 3;
@@ -211,6 +212,32 @@ pub enum PowerEffect {
     },
 }
 
+pub struct FirmwareEffectPlanner;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FirmwareEffect {
+    pub power: Option<PowerEffect>,
+    pub global_shutdown: bool,
+}
+
+impl TransitionEffect<AppState> for FirmwareEffectPlanner {
+    type Effect = FirmwareEffect;
+
+    fn plan(old: &AppState, new: &AppState) -> Option<Self::Effect> {
+        let global_shutdown = old.screen != new.screen
+            && (old.screen == crate::app::Screen::Awg || new.screen == crate::app::Screen::Awg);
+        let power = if global_shutdown {
+            None
+        } else {
+            effect_for_transition(old, new)
+        };
+        (global_shutdown || power.is_some()).then_some(FirmwareEffect {
+            power,
+            global_shutdown,
+        })
+    }
+}
+
 pub fn effect_for_transition(old: &AppState, new: &AppState) -> Option<PowerEffect> {
     old.channels
         .iter()
@@ -303,6 +330,9 @@ pub trait PowerDriver {
     fn apply(&mut self, operation: DriverOperation) -> Result<(), Self::Error>;
 }
 
+pub const OVERTEMPERATURE_TRIP_SIXTEENTHS_C: i16 = 75 * 16;
+pub const OVERTEMPERATURE_REENABLE_SIXTEENTHS_C: i16 = 70 * 16;
+
 fn rail_for(channel: u8) -> Option<Rail> {
     match channel {
         0 | 1 => Some(Rail::Dc1),
@@ -336,7 +366,7 @@ fn enable_is_eligible(state: &AppState, channel: u8) -> Result<(), Fault> {
     if !state.recovery_armed || !state.temp_valid || !output.measurement.valid {
         return Err(Fault::Sensor);
     }
-    if state.temp_sixteenths_c >= 70 * 16 {
+    if state.temp_sixteenths_c >= OVERTEMPERATURE_REENABLE_SIXTEENTHS_C {
         return Err(Fault::OverTemperature);
     }
     if output.current_limit_ma > 3_000 {
@@ -805,8 +835,35 @@ mod tests {
                 enabled: true,
             },
         );
-        assert_eq!(stale.version, cancelled.version);
+        assert!(stale == cancelled);
         assert!(!stale.channels[0].physical_enabled);
+    }
+
+    #[test]
+    fn configured_planner_covers_power_navigation_and_no_effect_transitions() {
+        let old = eligible_state();
+        let enabling = requested(&old, 0, true);
+        assert_eq!(
+            FirmwareEffectPlanner::plan(&old, &enabling),
+            Some(FirmwareEffect {
+                power: effect_for_transition(&old, &enabling),
+                global_shutdown: false,
+            })
+        );
+
+        let mut awg = old;
+        awg.screen = crate::app::Screen::Awg;
+        assert_eq!(
+            FirmwareEffectPlanner::plan(&old, &awg),
+            Some(FirmwareEffect {
+                power: None,
+                global_shutdown: true,
+            })
+        );
+
+        let mut temperature = old;
+        temperature.temp_sixteenths_c += 1;
+        assert_eq!(FirmwareEffectPlanner::plan(&old, &temperature), None);
     }
 
     #[test]

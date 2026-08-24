@@ -1,4 +1,4 @@
-use reducto::{Reducer, VersionedState};
+use reducto::Reducer;
 
 pub const HELP_MAX_SCROLL: u8 = 28;
 pub const HELP_SCROLL_STEP: u8 = 5;
@@ -257,7 +257,6 @@ impl ChannelSnapshot {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct AppState {
-    pub version: u32,
     pub screen: Screen,
     pub focus: ControlFocus,
     pub channels: [ChannelSnapshot; 5],
@@ -288,7 +287,6 @@ impl AppState {
             None => (0, false),
         };
         Self {
-            version: 0,
             screen: Screen::MainMenu,
             focus: ControlFocus::None,
             channels: [
@@ -343,12 +341,6 @@ impl AppState {
             AwgSource::Builtin => (self.awg.low_mv, self.awg.high_mv),
             AwgSource::Arbitrary => (self.arb_run.low_mv, self.arb_run.high_mv),
         }
-    }
-}
-
-impl VersionedState for AppState {
-    fn version(&self) -> u32 {
-        self.version
     }
 }
 
@@ -424,13 +416,22 @@ pub enum Action {
 
 pub struct AppReducer;
 
+impl AppReducer {
+    fn enforce_invariants(mut state: AppState) -> AppState {
+        if state.awg_status != AwgStatus::Running && state.awg_load.valid {
+            state.awg_load = LoadMeasurement::INVALID;
+        }
+        state
+    }
+}
+
 impl Reducer for AppReducer {
     type State = AppState;
     type Action = Action;
 
     fn reduce(state: &Self::State, action: Self::Action) -> Self::State {
         let mut next = *state;
-        let mut changed = match action {
+        let _ = match action {
             Action::NextScreen => {
                 next.screen = state.screen.next();
                 next.focus = ControlFocus::None;
@@ -814,7 +815,7 @@ impl Reducer for AppReducer {
                 } else if channel == 4 {
                     (800, 22_000)
                 } else {
-                    return next;
+                    return Self::enforce_invariants(next);
                 };
                 if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault)
                     || !(minimum..=maximum).contains(&low_mv)
@@ -1000,7 +1001,7 @@ impl Reducer for AppReducer {
                     true
                 } else {
                     let Some(output) = next.channels.get_mut(usize::from(channel)) else {
-                        return next;
+                        return Self::enforce_invariants(next);
                     };
                     if output.transition != OutputTransition::Stable {
                         false
@@ -1021,7 +1022,7 @@ impl Reducer for AppReducer {
             }
             Action::SetCurrentLimit { channel, milliamps } => {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
-                    return next;
+                    return Self::enforce_invariants(next);
                 };
                 if milliamps > 3_000
                     || output.transition != OutputTransition::Stable
@@ -1035,7 +1036,7 @@ impl Reducer for AppReducer {
             }
             Action::SetRegulationMode { channel, mode } => {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
-                    return next;
+                    return Self::enforce_invariants(next);
                 };
                 if channel < 3
                     || output.transition != OutputTransition::Stable
@@ -1055,7 +1056,7 @@ impl Reducer for AppReducer {
                 measurement,
             } => {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
-                    return next;
+                    return Self::enforce_invariants(next);
                 };
                 if channel < 3
                     || !output.physical_enabled
@@ -1114,7 +1115,7 @@ impl Reducer for AppReducer {
             }
             Action::SetOutputRequested { channel, enabled } => {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
-                    return next;
+                    return Self::enforce_invariants(next);
                 };
                 if enabled
                     && output.requested_enabled
@@ -1140,7 +1141,7 @@ impl Reducer for AppReducer {
                 enabled,
             } => {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
-                    return next;
+                    return Self::enforce_invariants(next);
                 };
                 let expected = if enabled {
                     OutputTransition::Enabling(operation)
@@ -1167,7 +1168,7 @@ impl Reducer for AppReducer {
                 fault,
             } => {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
-                    return next;
+                    return Self::enforce_invariants(next);
                 };
                 let matches_operation = matches!(
                     output.transition,
@@ -1191,7 +1192,7 @@ impl Reducer for AppReducer {
             }
             Action::ProtectionTrip { channel, fault } => {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
-                    return next;
+                    return Self::enforce_invariants(next);
                 };
                 if !output.requested_enabled
                     && !output.physical_enabled
@@ -1216,7 +1217,7 @@ impl Reducer for AppReducer {
             Action::HardwareSettingApplied => false,
             Action::HardwareSettingFailed { channel, fault } => {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
-                    return next;
+                    return Self::enforce_invariants(next);
                 };
                 output.operation = output.operation.wrapping_add(1);
                 output.requested_enabled = false;
@@ -1267,15 +1268,7 @@ impl Reducer for AppReducer {
             }
         };
 
-        if next.awg_status != AwgStatus::Running && next.awg_load.valid {
-            next.awg_load = LoadMeasurement::INVALID;
-            changed = true;
-        }
-
-        if changed {
-            next.version = state.version.wrapping_add(1);
-        }
-        next
+        Self::enforce_invariants(next)
     }
 }
 
@@ -1346,6 +1339,24 @@ mod tests {
         assert_eq!(loaded.channels[3].setpoint_mv, 2_400);
         assert_eq!(loaded.channels[4].setpoint_mv, 8_000);
         assert!(loaded.temperature_unit == TemperatureUnit::Fahrenheit);
+    }
+
+    #[test]
+    fn invalid_action_guard_still_runs_shared_invariant_cleanup() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        state.awg_load = LoadMeasurement {
+            milliamps_rms: 100,
+            milliwatts_average: 500,
+            valid: true,
+        };
+        let next = AppReducer::reduce(
+            &state,
+            Action::SetCurrentLimit {
+                channel: 99,
+                milliamps: 100,
+            },
+        );
+        assert!(next.awg_load == LoadMeasurement::INVALID);
     }
 
     #[test]
@@ -1421,7 +1432,7 @@ mod tests {
         state.menu_selection = 0;
         let unchanged = AppReducer::reduce(&state, Action::AdjustAwg(1));
         assert_eq!(unchanged.awg.channel, state.awg.channel);
-        assert_eq!(unchanged.version, state.version);
+        assert!(unchanged == state);
     }
 
     #[test]
@@ -1439,10 +1450,10 @@ mod tests {
 
         state.awg.waveform = AwgWaveform::Triangle;
         let unchanged = AppReducer::reduce(&state, Action::AdjustAwg(1));
-        assert_eq!(unchanged.version, state.version);
+        assert!(unchanged == state);
         let click = AppReducer::reduce(&state, Action::ActivateMenu);
         assert!(click.screen == Screen::Awg);
-        assert_eq!(click.version, state.version);
+        assert!(click == state);
     }
 
     #[test]

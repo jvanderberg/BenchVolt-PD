@@ -389,8 +389,29 @@ where
             .ok();
     }
 
+    #[inline(never)]
+    fn draw_segment_digit(
+        &mut self,
+        digit: char,
+        origin: Point,
+        color: Rgb565,
+        rectangles: &[(i32, i32, u32, u32); 7],
+    ) {
+        let Some(segments) = seven_segment_mask(digit) else {
+            return;
+        };
+        for (index, &(x, y, width, height)) in rectangles.iter().enumerate() {
+            if segments & (1 << index) != 0 {
+                Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
+                    .into_styled(PrimitiveStyle::with_fill(color))
+                    .draw(&mut self.display)
+                    .ok();
+            }
+        }
+    }
+
     fn draw_hero_digit(&mut self, digit: char, origin: Point, color: Rgb565) {
-        const RECTS: [(i32, i32, u32, u32); 7] = [
+        const RECTANGLES: [(i32, i32, u32, u32); 7] = [
             (4, 0, 14, 4),
             (0, 4, 4, 13),
             (18, 4, 4, 13),
@@ -399,18 +420,7 @@ where
             (18, 21, 4, 13),
             (4, 34, 14, 4),
         ];
-
-        let Some(segments) = seven_segment_mask(digit) else {
-            return;
-        };
-        for (index, &(x, y, width, height)) in RECTS.iter().enumerate() {
-            if segments & (1 << index) != 0 {
-                Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
-                    .into_styled(PrimitiveStyle::with_fill(color))
-                    .draw(&mut self.display)
-                    .ok();
-            }
-        }
+        self.draw_segment_digit(digit, origin, color, &RECTANGLES);
     }
 
     fn draw_hero(&mut self, value: Option<u32>, x: i32, suffix: &str) {
@@ -457,7 +467,7 @@ where
     }
 
     fn draw_power_digit(&mut self, digit: char, origin: Point) {
-        const RECTS: [(i32, i32, u32, u32); 7] = [
+        const RECTANGLES: [(i32, i32, u32, u32); 7] = [
             (3, 0, 9, 3),
             (0, 3, 3, 9),
             (12, 3, 3, 9),
@@ -466,18 +476,7 @@ where
             (12, 15, 3, 9),
             (3, 24, 9, 3),
         ];
-
-        let Some(segments) = seven_segment_mask(digit) else {
-            return;
-        };
-        for (index, &(x, y, width, height)) in RECTS.iter().enumerate() {
-            if segments & (1 << index) != 0 {
-                Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
-                    .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
-                    .draw(&mut self.display)
-                    .ok();
-            }
-        }
+        self.draw_segment_digit(digit, origin, Rgb565::WHITE, &RECTANGLES);
     }
 
     fn draw_power(&mut self, power_centiwatts: Option<u32>) {

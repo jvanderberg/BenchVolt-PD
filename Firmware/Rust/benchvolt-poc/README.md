@@ -166,21 +166,27 @@ focuses the sink current protection limit; rotation adjusts it from 0 to 5 A in
 10 mA steps. The firmware boots directly to this screen for cable-only hardware
 diagnosis. Passive discovery errors such as `DETACHED` or `BUS` remain visible
 there, while an imported contract displays its PDO number, voltage, and current.
-Startup is deliberately passive: the firmware never transmits a
-PD request or automatically retries one during boot, because some VBUS-powered
-sources hard-reset the supply in response and can create a reboot loop. After
-the recommended 500 ms attach interval, read-only status polling can import a
-contract negotiated autonomously by the STUSB4500. Import requires sink-ready
+Startup first imports the STUSB4500's autonomous contract without transmitting.
+After three seconds of healthy execution with every output physically off, a
+contract below 20 V triggers the archived original firmware's RAM-PDO sequence:
+10 V / 2 A, 10 V / 3 A, and 20 V / 5 A, followed by PD Soft Reset. The boot
+seal remains invalid during this transition, so a VBUS reset returns to the
+stock bootloader instead of entering a firmware boot loop. A successful 20 V
+contract, or a bounded 500 ms no-reset settle interval, permits normal boot
+sealing. There is no automatic retry within the same boot.
+
+Read-only status polling imports the resulting contract. Import requires sink-ready
 state, a valid non-mismatch RDO, a valid input ADC sample, and measured VBUS to
 match one of the controller's enabled fixed sink PDO voltages. It never sends a
 PD message. From a terminal, `SYST:PD:NEGOTIATE` (or the legacy
-`SOUR:PD:CONF:MAX`) enables the STUSB4500 NVM `REQ_SRC_CURRENT` mode. That mode
+`SOUR:PD:CONF:MAX`) first enables the STUSB4500 NVM `REQ_SRC_CURRENT` mode. That mode
 makes the controller autonomously request all current advertised by the matched
 source PDO on subsequent cold attachments. The update reads sector 4, changes
 only that mode bit, erases and programs only sector 4, then requires an exact
 eight-byte readback before returning success. If an interrupted earlier update
 left the sector erased, it restores the checked-in legacy NVM sector image. An
-already-configured controller is not rewritten and no PD message is sent. After
+already-configured controller is not rewritten; the command instead replays the
+same volatile legacy RAM-PDO/Soft-Reset request used at boot. After
 `OK:PD:NVM_UPDATED:POWER_CYCLE`, remove all VBUS sources before cold-starting
 from the intended PD source. A valid imported contract is required before any
 output can enable.
@@ -196,6 +202,8 @@ verified contract, and typed terminal error status over CDC. `SYST:PD:RAW?` is
 a read-only hardware diagnostic: it reports the STUSB4500 device ID, attach,
 VBUS-monitor, CC state/fault, Type-C FSM, reset, VBUS gate, policy-engine,
 configured-PDO-count, and active-RDO registers.
+Its `SNK0x` field contains the twelve live PDO register bytes in ascending
+register order.
 It deliberately avoids read-clear alert registers and never transmits a PD
 message.
 

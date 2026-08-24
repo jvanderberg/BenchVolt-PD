@@ -19,17 +19,22 @@ because `main.rs` has been reduced from 2,663 to 1,012 lines.
 - Protection timing preserves scheduler phase and fails closed after repeated
   late measurement windows (`6e434c0`).
 - STUSB4500 support models and supervises the active PD contract. Startup
-  discovery is read-only and does not transmit PD messages. Detach, RDO
+  discovery is read-only; after three healthy seconds with outputs physically
+  off, a sub-20 V contract receives the exact RAM-PDO plus PD Soft Reset
+  sequence recovered from the archived original `main.7z`. The boot seal stays
+  invalid through the bounded transition, preserving bootloader recovery if
+  the source drops VBUS. Detach, RDO
   identity change, invalid contract voltage, or missing
   contract while outputs are active causes global shutdown.
 - The STUSB4500 software-I2C clock now uses a tested 2 us half-cycle. This
   keeps its requested clock within the controller's 400 kHz Fast-mode limit
   instead of relying on incidental GPIO overhead to slow a nominal 500 kHz
-  request. Connected testing showed that RAM-only PDO changes followed by
-  either Get Source Capabilities or PD Soft Reset can drop VBUS, reset the MCU,
-  and lose the volatile change. The explicit negotiation command therefore
-  programs the STUSB4500 `REQ_SRC_CURRENT` NVM bit once, verifies the complete
-  eight-byte sector, and leaves subsequent cold-attach negotiation autonomous.
+  request. Connected testing showed that Get Source Capabilities consistently
+  dropped VBUS before the RAM PDO could be changed. Replaying the archived
+  sequence in the correct order—write all RAM PDOs first, then send PD Soft
+  Reset—negotiated 20.03 V without resetting the MCU. The explicit negotiation
+  command also programs the STUSB4500 `REQ_SRC_CURRENT` NVM bit once and verifies
+  the complete eight-byte sector.
   The software-I2C transport now supports the NVM sector's eight-byte write;
   its former four-byte limit was sufficient for PDOs but rejected NVM writes.
 - Passive RDO import rejects capability mismatch, impossible current fields,
@@ -77,38 +82,27 @@ executor.
 
 ## Remaining work and hardware evidence required
 
-- Connected-device testing now has a read-only `SYST:PD:RAW?` snapshot. On the
-  currently attached bench setup, ten consecutive samples returned device ID
-  `0x25`, port status `0x00`, monitoring status `0x02`, CC status `0x20`,
-  Type-C state `0x01`, reset control `0x00`, VBUS control `0x00`, policy-engine
-  state `0x00`, three configured sink PDOs, and an all-zero active RDO while
-  the independent PC0 ADC measured about 19.36 V on `VBUS_SINK`. `CC=0x20`
-  means the controller is looking for a connection with no valid Rp detected;
-  `TYPEC=0x01` is `ATTACHWAIT_SNK`; and reset is deasserted. The controller is
-  therefore powered and running but electrically sees neither CC attachment
-  nor a PD contract. The active command correctly returns `ERR:PD:DETACHED`
-  without transmitting. Rust retains the same attach guard as the reference C
-  driver. The same tuple remained stable after flashing the slower I2C build,
-  ruling out the prior out-of-spec requested clock as the detach cause. The r3
-  schematic routes both receptacle-A CC contacts correctly: `1A5/CC1` and
-  `1B5/CC2` reach the corresponding STUSB4500 pins. Both receptacle-A USB 2.0
-  orientations also reach `USB_A_P/N` through selector S2. Nevertheless, that
-  receptacle did not enumerate from a computer in either cable orientation or
-  S2 position, and it detects neither source Rp from the PPS brick. This
-  localizes the remaining problem to the assembled receptacle-A CC/data path,
-  connector footprint/joints, D3, or S2 rather than the intended netlist. All
-  VBUS contacts on both receptacles share the same `VBUS` net before Q1, so an
-  ordinary powered COM cable and the PD source are not isolated from each
-  other and must not be connected simultaneously.
+- Connected-device testing now has a read-only `SYST:PD:RAW?` snapshot including
+  all twelve live sink-PDO bytes. With the PPS source attached, autonomous NVM
+  startup initially produced 5 V / 3 A. Three attempts to request Source
+  Capabilities each reset VBUS before a RAM PDO could be installed. The archived
+  original `main.7z` revealed the missing order: it writes RAM PDOs first and
+  then sends PD Soft Reset. Replaying that exact sequence produced source PDO5,
+  a 20 V / 5 A contract, and 20.03 V measured VBUS without a reset. A fresh
+  application boot subsequently reached the same contract automatically without
+  any CDC command. All outputs remained off throughout. The r3 schematic still
+  shows that both receptacles share the upstream `VBUS` net; simultaneous powered
+  COM and PD-source connections are therefore not electrically isolated. The
+  separate receptacle-A CC/data-routing and enumeration limitation remains
+  documented in `Docs/r3-usb-c-routing-erratum.md`.
 
 - Passive startup can recover RDO current exactly, but the RDO contains no
   nominal voltage. If the transient Source Capabilities message was missed,
   voltage is inferred by matching independently measured VBUS to an enabled
   local fixed sink profile. This is deliberately fail-closed but remains an
   inference rather than exact source metadata.
-- Connected-hardware coverage is still required for autonomous attach timing,
-  explicit fixed-PDO negotiation on the installed STUSB4500 revision,
-  detach under load, watchdog reset with energized outputs, and injected I2C
+- Connected-hardware coverage is still required for detach under load,
+  watchdog reset with energized outputs, and injected I2C
   faults. The headless gate does not claim to replace those tests.
 - `main.rs` is substantially smaller but still owns board construction and the
   hardware side of USB intents. Further extraction should keep reset/flash/GPIO

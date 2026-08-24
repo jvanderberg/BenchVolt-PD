@@ -64,10 +64,8 @@ fn power_down(registers: &pac::adc::RegisterBlock) -> bool {
     true
 }
 
-fn read_raw<P>(_adc: &mut BoundedAdc, _pin: &mut P) -> Option<u16>
-where
-    P: Channel<HalAdc, ID = u8>,
-{
+#[inline(never)]
+fn read_raw_channel(_adc: &mut BoundedAdc, channel: u8) -> Option<u16> {
     // The HAL owns ADC, and the mutable Adc reference above proves exclusive
     // access. We use the PAC view because the HAL's OneShot implementation has
     // four unbounded busy waits.
@@ -87,7 +85,7 @@ where
 
     registers
         .chselr
-        .write(|w| unsafe { w.bits(1_u32 << P::channel()) });
+        .write(|w| unsafe { w.bits(1_u32 << channel) });
     registers.smpr.write(|w| w.smp().cycles71_5());
     registers
         .cfgr1
@@ -104,16 +102,17 @@ where
     power_down(registers).then_some(sample)
 }
 
-fn read_adc_mv<P>(adc: &mut BoundedAdc, pin: &mut P) -> Option<u16>
+fn read_adc_mv<P>(adc: &mut BoundedAdc, _pin: &mut P) -> Option<u16>
 where
     P: Channel<HalAdc, ID = u8>,
 {
+    let channel = P::channel();
     // The sample capacitor retains the previous mux channel. Discard the first
     // conversion so a high-impedance divider cannot look like a current spike.
-    read_raw(adc, pin)?;
+    read_raw_channel(adc, channel)?;
     let mut sum = 0u32;
     for _ in 0..SAMPLE_COUNT {
-        sum += u32::from(read_raw(adc, pin)?);
+        sum += u32::from(read_raw_channel(adc, channel)?);
     }
     Some(((sum * 3_300 / SAMPLE_COUNT + 2_047) / 4_095) as u16)
 }

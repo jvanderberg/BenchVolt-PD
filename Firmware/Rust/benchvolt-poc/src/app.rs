@@ -270,6 +270,7 @@ pub struct AppState {
     pub sink_fault: Fault,
     pub pd_contract: Option<crate::pd::Contract>,
     pub pd_error: Option<crate::pd::PdError>,
+    pub pd_negotiating: bool,
     pub temp_sixteenths_c: i16,
     pub temp_valid: bool,
     pub recovery_armed: bool,
@@ -309,6 +310,7 @@ impl AppState {
             sink_fault: Fault::None,
             pd_contract: None,
             pd_error: None,
+            pd_negotiating: false,
             temp_sixteenths_c,
             temp_valid,
             recovery_armed,
@@ -1403,16 +1405,20 @@ impl Reducer for AppReducer {
             Action::PdNegotiated(contract) => {
                 next.pd_contract = Some(contract);
                 next.pd_error = None;
+                next.pd_negotiating = false;
                 true
             }
             Action::PdNegotiationStarted
-                if state.pd_contract.is_none() && state.pd_error.is_none() =>
+                if state.pd_contract.is_none()
+                    && state.pd_error.is_none()
+                    && state.pd_negotiating =>
             {
                 false
             }
             Action::PdNegotiationStarted => {
                 next.pd_contract = None;
                 next.pd_error = None;
+                next.pd_negotiating = true;
                 true
             }
             Action::PdFailed(error)
@@ -1424,6 +1430,7 @@ impl Reducer for AppReducer {
                 let contract_lost = state.pd_contract.is_some();
                 next.pd_contract = None;
                 next.pd_error = Some(error);
+                next.pd_negotiating = false;
                 if contract_lost
                     || state
                         .channels
@@ -1629,6 +1636,36 @@ mod tests {
         assert!(lost.pd_contract.is_none());
         assert_eq!(lost.pd_error, Some(crate::pd::PdError::Detached));
         assert_eq!(lost.sink_fault, Fault::Hardware);
+    }
+
+    #[test]
+    fn pd_negotiation_activity_is_explicit_and_terminal() {
+        let app = AppState::new(false, Some(400));
+        assert!(!app.pd_negotiating);
+
+        let negotiating = AppReducer::reduce(&app, Action::PdNegotiationStarted);
+        assert!(negotiating.pd_negotiating);
+        assert!(negotiating.pd_contract.is_none());
+        assert!(negotiating.pd_error.is_none());
+
+        let failed = AppReducer::reduce(
+            &negotiating,
+            Action::PdFailed(crate::pd::PdError::Detached),
+        );
+        assert!(!failed.pd_negotiating);
+        assert_eq!(failed.pd_error, Some(crate::pd::PdError::Detached));
+
+        let restarted = AppReducer::reduce(&failed, Action::PdNegotiationStarted);
+        let contract = crate::pd::Contract {
+            source_position: 3,
+            millivolts: 20_000,
+            operating_milliamps: 1_500,
+            maximum_milliamps: 3_000,
+        };
+        let ready = AppReducer::reduce(&restarted, Action::PdNegotiated(contract));
+        assert!(!ready.pd_negotiating);
+        assert_eq!(ready.pd_contract, Some(contract));
+        assert!(ready.pd_error.is_none());
     }
 
     #[test]

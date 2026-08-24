@@ -44,6 +44,7 @@ pub const fn framed_value_damage(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SinkPdStatus {
+    Idle,
     Negotiating,
     Ready(crate::pd::Contract),
     Error(crate::pd::PdError),
@@ -79,8 +80,10 @@ pub fn sink_projection(state: &AppState) -> SinkProjection {
             SinkPdStatus::Ready(contract)
         } else if let Some(error) = state.pd_error {
             SinkPdStatus::Error(error)
-        } else {
+        } else if state.pd_negotiating {
             SinkPdStatus::Negotiating
+        } else {
+            SinkPdStatus::Idle
         },
     }
 }
@@ -212,6 +215,17 @@ mod tests {
         assert_eq!(
             sink_projection(&state).pd_status,
             SinkPdStatus::Ready(contract)
+        );
+    }
+
+    #[test]
+    fn sink_projection_distinguishes_idle_from_active_negotiation() {
+        let mut state = AppState::new(false, Some(400));
+        assert_eq!(sink_projection(&state).pd_status, SinkPdStatus::Idle);
+        state.pd_negotiating = true;
+        assert_eq!(
+            sink_projection(&state).pd_status,
+            SinkPdStatus::Negotiating
         );
     }
 

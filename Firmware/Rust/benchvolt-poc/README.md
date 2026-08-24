@@ -186,8 +186,12 @@ fault and run the global hardware shutdown. Detach, contract downgrade, or PD
 communication failure also shuts down globally. A missing sink-current sample
 fails closed. The latch clears only after every output is off and ten
 consecutive samples are valid and at or below the limit; outputs do not
-automatically restart. `SYST:PD?` reports negotiation, contract, or typed error
-status over CDC.
+automatically restart. `SYST:PD?` distinguishes idle, active negotiation,
+verified contract, and typed terminal error status over CDC. `SYST:PD:RAW?` is
+a read-only hardware diagnostic: it reports the STUSB4500 device ID, attach,
+VBUS-monitor, policy-engine, configured-PDO-count, and active-RDO registers.
+It deliberately avoids read-clear alert registers and never transmits a PD
+message.
 
 ## Headless build and flash runbook
 

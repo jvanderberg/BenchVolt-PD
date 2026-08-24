@@ -701,6 +701,10 @@ where
         self.clear_detail_region(214, 128, 106, 36);
         let mut text: String<24> = String::new();
         let color = match projection.pd_status {
+            SinkPdStatus::Idle => {
+                text.push_str("PD IDLE").ok();
+                Rgb565::YELLOW
+            }
             SinkPdStatus::Negotiating => {
                 text.push_str("PD NEGOTIATING").ok();
                 Rgb565::YELLOW

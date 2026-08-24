@@ -80,6 +80,7 @@ pub enum UsbIntent {
     SetCurrentLimit { channel: u8, milliamps: u16 },
     SetRegulationMode { channel: u8, mode: RegulationMode },
     SetSinkCurrentLimit(u16),
+    PdDiagnostics,
     PdNegotiate,
     ArbData(ArbDataChunk),
     ArbStart(ArbStart),
@@ -113,6 +114,33 @@ pub fn pd_completion_response(result: Result<(), crate::pd::PdError>) -> &'stati
         Err(crate::pd::PdError::NoSuitablePdo) => b"ERR:PD:NO_PDO\r\n",
         Err(crate::pd::PdError::ContractMismatch) => b"ERR:PD:CONTRACT\r\n",
     }
+}
+
+pub fn pd_diagnostics_response(snapshot: crate::pd::Diagnostics) -> Response {
+    fn push_hex(response: &mut Response, value: u8) {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        response.push_byte(HEX[usize::from(value >> 4)]).ok();
+        response.push_byte(HEX[usize::from(value & 0x0f)]).ok();
+    }
+
+    let mut response = Response::new();
+    for (label, value) in [
+        (b"ID" as &[u8], snapshot.device_id),
+        (b" PORT", snapshot.port_status),
+        (b" MON", snapshot.monitoring_status),
+        (b" PE", snapshot.pe_fsm),
+        (b" PDO", snapshot.sink_pdo_count),
+    ] {
+        response.push_bytes(label).ok();
+        response.push_bytes(b"0x").ok();
+        push_hex(&mut response, value);
+    }
+    response.push_bytes(b" RDO0x").ok();
+    for value in snapshot.active_rdo.iter().rev() {
+        push_hex(&mut response, *value);
+    }
+    response.push_bytes(b"\r\n").ok();
+    response
 }
 
 pub fn temperature_response(state: &AppState) -> Response {
@@ -225,6 +253,9 @@ pub fn project_compat_query(
 }
 
 pub fn parse_compat_mutation(command: &[u8]) -> Result<Option<UsbIntent>, CommandError> {
+    if command == b"SYST:PD:RAW?" {
+        return Ok(Some(UsbIntent::PdDiagnostics));
+    }
     if matches!(command, b"SYST:PD:NEGOTIATE" | b"SOUR:PD:CONF:MAX") {
         return Ok(Some(UsbIntent::PdNegotiate));
     }
@@ -338,6 +369,26 @@ mod tests {
             Ok(Some(UsbIntent::PdNegotiate))
         );
         assert_eq!(parse_compat_mutation(b"SYST:PD:NEGOTIATE?"), Ok(None));
+    }
+
+    #[test]
+    fn pd_diagnostics_query_formats_a_read_only_raw_snapshot() {
+        assert_eq!(
+            parse_compat_mutation(b"SYST:PD:RAW?"),
+            Ok(Some(UsbIntent::PdDiagnostics))
+        );
+        let response = pd_diagnostics_response(crate::pd::Diagnostics {
+            device_id: 0x25,
+            port_status: 0x01,
+            monitoring_status: 0x08,
+            pe_fsm: 0x18,
+            sink_pdo_count: 0x03,
+            active_rdo: [0xc8, 0x58, 0x02, 0x30],
+        });
+        assert_eq!(
+            response.as_bytes(),
+            b"ID0x25 PORT0x01 MON0x08 PE0x18 PDO0x03 RDO0x300258C8\r\n"
+        );
     }
 
     #[test]

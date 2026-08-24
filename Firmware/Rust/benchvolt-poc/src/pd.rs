@@ -1,6 +1,7 @@
 pub const STUSB4500_ADDRESS: u8 = 0x28;
 const DEVICE_ID: u8 = 0x2f;
 const PORT_STATUS: u8 = 0x0e;
+const MONITORING_STATUS: u8 = 0x10;
 const PRT_STATUS: u8 = 0x16;
 const COMMAND_CTRL: u8 = 0x1a;
 const PE_FSM: u8 = 0x29;
@@ -66,6 +67,40 @@ pub struct BusError;
 pub trait PdBus {
     fn read(&mut self, register: u8, values: &mut [u8]) -> Result<(), BusError>;
     fn write(&mut self, register: u8, values: &[u8]) -> Result<(), BusError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Diagnostics {
+    pub device_id: u8,
+    pub port_status: u8,
+    pub monitoring_status: u8,
+    pub pe_fsm: u8,
+    pub sink_pdo_count: u8,
+    pub active_rdo: [u8; 4],
+}
+
+pub fn read_diagnostics(bus: &mut impl PdBus) -> Result<Diagnostics, BusError> {
+    fn read_byte(bus: &mut impl PdBus, register: u8) -> Result<u8, BusError> {
+        let mut value = [0];
+        bus.read(register, &mut value)?;
+        Ok(value[0])
+    }
+
+    let device_id = read_byte(bus, DEVICE_ID)?;
+    let port_status = read_byte(bus, PORT_STATUS)?;
+    let monitoring_status = read_byte(bus, MONITORING_STATUS)?;
+    let pe_fsm = read_byte(bus, PE_FSM)?;
+    let sink_pdo_count = read_byte(bus, SINK_PDO_COUNT)?;
+    let mut active_rdo = [0; 4];
+    bus.read(ACTIVE_RDO, &mut active_rdo)?;
+    Ok(Diagnostics {
+        device_id,
+        port_status,
+        monitoring_status,
+        pe_fsm,
+        sink_pdo_count,
+        active_rdo,
+    })
 }
 
 pub fn decode_fixed_pdo(raw: u32, source_position: u8) -> Option<FixedPdo> {
@@ -579,6 +614,31 @@ mod tests {
         fn write(&mut self, _: u8, _: &[u8]) -> Result<(), BusError> {
             Err(BusError)
         }
+    }
+
+    #[test]
+    fn diagnostic_snapshot_is_read_only_and_preserves_raw_registers() {
+        let mut bus = ScriptBus(VecDeque::from([
+            Operation::Read(DEVICE_ID, vec![0x25]),
+            Operation::Read(PORT_STATUS, vec![0x01]),
+            Operation::Read(MONITORING_STATUS, vec![0x08]),
+            Operation::Read(PE_FSM, vec![PE_SINK_READY]),
+            Operation::Read(SINK_PDO_COUNT, vec![0x03]),
+            Operation::Read(ACTIVE_RDO, vec![0xc8, 0x58, 0x02, 0x30]),
+        ]));
+
+        assert_eq!(
+            read_diagnostics(&mut bus),
+            Ok(Diagnostics {
+                device_id: 0x25,
+                port_status: 0x01,
+                monitoring_status: 0x08,
+                pe_fsm: PE_SINK_READY,
+                sink_pdo_count: 0x03,
+                active_rdo: [0xc8, 0x58, 0x02, 0x30],
+            })
+        );
+        assert!(bus.0.is_empty());
     }
 
     #[test]

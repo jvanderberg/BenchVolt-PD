@@ -27,7 +27,7 @@ use benchvolt_poc::power::{
 };
 use benchvolt_poc::settings::{PersistentSettings, SettingsDebouncer};
 use benchvolt_poc::usb_command::{
-    output_completion_response, pd_completion_response, UsbIntent,
+    output_completion_response, pd_completion_response, pd_diagnostics_response, UsbIntent,
 };
 use benchvolt_poc::usb_output::{Admission, OutputTransaction, RequestResult};
 use benchvolt_poc::waveform::{Directive as WaveformDirective, Service as WaveformService};
@@ -574,6 +574,19 @@ fn main() -> ! {
                         queue_usb_response(b"OK\r\n");
                     } else {
                         queue_usb_response(b"ERR:RANGE\r\n");
+                    }
+                }
+                UsbIntent::PdDiagnostics => {
+                    let result = benchvolt_poc::pd::read_diagnostics(&mut SoftPdBus::new(
+                        &mut pd_bus,
+                        power_driver.delay_mut(),
+                    ));
+                    match result {
+                        Ok(snapshot) => {
+                            let response = pd_diagnostics_response(snapshot);
+                            queue_usb_response(response.as_bytes());
+                        }
+                        Err(_) => queue_usb_response(b"ERR:PD:BUS\r\n"),
                     }
                 }
                 UsbIntent::PdNegotiate => {

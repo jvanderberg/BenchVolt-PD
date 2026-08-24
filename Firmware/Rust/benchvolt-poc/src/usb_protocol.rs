@@ -267,8 +267,10 @@ pub(crate) fn handle_usb_command(
                     benchvolt_poc::pd::PdError::ContractMismatch => "CONTRACT",
                 };
                 write!(&mut response, "ERROR,{code}\r\n").ok();
-            } else {
+            } else if state.pd_negotiating {
                 response.push_str("NEGOTIATING\r\n").ok();
+            } else {
+                response.push_str("IDLE\r\n").ok();
             }
             queue_usb_response(response.as_bytes());
         }

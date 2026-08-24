@@ -16,6 +16,8 @@ pub enum TpsStatusObservation {
     ReadError,
 }
 
+pub const PROTECTION_STALE_MS: u16 = 100;
+
 #[derive(Default)]
 pub struct ProtectionService {
     channels: [ProtectionMonitor; 5],
@@ -47,6 +49,18 @@ impl ProtectionService {
                     fault,
                 },
             )
+        })
+    }
+
+    pub fn stale_sample_trip_actions(state: &AppState, elapsed_ms: u16) -> [Option<Action>; 5] {
+        core::array::from_fn(|index| {
+            let output = &state.channels[index];
+            (elapsed_ms >= PROTECTION_STALE_MS
+                && (output.requested_enabled || output.physical_enabled))
+                .then_some(Action::ProtectionTrip {
+                    channel: index as u8,
+                    fault: Fault::Hardware,
+                })
         })
     }
 
@@ -261,6 +275,32 @@ mod tests {
             Some(Action::ProtectionTrip {
                 channel: 4,
                 fault: Fault::Sensor
+            })
+        ));
+    }
+
+    #[test]
+    fn stale_sampling_fails_closed_only_for_active_outputs() {
+        let mut state = active_state(2);
+        state.channels[4].requested_enabled = true;
+        assert!(ProtectionService::stale_sample_trip_actions(&state, 99)
+            .iter()
+            .all(Option::is_none));
+
+        let actions = ProtectionService::stale_sample_trip_actions(&state, 100);
+        assert!(actions[0].is_none());
+        assert!(matches!(
+            actions[2],
+            Some(Action::ProtectionTrip {
+                channel: 2,
+                fault: Fault::Hardware
+            })
+        ));
+        assert!(matches!(
+            actions[4],
+            Some(Action::ProtectionTrip {
+                channel: 4,
+                fault: Fault::Hardware
             })
         ));
     }

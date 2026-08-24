@@ -433,7 +433,10 @@ fn main() -> ! {
     let mut pending_usb_pd = false;
 
     loop {
-        while let Some(command) = take_usb_command() {
+        'usb_command: {
+            let Some(command) = take_usb_command() else {
+                break 'usb_command;
+            };
             match handle_usb_command(
                 command.as_slice(),
                 app.state(),
@@ -452,7 +455,7 @@ fn main() -> ! {
                             Action::GlobalShutdownFailed,
                         );
                         queue_usb_response(b"ERR:HARDWARE\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     dispatch_app(
                         &mut app,
@@ -462,7 +465,7 @@ fn main() -> ! {
                     if !erase_flash_page(BOOT_METADATA_ADDR) {
                         unsafe { raw_emergency_shutdown() };
                         queue_usb_response(b"ERR:FLASH\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     queue_usb_response(b"OK:JUMPING_TO_BOOTLOADER\r\n");
                     unsafe { raw_emergency_shutdown() };
@@ -476,7 +479,7 @@ fn main() -> ! {
                 UsbIntent::SetOutput { channel, enabled } => {
                     if enabled && (power_driver.is_busy() || pending_usb_pd) {
                         queue_usb_response(b"ERR:BUSY\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     if let Some((pending_channel, _, _)) = pending_usb_output {
                         if pending_channel == channel && !enabled {
@@ -484,7 +487,7 @@ fn main() -> ! {
                             pending_usb_output = None;
                         } else {
                             queue_usb_response(b"ERR:BUSY\r\n");
-                            continue;
+                            break 'usb_command;
                         }
                     }
                     if enabled
@@ -494,7 +497,7 @@ fn main() -> ! {
                         )
                     {
                         queue_usb_response(b"ERR:BUSY\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     if !enabled
                         && channel == app.state().active_awg_channel()
@@ -515,7 +518,7 @@ fn main() -> ! {
                             dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                             queue_usb_response(b"ERR:HARDWARE\r\n");
                         }
-                        continue;
+                        break 'usb_command;
                     }
                     dispatch_app(
                         &mut app,
@@ -546,7 +549,7 @@ fn main() -> ! {
                         && app.state().channels[usize::from(channel)].physical_enabled
                     {
                         queue_usb_response(b"ERR:BUSY\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     dispatch_app(
                         &mut app,
@@ -570,7 +573,7 @@ fn main() -> ! {
                         && app.state().channels[usize::from(channel)].physical_enabled
                     {
                         queue_usb_response(b"ERR:BUSY\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     dispatch_app(
                         &mut app,
@@ -599,7 +602,7 @@ fn main() -> ! {
                         && app.state().channels[usize::from(channel)].physical_enabled
                     {
                         queue_usb_response(b"ERR:BUSY\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     if channel == app.state().active_awg_channel()
                         && !matches!(
@@ -608,7 +611,7 @@ fn main() -> ! {
                         )
                     {
                         queue_usb_response(b"ERR:BUSY\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     dispatch_app(
                         &mut app,
@@ -627,7 +630,7 @@ fn main() -> ! {
                 UsbIntent::SetSinkCurrentLimit(milliamps) => {
                     if pending_usb_pd {
                         queue_usb_response(b"ERR:BUSY\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     dispatch_app(
                         &mut app,
@@ -650,7 +653,7 @@ fn main() -> ! {
                         });
                     if pending_usb_pd || power_driver.is_busy() || !outputs_off {
                         queue_usb_response(b"ERR:BUSY\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     pd_service.request_negotiation(app.state().sink_current_limit_ma);
                     pending_usb_pd = true;
@@ -666,11 +669,11 @@ fn main() -> ! {
                         AwgStatus::Stopped | AwgStatus::Fault
                     ) {
                         queue_usb_response(b"ERR:BUSY\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     if arb_upload.accept(chunk).is_err() {
                         queue_usb_response(b"ERR:SEQUENCE\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     cortex_m::interrupt::free(|cs| {
                         ARB_BUFFER.borrow(cs).borrow_mut().write(chunk);
@@ -685,18 +688,18 @@ fn main() -> ! {
                         AwgStatus::Stopped | AwgStatus::Fault
                     ) {
                         queue_usb_response(b"ERR:BUSY\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     if !arb_upload.is_complete_for(start) {
                         queue_usb_response(b"ERR:INCOMPLETE\r\n");
-                        continue;
+                        break 'usb_command;
                     }
                     let bounds = cortex_m::interrupt::free(|cs| {
                         ARB_BUFFER.borrow(cs).borrow().validate(start)
                     });
                     let Some((initial_mv, low_mv, high_mv)) = bounds else {
                         queue_usb_response(b"ERR:RANGE\r\n");
-                        continue;
+                        break 'usb_command;
                     };
                     dispatch_app(
                         &mut app,
@@ -753,6 +756,23 @@ fn main() -> ! {
         let elapsed_ms = input_ticks.wrapping_sub(service_tick);
         service_tick = input_ticks;
         let mut due = cadence.advance(elapsed_ms);
+
+        let stale_actions = ProtectionService::stale_sample_trip_actions(app.state(), elapsed_ms);
+        if stale_actions.iter().any(Option::is_some) {
+            let shutdown_ok = execute_global_shutdown(&mut power_driver).is_ok();
+            for action in stale_actions.into_iter().flatten() {
+                dispatch_app(&mut app, &mut power_driver, action);
+            }
+            dispatch_app(
+                &mut app,
+                &mut power_driver,
+                if shutdown_ok {
+                    Action::GlobalShutdownApplied
+                } else {
+                    Action::GlobalShutdownFailed
+                },
+            );
+        }
 
         let outputs_off = app
             .state()

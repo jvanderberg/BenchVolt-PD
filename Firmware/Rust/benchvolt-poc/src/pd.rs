@@ -328,6 +328,9 @@ impl Negotiator {
                     let mut header = [0u8; 2];
                     let mut byte_count = [0u8];
                     bus.read(RX_HEADER, &mut header).map_err(|_| PdError::Bus)?;
+                    if u16::from_le_bytes(header) & 0x1f != 1 {
+                        return Ok(None);
+                    }
                     bus.read(RX_BYTE_COUNT, &mut byte_count)
                         .map_err(|_| PdError::Bus)?;
                     let count = usize::from((u16::from_le_bytes(header) >> 12) & 0x07);
@@ -622,6 +625,22 @@ mod tests {
                 maximum_milliamps: 2_000,
             }))
         );
+        assert!(bus.0.is_empty());
+    }
+
+    #[test]
+    fn unrelated_pd_messages_are_ignored_without_extending_the_deadline() {
+        let mut negotiator = Negotiator {
+            state: State::WaitCapabilities { deadline: 500 },
+            current_cap_ma: 1_500,
+        };
+        let mut bus = ScriptBus(VecDeque::from(vec![
+            Operation::Read(PRT_STATUS, vec![PD_MESSAGE_RECEIVED]),
+            Operation::Read(RX_HEADER, vec![0x0f, 0x00]),
+        ]));
+
+        assert_eq!(negotiator.step(&mut bus, 100), None);
+        assert_eq!(negotiator.state, State::WaitCapabilities { deadline: 500 });
         assert!(bus.0.is_empty());
     }
 

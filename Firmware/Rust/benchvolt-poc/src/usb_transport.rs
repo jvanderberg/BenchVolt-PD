@@ -1,4 +1,8 @@
-use core::cell::RefCell;
+use core::{
+    cell::RefCell,
+    mem::MaybeUninit,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use cortex_m::interrupt::Mutex;
 use heapless::Deque;
 use stm32_usbd::{MemoryAccess, UsbBus, UsbPeripheral};
@@ -114,35 +118,37 @@ impl UsbRuntime {
     }
 }
 
-static USB_RUNTIME: Mutex<RefCell<Option<UsbRuntime>>> = Mutex::new(RefCell::new(None));
+// `Option<UsbRuntime>` requires a nonzero discriminant and placed the entire
+// 2.7 KiB zero-filled runtime in `.data`, consuming the same amount of flash.
+// Keep zero-initialized storage in `.bss`; the flag is published only after
+// install completes and before the USB interrupt is unmasked.
+static USB_RUNTIME: Mutex<RefCell<MaybeUninit<UsbRuntime>>> =
+    Mutex::new(RefCell::new(MaybeUninit::uninit()));
+static USB_RUNTIME_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+fn with_runtime<R>(operation: impl FnOnce(&mut UsbRuntime) -> R) -> Option<R> {
+    cortex_m::interrupt::free(|cs| {
+        if !USB_RUNTIME_INSTALLED.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut storage = USB_RUNTIME.borrow(cs).borrow_mut();
+        Some(operation(unsafe { storage.assume_init_mut() }))
+    })
+}
 
 #[interrupt]
 fn USB() {
-    cortex_m::interrupt::free(|cs| {
-        if let Some(runtime) = USB_RUNTIME.borrow(cs).borrow_mut().as_mut() {
-            runtime.poll();
-        }
-    });
+    with_runtime(UsbRuntime::poll);
 }
 
 
 pub(crate) fn take_usb_command() -> Option<UsbMessage> {
-    cortex_m::interrupt::free(|cs| {
-        USB_RUNTIME
-            .borrow(cs)
-            .borrow_mut()
-            .as_mut()
-            .and_then(|runtime| runtime.commands.pop_front())
-    })
+    with_runtime(|runtime| runtime.commands.pop_front()).flatten()
 }
 
 pub(crate) fn queue_usb_response(bytes: &[u8]) {
     let message = UsbMessage::from_slice(bytes);
-    cortex_m::interrupt::free(|cs| {
-        if let Some(runtime) = USB_RUNTIME.borrow(cs).borrow_mut().as_mut() {
-            runtime.responses.push_back(message).ok();
-        }
-    });
+    with_runtime(|runtime| runtime.responses.push_back(message).ok());
     cortex_m::peripheral::NVIC::pend(pac::Interrupt::USB);
 }
 
@@ -205,7 +211,7 @@ pub(crate) fn install(usb: pac::USB, dm: PA11<Input<Floating>>, dp: PA12<Input<F
         .device_release(0x0200)
         .build();
     cortex_m::interrupt::free(|cs| {
-        USB_RUNTIME.borrow(cs).replace(Some(UsbRuntime {
+        USB_RUNTIME.borrow(cs).borrow_mut().write(UsbRuntime {
             device,
             serial,
             rx_line: [0; 192],
@@ -214,6 +220,7 @@ pub(crate) fn install(usb: pac::USB, dm: PA11<Input<Floating>>, dp: PA12<Input<F
             commands: Deque::new(),
             responses: Deque::new(),
             response_offset: 0,
-        }));
+        });
+        USB_RUNTIME_INSTALLED.store(true, Ordering::Relaxed);
     });
 }

@@ -104,11 +104,19 @@ mod tests {
     #[test]
     fn encoder_routes_navigation_editing_and_output_focus() {
         let mut state = AppState::new(true, None);
+        assert!(encoder_action(&state, 0, 8).is_none());
         assert!(matches!(
             encoder_action(&state, 1, 4),
             Some(Action::NavigateMenu(1))
         ));
+        state.screen = Screen::Awg;
+        state.awg_editing = true;
+        assert!(matches!(
+            encoder_action(&state, 1, 8),
+            Some(Action::AdjustAwg(8))
+        ));
         state.screen = Screen::Channel(4);
+        state.awg_editing = false;
         assert!(matches!(
             encoder_action(&state, -1, -4),
             Some(Action::PreviousScreen)
@@ -117,6 +125,11 @@ mod tests {
         assert!(matches!(
             encoder_action(&state, 1, 4),
             Some(Action::ToggleOutputRequested { channel: 4 })
+        ));
+        state.focus = ControlFocus::Voltage;
+        assert!(matches!(
+            encoder_action(&state, -1, -8),
+            Some(Action::AdjustFocused(-8))
         ));
     }
 
@@ -150,5 +163,31 @@ mod tests {
         let mut button = ButtonTracker::new(true);
         assert!(button.sample(u16::MAX - 20, false).is_none());
         assert!(matches!(button.sample(20, true), Some(Action::NextControl)));
+    }
+
+    #[test]
+    fn button_threshold_edges_and_existing_hold_release_behavior_are_preserved() {
+        let mut button = ButtonTracker::new(true);
+        assert!(button.sample(49, false).is_none());
+        assert!(button.sample(50, true).is_none());
+
+        assert!(button.sample(100, false).is_none());
+        assert!(button.sample(129, true).is_none());
+        assert!(button.sample(178, false).is_none());
+        assert!(button.sample(179, true).is_none());
+        assert!(button.sample(179, false).is_none());
+        assert!(matches!(
+            button.sample(209, true),
+            Some(Action::NextControl)
+        ));
+
+        assert!(button.sample(259, false).is_none());
+        assert!(matches!(
+            button.sample(759, false),
+            Some(Action::GoMainMenu)
+        ));
+        // This duplicate on release is legacy behavior, captured deliberately
+        // so changing it later is an explicit UI decision rather than refactor drift.
+        assert!(matches!(button.sample(760, true), Some(Action::GoMainMenu)));
     }
 }

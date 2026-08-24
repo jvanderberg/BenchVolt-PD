@@ -47,7 +47,9 @@ use heapless::String;
 use input::{monotonic_ms, take_encoder_adjustment};
 use mipidsi::{Builder, ColorInversion, ModelOptions, Orientation};
 use reducto::EffectApp;
-use runtime::{dispatch_app, service_profile_request};
+use runtime::{
+    dispatch_app, service_profile_request, set_current_limit, set_regulation_mode, set_voltage,
+};
 use stm32f0xx_hal::{
     delay::Delay,
     pac,
@@ -532,87 +534,31 @@ fn main() -> ! {
                     }
                 }
                 UsbIntent::SetCurrentLimit { channel, milliamps } => {
-                    if power_driver.is_busy()
-                        && app.state().channels[usize::from(channel)].physical_enabled
-                    {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    dispatch_app(
+                    queue_usb_response(set_current_limit(
                         &mut app,
                         &mut power_driver,
-                        Action::SetCurrentLimit { channel, milliamps },
-                    );
-                    let output = &app.state().channels[usize::from(channel)];
-                    if output.current_limit_ma == milliamps
-                        && output.fault != benchvolt_poc::app::Fault::Hardware
-                    {
-                        queue_usb_response(b"OK\r\n");
-                    } else {
-                        queue_usb_response(b"ERR:HARDWARE\r\n");
-                    }
+                        channel,
+                        milliamps,
+                    ));
                 }
                 UsbIntent::SetVoltage {
                     channel,
                     millivolts,
                 } => {
-                    if power_driver.is_busy()
-                        && app.state().channels[usize::from(channel)].physical_enabled
-                    {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    dispatch_app(
+                    queue_usb_response(set_voltage(
                         &mut app,
                         &mut power_driver,
-                        Action::SetVoltage {
-                            channel,
-                            millivolts,
-                        },
-                    );
-                    let output = &app.state().channels[usize::from(channel)];
-                    if output.setpoint_mv == millivolts
-                        && output.fault != benchvolt_poc::app::Fault::Hardware
-                    {
-                        queue_usb_response(b"OK\r\n");
-                    } else if !matches!(
-                        app.state().awg_status,
-                        AwgStatus::Stopped | AwgStatus::Fault
-                    ) {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                    } else {
-                        queue_usb_response(b"ERR:HARDWARE\r\n");
-                    }
+                        channel,
+                        millivolts,
+                    ));
                 }
                 UsbIntent::SetRegulationMode { channel, mode } => {
-                    if power_driver.is_busy()
-                        && app.state().channels[usize::from(channel)].physical_enabled
-                    {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    if channel == app.state().active_awg_channel()
-                        && !matches!(
-                            app.state().awg_status,
-                            AwgStatus::Stopped | AwgStatus::Fault
-                        )
-                    {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    dispatch_app(
+                    queue_usb_response(set_regulation_mode(
                         &mut app,
                         &mut power_driver,
-                        Action::SetRegulationMode { channel, mode },
-                    );
-                    let output = &app.state().channels[usize::from(channel)];
-                    if output.regulation_mode == mode
-                        && output.fault != benchvolt_poc::app::Fault::Hardware
-                    {
-                        queue_usb_response(b"OK\r\n");
-                    } else {
-                        queue_usb_response(b"ERR:HARDWARE\r\n");
-                    }
+                        channel,
+                        mode,
+                    ));
                 }
                 UsbIntent::SetSinkCurrentLimit(milliamps) => {
                     if pd_service.command_pending() {

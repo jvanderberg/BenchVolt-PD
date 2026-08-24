@@ -4,6 +4,7 @@
 mod board;
 mod boot;
 mod usb_protocol;
+mod usb_transport;
 mod view;
 
 use core::{
@@ -45,26 +46,17 @@ use embedded_hal::digital::v2::InputPin;
 use heapless::{Deque, String};
 use mipidsi::{Builder, ColorInversion, ModelOptions, Orientation};
 use reducto::EffectApp;
-use stm32_usbd::{MemoryAccess, UsbBus, UsbPeripheral};
 use stm32f0xx_hal::{
     delay::Delay,
-    gpio::{
-        gpioa::{PA11, PA12},
-        Floating, Input,
-    },
     pac::{self, interrupt},
     prelude::*,
     rcc::{HSEBypassMode, USBClockSource},
     spi::{Mode, Phase, Polarity, Spi},
 };
-use usb_device::device::StringDescriptors;
-use usb_device::{bus::UsbBusAllocator, prelude::*};
 use usb_protocol::{handle_usb_command, UsbIntent};
-use usbd_serial::{SerialPort, USB_CLASS_CDC};
+use usb_transport::{queue_usb_response, take_usb_command};
 use view::BenchVoltView;
 
-const USB_VID: u16 = 0x0483;
-const USB_PID: u16 = 0x5740;
 const OVERVIEW_HOLD_MS: u16 = 500;
 const REBOOT_HOLD_MS: u16 = 3_000;
 const ENCODER_ACCELERATION_IDLE_MS: u16 = 80;
@@ -156,105 +148,6 @@ fn record_hw_retries(count: u32) {
     HW_RETRY_COUNT.store(current.saturating_add(count), Ordering::Relaxed);
 }
 
-type BenchUsbBus = UsbBus<BenchUsb>;
-
-#[derive(Clone, Copy)]
-struct UsbMessage {
-    bytes: [u8; 192],
-    len: u16,
-}
-
-impl UsbMessage {
-    const fn empty() -> Self {
-        Self {
-            bytes: [0; 192],
-            len: 0,
-        }
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        &self.bytes[..usize::from(self.len)]
-    }
-
-    fn from_slice(bytes: &[u8]) -> Self {
-        let mut message = Self::empty();
-        let len = bytes.len().min(message.bytes.len());
-        message.bytes[..len].copy_from_slice(&bytes[..len]);
-        message.len = len as u16;
-        message
-    }
-}
-
-struct UsbRuntime {
-    device: UsbDevice<'static, BenchUsbBus>,
-    serial: SerialPort<'static, BenchUsbBus>,
-    rx_line: [u8; 192],
-    rx_len: usize,
-    rx_overflow: bool,
-    commands: Deque<UsbMessage, 4>,
-    responses: Deque<UsbMessage, 4>,
-    response_offset: usize,
-}
-
-impl UsbRuntime {
-    fn poll(&mut self) {
-        if self.device.poll(&mut [&mut self.serial]) {
-            let mut packet = [0u8; 64];
-            while let Ok(count) = self.serial.read(&mut packet) {
-                if count == 0 {
-                    break;
-                }
-                for byte in &packet[..count] {
-                    if *byte == b'\n' {
-                        if self.rx_overflow {
-                            self.responses
-                                .push_back(UsbMessage::from_slice(b"ERR:LINE_TOO_LONG\r\n"))
-                                .ok();
-                            self.rx_len = 0;
-                            self.rx_overflow = false;
-                            continue;
-                        }
-                        let mut message = UsbMessage::empty();
-                        message.bytes[..self.rx_len].copy_from_slice(&self.rx_line[..self.rx_len]);
-                        message.len = self.rx_len as u16;
-                        if self.commands.push_back(message).is_err() {
-                            self.responses
-                                .push_back(UsbMessage::from_slice(b"ERR:BUSY\r\n"))
-                                .ok();
-                        }
-                        self.rx_len = 0;
-                    } else if self.rx_overflow {
-                        continue;
-                    } else if self.rx_len < self.rx_line.len() {
-                        self.rx_line[self.rx_len] = *byte;
-                        self.rx_len += 1;
-                    } else {
-                        self.rx_len = 0;
-                        self.rx_overflow = true;
-                    }
-                }
-            }
-        }
-
-        if let Some(response) = self.responses.front().copied() {
-            match self
-                .serial
-                .write(&response.as_slice()[self.response_offset..])
-            {
-                Ok(count) if count > 0 => {
-                    self.response_offset += count;
-                    if self.response_offset == usize::from(response.len) {
-                        self.responses.pop_front();
-                        self.response_offset = 0;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-static USB_RUNTIME: Mutex<RefCell<Option<UsbRuntime>>> = Mutex::new(RefCell::new(None));
 #[derive(Clone, Copy)]
 struct EncoderEvent {
     direction: i8,
@@ -266,14 +159,6 @@ static ENCODER_EVENTS: Mutex<RefCell<Deque<EncoderEvent, 16>>> =
 static ENCODER_EDGE_COUNT: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
 static ENCODER_DROP_COUNT: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
 
-#[interrupt]
-fn USB() {
-    cortex_m::interrupt::free(|cs| {
-        if let Some(runtime) = USB_RUNTIME.borrow(cs).borrow_mut().as_mut() {
-            runtime.poll();
-        }
-    });
-}
 
 #[interrupt]
 fn EXTI4_15() {
@@ -353,66 +238,11 @@ fn monotonic_awg_tick() -> u16 {
     unsafe { (*pac::TIM14::ptr()).cnt.read().cnt().bits() }
 }
 
-fn take_usb_command() -> Option<UsbMessage> {
-    cortex_m::interrupt::free(|cs| {
-        USB_RUNTIME
-            .borrow(cs)
-            .borrow_mut()
-            .as_mut()
-            .and_then(|runtime| runtime.commands.pop_front())
-    })
-}
-
-fn queue_usb_response(bytes: &[u8]) {
-    let message = UsbMessage::from_slice(bytes);
-    cortex_m::interrupt::free(|cs| {
-        if let Some(runtime) = USB_RUNTIME.borrow(cs).borrow_mut().as_mut() {
-            runtime.responses.push_back(message).ok();
-        }
-    });
-    cortex_m::peripheral::NVIC::pend(pac::Interrupt::USB);
-}
 
 fn benchvolt_display_offset(_: &ModelOptions) -> (u16, u16) {
     (0, 35)
 }
 
-struct BenchUsb {
-    _usb: pac::USB,
-    _dm: PA11<Input<Floating>>,
-    _dp: PA12<Input<Floating>>,
-}
-
-unsafe impl Sync for BenchUsb {}
-
-unsafe impl UsbPeripheral for BenchUsb {
-    const REGISTERS: *const () = pac::USB::ptr() as *const ();
-    const DP_PULL_UP_FEATURE: bool = true;
-    const EP_MEMORY: *const () = 0x4000_6000 as *const ();
-    const EP_MEMORY_SIZE: usize = 1024;
-    const EP_MEMORY_ACCESS: MemoryAccess = MemoryAccess::Word16x2;
-
-    fn enable() {
-        let rcc = unsafe { &*pac::RCC::ptr() };
-        cortex_m::interrupt::free(|_| {
-            rcc.apb1enr.modify(|_, w| w.usben().set_bit());
-
-            // The C bootloader jumps to the application with its internal D+
-            // pull-up still enabled.  Hold it low long enough for the host to
-            // observe a real disconnect before presenting new descriptors.
-            let usb = unsafe { &*pac::USB::ptr() };
-            usb.bcdr.modify(|_, w| w.dppu().clear_bit());
-            cortex_m::asm::delay(960_000);
-
-            rcc.apb1rstr.modify(|_, w| w.usbrst().set_bit());
-            rcc.apb1rstr.modify(|_, w| w.usbrst().clear_bit());
-        });
-    }
-
-    fn startup_delay() {
-        cortex_m::asm::delay(72);
-    }
-}
 
 
 
@@ -653,36 +483,7 @@ fn main() -> ! {
     app.render_full();
 
     // USB transport is interrupt-owned so display and I2C work cannot starve it.
-    let usb = BenchUsb {
-        _usb: dp.USB,
-        _dm: gpioa.pa11,
-        _dp: gpioa.pa12,
-    };
-    let usb_bus: &'static UsbBusAllocator<UsbBus<BenchUsb>> =
-        cortex_m::singleton!(: UsbBusAllocator<UsbBus<BenchUsb>> = UsbBus::new(usb)).unwrap();
-    let serial = SerialPort::new(usb_bus);
-    let strings = [StringDescriptors::default()
-        .manufacturer("BenchVolt-PD")
-        .product("BenchVolt Rust POC")
-        .serial_number("RUST-POC-01")];
-    let usb_device = UsbDeviceBuilder::new(usb_bus, UsbVidPid(USB_VID, USB_PID))
-        .strings(&strings)
-        .unwrap()
-        .device_class(USB_CLASS_CDC)
-        .device_release(0x0200)
-        .build();
-    cortex_m::interrupt::free(|cs| {
-        USB_RUNTIME.borrow(cs).replace(Some(UsbRuntime {
-            device: usb_device,
-            serial,
-            rx_line: [0; 192],
-            rx_len: 0,
-            rx_overflow: false,
-            commands: Deque::new(),
-            responses: Deque::new(),
-            response_offset: 0,
-        }));
-    });
+    usb_transport::install(dp.USB, gpioa.pa11, gpioa.pa12);
     feed_watchdog();
     unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USB) };
     unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::EXTI4_15) };

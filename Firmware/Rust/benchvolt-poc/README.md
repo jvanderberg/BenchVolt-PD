@@ -192,6 +192,19 @@ header), validates every ACK, and computes the bootloader-compatible STM32
 CRC. Both endpoints enforce the 92 KiB partition. It never writes the
 bootloader, option bytes, or protection settings.
 
+Before hardware work, run the repository-native regression gate from this
+directory:
+
+```sh
+tools/check.sh
+```
+
+It runs the host reducer and service tests, Rust lints, uploader tests, the
+Thumb release build, exact binary partition validation, and host-Clang syntax
+checks for both C firmware projects. It does not connect to or flash a device.
+Whole-tree formatting is not part of this gate yet because committed legacy
+modules still carry pre-existing rustfmt differences.
+
 One-time Python setup:
 
 ```sh

@@ -32,6 +32,28 @@ pub const fn tps55289_output_acknowledged(mode: u8, status: u8) -> bool {
     mode & 0x80 != 0 && tps55289_status_fault(status).is_none() && status & 0x03 != 0x03
 }
 
+/// Convert millivolts to the TPS55289 internal-feedback reference code.
+pub const fn tps55289_voltage_code(millivolts: u16) -> u16 {
+    let reference_uv = (millivolts as u32).saturating_mul(564) / 10;
+    let delta_uv = reference_uv.saturating_sub(45_000);
+    let code = (delta_uv.saturating_mul(10) + 2_822) / 5_645;
+    if code > 0x07fe {
+        0x07fe
+    } else {
+        code as u16
+    }
+}
+
+/// Convert milliamps for a 10 mΩ sense resistor to IOUT_LIMIT.
+pub const fn tps55289_current_code(milliamps: u16) -> u8 {
+    if milliamps == 0 {
+        0
+    } else {
+        let code = milliamps / 50;
+        0x80 | if code > 127 { 127 } else { code as u8 }
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ProtectionSnapshot {
     pub active: bool,
@@ -1183,6 +1205,19 @@ mod tests {
         assert!(!tps55289_output_acknowledged(0x00, 0x00));
         assert!(!tps55289_output_acknowledged(0x80, 0x20));
         assert!(!tps55289_output_acknowledged(0x80, 0x03));
+    }
+
+    #[test]
+    fn tps_codes_match_the_original_c_driver_equations() {
+        assert_eq!(tps55289_voltage_code(800), 0);
+        assert_eq!(tps55289_voltage_code(1_000), 20);
+        assert_eq!(tps55289_voltage_code(12_000), 1_119);
+        assert_eq!(tps55289_voltage_code(22_000), 0x07fe);
+
+        assert_eq!(tps55289_current_code(0), 0);
+        assert_eq!(tps55289_current_code(50), 0x81);
+        assert_eq!(tps55289_current_code(3_000), 0xbc);
+        assert_eq!(tps55289_current_code(u16::MAX), 0xff);
     }
 
     #[derive(Default)]

@@ -1,7 +1,8 @@
 use super::i2c::SoftI2c;
 use crate::{record_hw_retries, LAST_HW_ERROR, LAST_HW_OPERATION};
 use benchvolt_poc::power::{
-    tps55289_output_acknowledged, DriverOperation, PowerDriver, Rail,
+    tps55289_current_code, tps55289_output_acknowledged, tps55289_voltage_code, DriverOperation,
+    PowerDriver, Rail,
 };
 use core::sync::atomic::Ordering;
 use embedded_hal::{
@@ -131,20 +132,6 @@ where
         }
     }
 
-    fn tps_voltage_code(millivolts: u16) -> u16 {
-        let reference_uv = u32::from(millivolts).saturating_mul(564) / 10;
-        let delta_uv = reference_uv.saturating_sub(45_000);
-        ((delta_uv.saturating_mul(10) + 2_822) / 5_645).min(0x07fe) as u16
-    }
-
-    fn tps_current_code(milliamps: u16) -> u8 {
-        if milliamps == 0 {
-            0
-        } else {
-            0x80 | ((milliamps / 50).min(127) as u8)
-        }
-    }
-
     fn tps_configure<SCL, SDA>(
         bus: &mut SoftI2c<SCL, SDA>,
         delay: &mut Delay,
@@ -169,8 +156,8 @@ where
             .read_register(address, VOUT_FS, delay)
             .map_err(|_| HardwareError::Bus)?;
         let vout_fs = (vout_fs & !(0x80 | 0x03)) | 0x03;
-        let code = Self::tps_voltage_code(millivolts);
-        let current_code = Self::tps_current_code(current_limit_ma);
+        let code = tps55289_voltage_code(millivolts);
+        let current_code = tps55289_current_code(current_limit_ma);
         let mode = bus
             .read_register(address, MODE, delay)
             .map_err(|_| HardwareError::Bus)?;
@@ -251,7 +238,7 @@ where
         SCL: OutputPin,
         SDA: OutputPin + InputPin,
     {
-        let code = Self::tps_voltage_code(millivolts);
+        let code = tps55289_voltage_code(millivolts);
         let reference = [code as u8, ((code >> 8) & 0x07) as u8];
         let mut last_error = HardwareError::Bus;
         for attempt in 0..3 {

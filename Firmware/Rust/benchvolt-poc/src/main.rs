@@ -953,7 +953,12 @@ fn main() -> ! {
         if !seal_attempted && health_ticks >= 3_000 && app.state().temp_valid {
             seal_attempted = true;
             if let Some(seal) = boot_seal {
-                let _ = restore_boot_seal(seal);
+                let restored = restore_boot_seal(seal);
+                dispatch_app(
+                    &mut app,
+                    &mut power_driver,
+                    Action::BootRecoveryStatus(restored),
+                );
             }
         }
         if app.state().reboot_requested {

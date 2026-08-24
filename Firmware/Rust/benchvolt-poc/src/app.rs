@@ -359,6 +359,7 @@ pub enum Action {
     GoOverview,
     GoMainMenu,
     RequestReboot,
+    BootRecoveryStatus(bool),
     NavigateMenu(i8),
     ActivateMenu,
     ProfileOperationFinished(ProfileStatus),
@@ -900,6 +901,10 @@ impl Reducer for AppReducer {
                 next.reboot_requested = true;
                 true
             }
+            Action::BootRecoveryStatus(armed) => {
+                next.recovery_armed = armed;
+                state.recovery_armed != armed
+            }
             Action::NextControl => match state.screen {
                 Screen::MainMenu
                 | Screen::Awg
@@ -1351,6 +1356,14 @@ impl Reducer for AppReducer {
 mod tests {
     use super::*;
     use crate::settings::PersistentSettings;
+
+    #[test]
+    fn failed_boot_seal_restore_revokes_the_safe_recovery_status() {
+        let state = AppState::new(true, Some(25 * 16));
+        let next = AppReducer::reduce(&state, Action::BootRecoveryStatus(false));
+
+        assert!(!next.recovery_armed);
+    }
 
     #[test]
     fn main_menu_routes_without_enabling_hardware() {

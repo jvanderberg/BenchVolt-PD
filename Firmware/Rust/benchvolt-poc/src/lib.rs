@@ -9,5 +9,6 @@ pub mod monitoring;
 pub mod pd;
 pub mod power;
 pub mod protocol;
+pub mod reset_cause;
 pub mod settings;
 pub mod view_projection;

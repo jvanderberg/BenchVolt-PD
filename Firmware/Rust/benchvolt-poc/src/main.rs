@@ -136,6 +136,7 @@ fn benchvolt_wait_for_flash_ready(status: *const u32) -> bool {
 
 static LAST_HW_OPERATION: AtomicU8 = AtomicU8::new(0);
 static LAST_HW_ERROR: AtomicU8 = AtomicU8::new(0);
+static RESET_CAUSES: AtomicU8 = AtomicU8::new(0);
 static HW_RETRY_COUNT: AtomicU32 = AtomicU32::new(0);
 static CH5_TPS_STATUS: AtomicU8 = AtomicU8::new(0);
 static ARB_INDEX: AtomicU32 = AtomicU32::new(0);
@@ -198,6 +199,14 @@ where
 fn main() -> ! {
     let mut dp = pac::Peripherals::take().unwrap();
     let mut cp = cortex_m::Peripherals::take().unwrap();
+
+    // RCC reset flags are sticky and may overlap (for example PIN + POR).
+    // Capture them before any initialization, then clear them for the next boot.
+    RESET_CAUSES.store(
+        benchvolt_poc::reset_cause::decode_rcc_csr(dp.RCC.csr.read().bits()),
+        Ordering::Relaxed,
+    );
+    dp.RCC.csr.modify(|_, w| w.rmvf().set_bit());
 
     // Start recovery supervision before boot-metadata flash access. Startup is
     // bounded and feeds explicitly; steady-state feeds only after a complete

@@ -1,6 +1,6 @@
 use crate::{
     ARB_CYCLES, ARB_INDEX, ARB_LATE_UPDATES, ARB_SKIPPED_CYCLES, CH5_TPS_STATUS,
-    HW_RETRY_COUNT, LAST_HW_ERROR, LAST_HW_OPERATION,
+    HW_RETRY_COUNT, LAST_HW_ERROR, LAST_HW_OPERATION, RESET_CAUSES,
 };
 use crate::input::{encoder_counts, monotonic_ms};
 use crate::usb_transport::queue_usb_response;
@@ -192,6 +192,27 @@ pub(crate) fn handle_usb_command(
                 HW_RETRY_COUNT.load(Ordering::Relaxed),
             )
             .ok();
+            queue_usb_response(response.as_bytes());
+        }
+        b"SYST:RESET?" => {
+            let causes = RESET_CAUSES.load(Ordering::Relaxed);
+            let mut response: String<64> = String::new();
+            write!(&mut response, "0x{causes:02X}").ok();
+            for (mask, label) in [
+                (benchvolt_poc::reset_cause::OPTION_BYTE, "OPTION"),
+                (benchvolt_poc::reset_cause::PIN, "PIN"),
+                (benchvolt_poc::reset_cause::POWER_ON, "POR"),
+                (benchvolt_poc::reset_cause::SOFTWARE, "SOFTWARE"),
+                (benchvolt_poc::reset_cause::INDEPENDENT_WATCHDOG, "IWDG"),
+                (benchvolt_poc::reset_cause::WINDOW_WATCHDOG, "WWDG"),
+                (benchvolt_poc::reset_cause::LOW_POWER, "LOWPOWER"),
+                (benchvolt_poc::reset_cause::V18_DOMAIN, "V18"),
+            ] {
+                if causes & mask != 0 {
+                    write!(&mut response, ",{label}").ok();
+                }
+            }
+            response.push_str("\r\n").ok();
             queue_usb_response(response.as_bytes());
         }
         b"SYST:TPS:CH5?" => {

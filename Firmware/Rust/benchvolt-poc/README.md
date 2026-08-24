@@ -201,6 +201,11 @@ message.
 
 ## Headless build and flash runbook
 
+Always run the complete gate immediately before a device upload and flash the
+binary produced by that run. Never reuse an existing `target/.../benchvolt-poc.bin`
+as a recovery shortcut; it may not correspond to the newest source. Record the
+uploader's image size and CRC with the connected test result.
+
 Before connecting both USB receptacles on an r3 board, read the repository's
 [r3 USB-C routing erratum](../../../Docs/r3-usb-c-routing-erratum.md). Both
 receptacles share VBUS without source isolation. An ordinary powered USB-A COM

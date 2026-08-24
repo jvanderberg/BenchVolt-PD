@@ -1,4 +1,5 @@
 use crate::app::{AppState, AwgConfig, AwgSource, AwgWaveform, RegulationMode, TemperatureUnit};
+use crate::limits::{CH5_MAX_VOLTAGE_MV, CH5_MIN_VOLTAGE_MV};
 
 pub const RECORD_SIZE: usize = 48;
 const MAGIC: u32 = 0x4256_5333;
@@ -35,7 +36,9 @@ impl PersistentSettings {
             channel.current_limit_ma = limit.min(3_000);
         }
         state.channels[3].setpoint_mv = self.ch4_voltage_mv.clamp(500, 5_000);
-        state.channels[4].setpoint_mv = self.ch5_voltage_mv.clamp(800, 22_000);
+        state.channels[4].setpoint_mv = self
+            .ch5_voltage_mv
+            .clamp(CH5_MIN_VOLTAGE_MV, CH5_MAX_VOLTAGE_MV);
         state.channels[3].drive_mv = state.channels[3].setpoint_mv;
         state.channels[4].drive_mv = state.channels[4].setpoint_mv;
         state.channels[3].regulation_mode = self.ch4_regulation_mode;
@@ -226,17 +229,17 @@ pub fn decode(bytes: &[u8; RECORD_SIZE]) -> Option<SettingsRecord> {
         .iter()
         .all(|value| *value <= 3_000)
         && (500..=5_000).contains(&record.settings.ch4_voltage_mv)
-        && (800..=22_000).contains(&record.settings.ch5_voltage_mv)
+        && (CH5_MIN_VOLTAGE_MV..=CH5_MAX_VOLTAGE_MV).contains(&record.settings.ch5_voltage_mv)
         && record.settings.sink_current_limit_ma <= 5_000;
     let awg_minimum = if record.settings.awg.channel == 3 {
         500
     } else {
-        800
+        CH5_MIN_VOLTAGE_MV
     };
     let awg_maximum = if record.settings.awg.channel == 3 {
         5_000
     } else {
-        22_000
+        CH5_MAX_VOLTAGE_MV
     };
     let awg_max_frequency = record.settings.awg.waveform.max_frequency_millihz();
     (valid

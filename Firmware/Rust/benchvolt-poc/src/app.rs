@@ -1,5 +1,7 @@
 use reducto::Reducer;
 
+use crate::limits::{CH5_MAX_VOLTAGE_MV, CH5_MIN_VOLTAGE_MV};
+
 pub const HELP_MAX_SCROLL: u8 = 28;
 pub const HELP_SCROLL_STEP: u8 = 5;
 
@@ -738,7 +740,7 @@ impl Reducer for AppReducer {
                             let (minimum, maximum) = if next.awg.channel == 3 {
                                 (500, 5_000)
                             } else {
-                                (800, 22_000)
+                                (CH5_MIN_VOLTAGE_MV, CH5_MAX_VOLTAGE_MV)
                             };
                             next.awg.low_mv = next.awg.low_mv.clamp(minimum, maximum);
                             next.awg.high_mv = next.awg.high_mv.clamp(next.awg.low_mv, maximum);
@@ -799,7 +801,7 @@ impl Reducer for AppReducer {
                             let maximum = if state.awg.channel == 3 {
                                 5_000
                             } else {
-                                22_000
+                                i32::from(CH5_MAX_VOLTAGE_MV)
                             };
                             let adjusted = i32::from(state.awg.high_mv) + i32::from(direction) * 10;
                             let adjusted =
@@ -824,7 +826,7 @@ impl Reducer for AppReducer {
                 let (minimum, maximum) = if channel == 3 {
                     (500, 5_000)
                 } else if channel == 4 {
-                    (800, 22_000)
+                    (CH5_MIN_VOLTAGE_MV, CH5_MAX_VOLTAGE_MV)
                 } else {
                     return Self::enforce_invariants(next);
                 };
@@ -956,7 +958,10 @@ impl Reducer for AppReducer {
                                 let (minimum, maximum) = if channel == 3 {
                                     (500, 5_000)
                                 } else {
-                                    (800, 22_000)
+                                    (
+                                        i32::from(CH5_MIN_VOLTAGE_MV),
+                                        i32::from(CH5_MAX_VOLTAGE_MV),
+                                    )
                                 };
                                 // Preserve 10 mV single-step precision, but give
                                 // the wide CH4/CH5 ranges a useful fast-spin rate.

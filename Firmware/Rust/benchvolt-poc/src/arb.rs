@@ -1,3 +1,5 @@
+use crate::limits::CH5_MAX_VOLTAGE_MV;
+
 pub const MAX_POINTS: usize = 1_024;
 pub const MAX_CHUNK_POINTS: usize = 8;
 
@@ -112,7 +114,9 @@ pub fn parse_data(command: &[u8]) -> Result<Option<DataChunk>, ParseError> {
                 .filter(|value| *value != 0)
                 .ok_or(ParseError::Range)?,
         };
-        if point.centivolts > 2_200 || usize::from(start) + usize::from(chunk.len) >= MAX_POINTS {
+        if point.centivolts > CH5_MAX_VOLTAGE_MV / 10
+            || usize::from(start) + usize::from(chunk.len) >= MAX_POINTS
+        {
             return Err(ParseError::Range);
         }
         chunk.points[usize::from(chunk.len)] = point;

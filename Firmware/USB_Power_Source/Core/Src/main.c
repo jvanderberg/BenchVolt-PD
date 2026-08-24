@@ -172,9 +172,10 @@ const float MaxCurrlimitVSink  = 5.00f;
 //const float MaxVolt2V5         = 2.50f;
 //const float MaxVolt1V8         = 1.80f;
 const float MinVoltVLow        = 0.50f;
-const float MinVoltVHigh       = 2.50f;
+// The r3 CH5 power stage and measurement divider are rated for 0.8 V to 22 V.
+const float MinVoltVHigh       = 0.80f;
 const float MaxVoltVLow        = 5.00f;
-const float MaxVoltVHigh       = 32.00f;
+const float MaxVoltVHigh       = 22.00f;
 const float MaxVoltVSink       = 20.00f;
 
 TableRow tableDataMenu[6] = {

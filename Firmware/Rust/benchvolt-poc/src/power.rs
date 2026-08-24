@@ -1,5 +1,6 @@
 use crate::app::{
-    Action, AppState, ChannelSnapshot, Fault, Measurement, OutputTransition, RegulationMode,
+    Action, AppState, AwgStatus, ChannelSnapshot, Fault, Measurement, OutputTransition,
+    RegulationMode,
 };
 
 const STARTUP_GRACE_SAMPLES: u8 = 10;
@@ -8,6 +9,19 @@ const VOLTAGE_SETTING_SETTLE_SAMPLES: u8 = 25;
 // Board tests show IOUT_LIMIT is not a usable CH5 regulation loop. Keep this
 // fixed; user CC is implemented only by ADC feedback and voltage side effects.
 const CH5_TPS_CONFIGURATION_LIMIT_MA: u16 = 3_000;
+
+/// Convert the TPS55289's latched STATUS fault bits into application faults.
+/// SCP and OCP are both current-path failures. OVP remains a hardware fault
+/// because the application does not expose a distinct overvoltage cause.
+pub const fn tps55289_status_fault(status: u8) -> Option<Fault> {
+    if status & 0xc0 != 0 {
+        Some(Fault::OverCurrent)
+    } else if status & 0x20 != 0 {
+        Some(Fault::Hardware)
+    } else {
+        None
+    }
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ProtectionSnapshot {
@@ -75,6 +89,15 @@ impl ProtectionMonitor {
     }
 
     pub fn observe(&mut self, output: &ChannelSnapshot, measurement: Measurement) -> Option<Fault> {
+        self.observe_with_voltage_tracking(output, measurement, true)
+    }
+
+    pub fn observe_with_voltage_tracking(
+        &mut self,
+        output: &ChannelSnapshot,
+        measurement: Measurement,
+        voltage_tracking: bool,
+    ) -> Option<Fault> {
         if !output.physical_enabled {
             self.active = false;
             self.grace_remaining = 0;
@@ -127,6 +150,11 @@ impl ProtectionMonitor {
             return Some(Fault::OverCurrent);
         }
 
+        if !voltage_tracking {
+            self.voltage_samples = 0;
+            return None;
+        }
+
         // A commanded downward step can leave the measured output above the
         // new window while output capacitance discharges. I2C/DAC failures
         // already fail closed in the voltage side effect, and overcurrent is
@@ -155,6 +183,19 @@ impl ProtectionMonitor {
             None
         }
     }
+}
+
+/// Project application state into the semantics protection must validate.
+/// AWG owns the adjustable channel's voltage command, so comparing its live
+/// output with the saved DC compliance setpoint would create false faults
+/// during any sufficiently long LOW interval.
+pub fn protection_output(state: &AppState, channel: u8) -> ChannelSnapshot {
+    let mut output = state.channels[usize::from(channel)];
+    if state.awg_status == AwgStatus::Running && channel == state.active_awg_channel() {
+        output.regulation_mode = RegulationMode::Cv;
+        output.setpoint_mv = output.drive_mv;
+    }
+    output
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -207,14 +248,10 @@ pub fn effect_for_transition(old: &AppState, new: &AppState) -> Option<PowerEffe
                     } else {
                         None
                     };
-                    if let Some(millivolts) = millivolts {
-                        Some(PowerEffect::Voltage {
-                            channel: channel as u8,
-                            millivolts,
-                        })
-                    } else {
-                        None
-                    }
+                    millivolts.map(|millivolts| PowerEffect::Voltage {
+                        channel: channel as u8,
+                        millivolts,
+                    })
                 })
         })
 }
@@ -249,7 +286,9 @@ pub enum DriverOperation {
     ConfigureCh5 {
         millivolts: u16,
         current_limit_ma: u16,
+        forced_pwm: bool,
     },
+    ClearCh5Status,
     Ch5OutputEnable(bool),
     Ch5Voltage(u16),
     VerifyOutput {
@@ -341,7 +380,18 @@ fn run_enable<D: PowerDriver>(driver: &mut D, state: &AppState, channel: u8) -> 
             .apply(DriverOperation::ConfigureCh5 {
                 millivolts: output.drive_mv,
                 current_limit_ma: CH5_TPS_CONFIGURATION_LIMIT_MA,
+                forced_pwm: state.awg_status == AwgStatus::Starting
+                    && state.active_awg_channel() == 4,
             })
+            .map_err(|_| Fault::Hardware)?;
+        // STATUS is read-to-clear.  Clear power-up/configuration history before
+        // OE so the runtime monitor only considers events from this enable.
+        // The stock C firmware likewise reads STATUS twice during CH5 init.
+        driver
+            .apply(DriverOperation::ClearCh5Status)
+            .map_err(|_| Fault::Hardware)?;
+        driver
+            .apply(DriverOperation::ClearCh5Status)
             .map_err(|_| Fault::Hardware)?;
         driver
             .apply(DriverOperation::Ch5OutputEnable(true))
@@ -388,7 +438,7 @@ fn run_enable<D: PowerDriver>(driver: &mut D, state: &AppState, channel: u8) -> 
     driver
         .apply(DriverOperation::VerifyOutput {
             channel,
-            millivolts: output.setpoint_mv,
+            millivolts: output.drive_mv,
         })
         .map_err(|_| Fault::Hardware)
 }
@@ -477,9 +527,10 @@ pub fn execute_global_shutdown<D: PowerDriver>(driver: &mut D) -> Result<(), Fau
             })
             .is_err();
     }
-    failed |= driver
-        .apply(DriverOperation::Ch5OutputEnable(false))
-        .is_err();
+    // OE can NACK when CH5 is already held in reset. Physical EN low is the
+    // authoritative, GPIO-readable shutdown state, so still attempt OE but do
+    // not turn an already-safe shutdown into a false hardware fault.
+    let _ = driver.apply(DriverOperation::Ch5OutputEnable(false));
     failed |= driver.apply(DriverOperation::Ch5Enable(false)).is_err();
     failed |= driver
         .apply(DriverOperation::RailEnable {
@@ -508,6 +559,16 @@ mod tests {
     use crate::app::AppReducer;
     use reducto::Reducer;
     use std::vec::Vec;
+
+    #[test]
+    fn tps_status_faults_fail_closed_by_cause() {
+        assert_eq!(tps55289_status_fault(0x00), None);
+        assert_eq!(tps55289_status_fault(0x01), None);
+        assert_eq!(tps55289_status_fault(0x40), Some(Fault::OverCurrent));
+        assert_eq!(tps55289_status_fault(0x80), Some(Fault::OverCurrent));
+        assert_eq!(tps55289_status_fault(0x20), Some(Fault::Hardware));
+        assert_eq!(tps55289_status_fault(0xe0), Some(Fault::OverCurrent));
+    }
 
     #[derive(Default)]
     struct MockDriver {
@@ -584,6 +645,11 @@ mod tests {
                     }
                     self.ch5_configured = true;
                 }
+                DriverOperation::ClearCh5Status => {
+                    if !self.ch5_enable || !self.ch5_configured {
+                        return Err(());
+                    }
+                }
                 DriverOperation::Ch5OutputEnable(enabled) => {
                     if enabled && (!self.ch5_enable || !self.ch5_configured) {
                         return Err(());
@@ -622,6 +688,104 @@ mod tests {
             };
         }
         state
+    }
+
+    #[test]
+    fn ch5_uses_forced_pwm_only_for_awg_start() {
+        let mut dc = eligible_state();
+        let mut driver = MockDriver::default();
+        assert!(run_enable(&mut driver, &dc, 4).is_ok());
+        assert!(driver.calls.iter().any(|operation| matches!(
+            operation,
+            DriverOperation::ConfigureCh5 {
+                forced_pwm: false,
+                ..
+            }
+        )));
+        assert_eq!(
+            driver
+                .calls
+                .iter()
+                .filter(|operation| matches!(operation, DriverOperation::ClearCh5Status))
+                .count(),
+            2
+        );
+
+        dc.awg.channel = 4;
+        dc.awg_status = AwgStatus::Starting;
+        let mut driver = MockDriver::default();
+        assert!(run_enable(&mut driver, &dc, 4).is_ok());
+        assert!(driver.calls.iter().any(|operation| matches!(
+            operation,
+            DriverOperation::ConfigureCh5 {
+                forced_pwm: true,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn awg_protection_tracks_live_drive_not_saved_dc_setpoint() {
+        let mut state = eligible_state();
+        state.awg.channel = 4;
+        state.awg_status = AwgStatus::Running;
+        state.channels[4].setpoint_mv = 12_000;
+        state.channels[4].drive_mv = 1_000;
+        state.channels[4].physical_enabled = true;
+        state.channels[4].requested_enabled = true;
+
+        let projected = protection_output(&state, 4);
+        assert_eq!(projected.setpoint_mv, 1_000);
+        assert_eq!(projected.drive_mv, 1_000);
+        assert!(projected.regulation_mode == RegulationMode::Cv);
+
+        let mut monitor = ProtectionMonitor::default();
+        let low = Measurement {
+            millivolts: 990,
+            milliamps: 0,
+            valid: true,
+        };
+        for _ in 0..100 {
+            assert!(monitor.observe(&projected, low).is_none());
+        }
+    }
+
+    #[test]
+    fn awg_policy_ignores_unsynchronized_voltage_but_keeps_overcurrent() {
+        let mut state = eligible_state();
+        state.awg.channel = 3;
+        state.awg_status = AwgStatus::Running;
+        state.channels[3].physical_enabled = true;
+        state.channels[3].requested_enabled = true;
+        state.channels[3].current_limit_ma = 100;
+        let output = protection_output(&state, 3);
+        let aliased = Measurement {
+            millivolts: 5_000,
+            milliamps: 0,
+            valid: true,
+        };
+        let mut monitor = ProtectionMonitor::default();
+        for _ in 0..100 {
+            assert!(monitor
+                .observe_with_voltage_tracking(&output, aliased, false)
+                .is_none());
+        }
+
+        let overcurrent = Measurement {
+            millivolts: 500,
+            milliamps: 101,
+            valid: true,
+        };
+        assert!(monitor
+            .observe_with_voltage_tracking(&output, overcurrent, false)
+            .is_none());
+        assert!(monitor
+            .observe_with_voltage_tracking(&output, overcurrent, false)
+            .is_none());
+        assert!(matches!(
+            monitor.observe_with_voltage_tracking(&output, overcurrent, false),
+            Some(Fault::OverCurrent)
+        ));
     }
 
     fn requested(state: &AppState, channel: u8, enabled: bool) -> AppState {
@@ -705,7 +869,12 @@ mod tests {
                 ch5_oe: true,
                 ..MockDriver::default()
             };
-            assert!(execute_global_shutdown(&mut driver).is_err());
+            let result = execute_global_shutdown(&mut driver);
+            if failure == 4 {
+                assert!(result.is_ok());
+            } else {
+                assert!(result.is_err());
+            }
             assert_eq!(driver.calls.len(), 8);
             assert!(driver.safe());
         }
@@ -791,6 +960,7 @@ mod tests {
     #[test]
     fn overview_clicks_cycle_output_toggles_then_restore_screen_navigation() {
         let mut state = eligible_state();
+        state.screen = crate::app::Screen::Overview;
         assert!(state.screen == crate::app::Screen::Overview);
         for channel in 0..5u8 {
             state = AppReducer::reduce(&state, Action::NextControl);

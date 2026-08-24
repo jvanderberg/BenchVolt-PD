@@ -16,8 +16,10 @@ use heapless::String;
 use reducto::View;
 
 use benchvolt_poc::app::{
-    AppState, ChannelSnapshot, ControlFocus, Fault, OutputTransition, RegulationMode, Screen,
+    AppState, AwgStatus, AwgWaveform, ChannelSnapshot, ControlFocus, Fault, OutputTransition,
+    ProfileStatus, RegulationMode, Screen, TemperatureUnit, HELP_MAX_SCROLL,
 };
+use benchvolt_poc::view_projection::awg_damage;
 
 const TABLE_TOP: i32 = 24;
 const HEADER_BOTTOM: i32 = 45;
@@ -29,14 +31,22 @@ const COLUMN_TEXT_X: [i32; 6] = [9, 32, 85, 138, 191, 246];
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum TemperatureProjection {
     Invalid,
-    TenthsCelsius(i32),
+    Tenths(i32, TemperatureUnit),
 }
 
 fn temperature_projection(state: &AppState) -> TemperatureProjection {
     if !state.temp_valid {
         return TemperatureProjection::Invalid;
     }
-    TemperatureProjection::TenthsCelsius(i32::from(state.temp_sixteenths_c) * 10 / 16)
+    let tenths_c = i32::from(state.temp_sixteenths_c) * 10 / 16;
+    match state.temperature_unit {
+        TemperatureUnit::Celsius => {
+            TemperatureProjection::Tenths(tenths_c, TemperatureUnit::Celsius)
+        }
+        TemperatureUnit::Fahrenheit => {
+            TemperatureProjection::Tenths(tenths_c * 9 / 5 + 320, TemperatureUnit::Fahrenheit)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -158,12 +168,34 @@ where
             TemperatureProjection::Invalid => {
                 text.push_str("T:--.-C").ok();
             }
-            TemperatureProjection::TenthsCelsius(value) if value < 0 => {
+            TemperatureProjection::Tenths(value, unit) if value < 0 => {
                 let magnitude = value.abs();
-                write!(&mut text, "T:-{}.{:01}C", magnitude / 10, magnitude % 10).ok();
+                write!(
+                    &mut text,
+                    "T:-{}.{:01}{}",
+                    magnitude / 10,
+                    magnitude % 10,
+                    if unit == TemperatureUnit::Celsius {
+                        'C'
+                    } else {
+                        'F'
+                    }
+                )
+                .ok();
             }
-            TemperatureProjection::TenthsCelsius(value) => {
-                write!(&mut text, "T:{}.{:01}C", value / 10, value % 10).ok();
+            TemperatureProjection::Tenths(value, unit) => {
+                write!(
+                    &mut text,
+                    "T:{}.{:01}{}",
+                    value / 10,
+                    value % 10,
+                    if unit == TemperatureUnit::Celsius {
+                        'C'
+                    } else {
+                        'F'
+                    }
+                )
+                .ok();
             }
         }
 
@@ -263,8 +295,15 @@ where
             StatusProjection::Fault => Rgb565::RED,
         };
         let top = Self::channel_row_top(index);
+        const TRACK_X: i32 = 248;
+        const TRACK_WIDTH: i32 = 27;
+        const KNOB_DIAMETER: i32 = 9;
+        const KNOB_INSET: i32 = 2;
         RoundedRectangle::with_equal_corners(
-            Rectangle::new(Point::new(248, top + 6), Size::new(27, 13)),
+            Rectangle::new(
+                Point::new(TRACK_X, top + 6),
+                Size::new(TRACK_WIDTH as u32, 13),
+            ),
             Size::new(6, 6),
         )
         .into_styled(
@@ -277,11 +316,11 @@ where
         .draw(&mut self.display)
         .ok();
         let knob_x = match projection.status {
-            StatusProjection::On => 264,
-            StatusProjection::Wait => 257,
-            StatusProjection::Off | StatusProjection::Fault => 250,
+            StatusProjection::On => TRACK_X + TRACK_WIDTH - KNOB_INSET - KNOB_DIAMETER,
+            StatusProjection::Wait => TRACK_X + (TRACK_WIDTH - KNOB_DIAMETER) / 2,
+            StatusProjection::Off | StatusProjection::Fault => TRACK_X + KNOB_INSET,
         };
-        Circle::new(Point::new(knob_x, top + 8), 9)
+        Circle::new(Point::new(knob_x, top + 8), KNOB_DIAMETER as u32)
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
             .draw(&mut self.display)
             .ok();
@@ -804,6 +843,548 @@ where
         self.draw_table_grid();
         self.draw_channels(state);
     }
+
+    fn draw_menu(&mut self, title: &str, items: &[&str], state: &AppState) {
+        self.display.clear(Rgb565::BLACK).ok();
+        Text::with_baseline(
+            title,
+            Point::new(6, 3),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        Line::new(Point::new(0, 27), Point::new(319, 27))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(8, 16, 16), 1))
+            .draw(&mut self.display)
+            .ok();
+        for (index, item) in items.iter().enumerate() {
+            self.draw_menu_item(item, index, usize::from(state.menu_selection) == index);
+        }
+    }
+
+    fn draw_menu_item(&mut self, item: &str, index: usize, selected: bool) {
+        let y = 34 + index as i32 * 25;
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(5, y - 2), Size::new(310, 22)),
+                Rgb565::BLACK,
+            )
+            .ok();
+        if selected {
+            RoundedRectangle::with_equal_corners(
+                Rectangle::new(Point::new(5, y - 2), Size::new(310, 22)),
+                Size::new(4, 4),
+            )
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::new(0, 18, 24)))
+            .draw(&mut self.display)
+            .ok();
+        }
+        Text::with_baseline(
+            if selected { ">" } else { " " },
+            Point::new(10, y),
+            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::CYAN),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        Text::with_baseline(
+            item,
+            Point::new(30, y),
+            MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn main_menu_item(index: usize) -> &'static str {
+        ["DC Power", "AWG", "Settings", "System", "Help"][index]
+    }
+
+    fn settings_item(state: &AppState, index: usize) -> &'static str {
+        match index {
+            0 if state.temperature_unit == TemperatureUnit::Celsius => "Temperature       C",
+            0 => "Temperature       F",
+            1 => "Save Profile",
+            2 => "Load Profile",
+            3 => "Factory Defaults",
+            _ => "Back",
+        }
+    }
+
+    fn profile_item(state: &AppState, index: usize) -> &'static str {
+        match index {
+            0 if state.profile_present[0] => "Slot 1          SAVED",
+            0 => "Slot 1          EMPTY",
+            1 if state.profile_present[1] => "Slot 2          SAVED",
+            1 => "Slot 2          EMPTY",
+            2 if state.profile_present[2] => "Slot 3          SAVED",
+            2 => "Slot 3          EMPTY",
+            _ => "Back",
+        }
+    }
+
+    fn draw_main_menu(&mut self, state: &AppState) {
+        self.draw_menu(
+            "BenchVolt",
+            &["DC Power", "AWG", "Settings", "System", "Help"],
+            state,
+        );
+    }
+
+    fn draw_help(&mut self, state: &AppState) {
+        self.display.clear(Rgb565::BLACK).ok();
+        Text::with_baseline(
+            "Help",
+            Point::new(6, 3),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        self.draw_help_content(state);
+    }
+
+    fn draw_help_content(&mut self, state: &AppState) {
+        const HELP: &str = "MAIN MENU\nSelect an item:\nPower - control all five DC outputs\nAWG - waveforms on CH4 / CH5\nSettings - save / restore settings\nSystem - firmware version and status\nHelp - this guide\nNAVIGATION\nLong press - go back\nClick - move focus between controls\nTurn - menu selection or control edit\nPOWER SCREENS\nOverview shows all outputs and status.\nClick to focus a channel switch.\nTurn either way to toggle it.\nClick past CH5 to finish.\nWith no focus, turn between screens.\nOn a channel, click through Output,\nVoltage, CV/CC, and Current Limit.\nTurn to edit the focused control.\nClick until focus clears to navigate.\nCV / CC\nCH4 and CH5 support CC mode.\nSelect CC, then set Current Limit.\nThe loop lowers voltage to hold current.\nCC turns green while regulating.\nAWG\nGenerates waveforms on CH4 or CH5.\nTurn, click to edit, turn, then click.\nSine, triangle, ramp, and square.\nFrequency is available up to 120 Hz.\nSquare adds a duty-cycle setting.\nSet Low and High, then choose Start.\nRMS amps and average watts appear\nin the load panel on the right.";
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(0, 28), Size::new(320, 142)),
+                Rgb565::BLACK,
+            )
+            .ok();
+        let start = usize::from(state.help_scroll);
+        for (row, text) in HELP.split('\n').skip(start).take(7).enumerate() {
+            let heading = matches!(
+                text,
+                "MAIN MENU" | "NAVIGATION" | "POWER SCREENS" | "CV / CC" | "AWG"
+            );
+            Text::with_baseline(
+                text,
+                Point::new(12, 32 + row as i32 * 16),
+                MonoTextStyle::new(
+                    &FONT_8X13_BOLD,
+                    if heading { Rgb565::CYAN } else { Rgb565::WHITE },
+                ),
+                Baseline::Top,
+            )
+            .draw(&mut self.display)
+            .ok();
+        }
+        let mut footer: String<32> = String::new();
+        write!(
+            &mut footer,
+            "TURN scroll  CLICK back  {}-{}/{}",
+            state.help_scroll + 1,
+            (state.help_scroll + 7).min(HELP_MAX_SCROLL + 7),
+            HELP_MAX_SCROLL + 7,
+        )
+        .ok();
+        Text::with_baseline(
+            footer.as_str(),
+            Point::new(48, 151),
+            MonoTextStyle::new(&FONT_6X10, Rgb565::GREEN),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn draw_settings(&mut self, state: &AppState) {
+        let unit = Self::settings_item(state, 0);
+        self.draw_menu(
+            "Settings",
+            &[
+                unit,
+                "Save Profile",
+                "Load Profile",
+                "Factory Defaults",
+                "Back",
+            ],
+            state,
+        );
+        self.draw_settings_status(state);
+    }
+
+    fn draw_settings_status(&mut self, state: &AppState) {
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(112, 3), Size::new(208, 20)),
+                Rgb565::BLACK,
+            )
+            .ok();
+        let status = match state.profile_status {
+            ProfileStatus::ConfirmDefaults => Some(("CLICK TO CONFIRM", Rgb565::YELLOW)),
+            ProfileStatus::DefaultsLoaded => Some(("DEFAULTS LOADED - OUTPUTS OFF", Rgb565::GREEN)),
+            ProfileStatus::Failed => Some(("FAILED", Rgb565::RED)),
+            _ => None,
+        };
+        if let Some((status, color)) = status {
+            Text::with_baseline(
+                status,
+                Point::new(112, 8),
+                MonoTextStyle::new(&FONT_6X10, color),
+                Baseline::Top,
+            )
+            .draw(&mut self.display)
+            .ok();
+        }
+    }
+
+    fn draw_profiles(&mut self, state: &AppState, saving: bool) {
+        let slots = [
+            Self::profile_item(state, 0),
+            Self::profile_item(state, 1),
+            Self::profile_item(state, 2),
+            Self::profile_item(state, 3),
+        ];
+        self.draw_menu(
+            if saving {
+                "Save Profile"
+            } else {
+                "Load Profile"
+            },
+            &slots,
+            state,
+        );
+        self.draw_profile_status(state);
+    }
+
+    fn draw_profile_status(&mut self, state: &AppState) {
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(160, 3), Size::new(160, 20)),
+                Rgb565::BLACK,
+            )
+            .ok();
+        let status = match state.profile_status {
+            ProfileStatus::ConfirmSave(_) | ProfileStatus::ConfirmLoad(_) => {
+                Some(("CLICK TO CONFIRM", Rgb565::YELLOW))
+            }
+            ProfileStatus::Working => Some(("WORKING", Rgb565::CYAN)),
+            ProfileStatus::Saved(_) => Some(("SAVED", Rgb565::GREEN)),
+            ProfileStatus::Loaded(_) => Some(("LOADED - OUTPUTS OFF", Rgb565::GREEN)),
+            ProfileStatus::Empty(_) => Some(("EMPTY SLOT", Rgb565::YELLOW)),
+            ProfileStatus::Failed => Some(("FAILED", Rgb565::RED)),
+            _ => None,
+        };
+        if let Some((status, color)) = status {
+            Text::with_baseline(
+                status,
+                Point::new(160, 8),
+                MonoTextStyle::new(&FONT_8X13_BOLD, color),
+                Baseline::Top,
+            )
+            .draw(&mut self.display)
+            .ok();
+        }
+    }
+
+    fn draw_awg(&mut self, state: &AppState) {
+        self.display.clear(Rgb565::BLACK).ok();
+        Text::with_baseline(
+            "AWG",
+            Point::new(6, 3),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        Line::new(Point::new(0, 27), Point::new(319, 27))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(8, 16, 16), 1))
+            .draw(&mut self.display)
+            .ok();
+        Line::new(Point::new(198, 27), Point::new(198, 169))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(8, 16, 16), 1))
+            .draw(&mut self.display)
+            .ok();
+        for index in 0..8 {
+            self.draw_awg_row(state, index);
+        }
+        self.draw_awg_load_panel(state);
+    }
+
+    fn draw_awg_row(&mut self, state: &AppState, index: usize) {
+        let y = 30 + index as i32 * 17;
+        let selected = usize::from(state.menu_selection) == index;
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(4, y - 1), Size::new(190, 16)),
+                if selected {
+                    Rgb565::new(0, 18, 24)
+                } else {
+                    Rgb565::BLACK
+                },
+            )
+            .ok();
+        let label = [
+            "Channel",
+            "Waveform",
+            "Frequency",
+            "Duty",
+            "Low",
+            "High",
+            "Output",
+            "Back",
+        ][index];
+        Text::with_baseline(
+            if selected { ">" } else { " " },
+            Point::new(8, y),
+            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::CYAN),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        Text::with_baseline(
+            label,
+            Point::new(27, y),
+            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        self.draw_awg_value(state, index);
+    }
+
+    fn draw_awg_value(&mut self, state: &AppState, index: usize) {
+        if index == 7 {
+            return;
+        }
+        let y = 30 + index as i32 * 17;
+        let selected = usize::from(state.menu_selection) == index;
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(102, y - 1), Size::new(92, 16)),
+                if selected {
+                    Rgb565::new(0, 18, 24)
+                } else {
+                    Rgb565::BLACK
+                },
+            )
+            .ok();
+        let mut value: String<24> = String::new();
+        match index {
+            0 => write!(&mut value, "CH{}", state.awg.channel + 1).ok(),
+            1 => value
+                .push_str(match state.awg.waveform {
+                    AwgWaveform::Square => "SQUARE",
+                    AwgWaveform::Triangle => "TRIANGLE",
+                    AwgWaveform::Ramp => "RAMP",
+                    AwgWaveform::Sine => "SINE",
+                })
+                .ok(),
+            2 => write!(
+                &mut value,
+                "{}.{:01} Hz",
+                state.awg.frequency_millihz / 1_000,
+                state.awg.frequency_millihz % 1_000 / 100
+            )
+            .ok(),
+            3 => {
+                if state.awg.waveform == AwgWaveform::Square {
+                    write!(&mut value, "{}%", state.awg.duty_percent).ok()
+                } else {
+                    value.push_str("--").ok()
+                }
+            }
+            4 => write!(
+                &mut value,
+                "{}.{:02} V",
+                state.awg.low_mv / 1_000,
+                state.awg.low_mv % 1_000 / 10
+            )
+            .ok(),
+            5 => write!(
+                &mut value,
+                "{}.{:02} V",
+                state.awg.high_mv / 1_000,
+                state.awg.high_mv % 1_000 / 10
+            )
+            .ok(),
+            6 => value
+                .push_str(match state.awg_status {
+                    AwgStatus::Stopped => "START",
+                    AwgStatus::StartRequested | AwgStatus::Starting => "STARTING",
+                    AwgStatus::Running => "STOP",
+                    AwgStatus::StopRequested => "STOPPING",
+                    AwgStatus::Fault => "FAULT",
+                })
+                .ok(),
+            _ => None,
+        };
+        let color = if index == 6 {
+            match state.awg_status {
+                AwgStatus::Running => Rgb565::GREEN,
+                AwgStatus::Fault => Rgb565::RED,
+                AwgStatus::StartRequested | AwgStatus::Starting | AwgStatus::StopRequested => {
+                    Rgb565::YELLOW
+                }
+                AwgStatus::Stopped => Rgb565::CYAN,
+            }
+        } else if selected && state.awg_editing {
+            Rgb565::CYAN
+        } else {
+            Rgb565::WHITE
+        };
+        Text::with_baseline(
+            value.as_str(),
+            Point::new(106, y),
+            MonoTextStyle::new(&FONT_8X13_BOLD, color),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn draw_awg_load_panel(&mut self, state: &AppState) {
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(202, 29), Size::new(118, 140)),
+                Rgb565::BLACK,
+            )
+            .ok();
+        self.draw_awg_load_heading(state);
+        Text::with_baseline(
+            "CURRENT RMS",
+            Point::new(205, 52),
+            MonoTextStyle::new(&FONT_6X10, Rgb565::new(18, 36, 24)),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        Text::with_baseline(
+            "POWER AVG",
+            Point::new(205, 101),
+            MonoTextStyle::new(&FONT_6X10, Rgb565::new(18, 36, 24)),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        self.draw_awg_load_current(state);
+        self.draw_awg_load_power(state);
+    }
+
+    fn draw_awg_load_heading(&mut self, state: &AppState) {
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(202, 29), Size::new(118, 18)),
+                Rgb565::BLACK,
+            )
+            .ok();
+        let channel = if state.awg_status == AwgStatus::Running {
+            state.active_awg_channel() + 1
+        } else {
+            state.awg.channel + 1
+        };
+        let mut heading: String<16> = String::new();
+        write!(&mut heading, "CH{} LOAD", channel).ok();
+        Text::with_baseline(
+            heading.as_str(),
+            Point::new(205, 32),
+            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::CYAN),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn draw_awg_load_current(&mut self, state: &AppState) {
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(202, 64), Size::new(118, 22)),
+                Rgb565::BLACK,
+            )
+            .ok();
+        let mut current: String<16> = String::new();
+        if state.awg_load.valid {
+            write!(
+                &mut current,
+                "{}.{:03} A",
+                state.awg_load.milliamps_rms / 1_000,
+                state.awg_load.milliamps_rms % 1_000
+            )
+            .ok();
+        } else {
+            current.push_str("-.--- A").ok();
+        }
+        Text::with_baseline(
+            current.as_str(),
+            Point::new(205, 65),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn draw_awg_load_power(&mut self, state: &AppState) {
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(202, 113), Size::new(118, 22)),
+                Rgb565::BLACK,
+            )
+            .ok();
+        let mut power: String<16> = String::new();
+        if state.awg_load.valid {
+            write!(
+                &mut power,
+                "{}.{:02} W",
+                state.awg_load.milliwatts_average / 1_000,
+                state.awg_load.milliwatts_average % 1_000 / 10
+            )
+            .ok();
+        } else {
+            power.push_str("--.-- W").ok();
+        }
+        Text::with_baseline(
+            power.as_str(),
+            Point::new(205, 114),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    fn draw_system(&mut self, state: &AppState) {
+        self.draw_menu("System", &["Back"], state);
+        Text::with_baseline(
+            "BenchVolt Rust POC",
+            Point::new(65, 72),
+            MonoTextStyle::new(&FONT_9X18_BOLD, Rgb565::WHITE),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        Text::with_baseline(
+            "USB: RUST-POC-01",
+            Point::new(65, 98),
+            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::CYAN),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+        Text::with_baseline(
+            if state.recovery_armed {
+                "Recovery: SAFE"
+            } else {
+                "Recovery: NOT ARMED"
+            },
+            Point::new(65, 122),
+            MonoTextStyle::new(
+                &FONT_8X13_BOLD,
+                if state.recovery_armed {
+                    Rgb565::GREEN
+                } else {
+                    Rgb565::RED
+                },
+            ),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
 }
 
 impl<D> View for BenchVoltView<D>
@@ -814,9 +1395,16 @@ where
 
     fn render(&mut self, state: &Self::State) {
         match state.screen {
+            Screen::MainMenu => self.draw_main_menu(state),
             Screen::Overview => self.draw_overview(state),
             Screen::Channel(index) => self.draw_detail_screen(state, usize::from(index)),
             Screen::UsbPdInput => self.draw_usb_pd_input(state),
+            Screen::Awg => self.draw_awg(state),
+            Screen::Settings => self.draw_settings(state),
+            Screen::ProfileSave => self.draw_profiles(state, true),
+            Screen::ProfileLoad => self.draw_profiles(state, false),
+            Screen::System => self.draw_system(state),
+            Screen::Help => self.draw_help(state),
         }
     }
 
@@ -825,13 +1413,85 @@ where
             self.render(new);
             return;
         }
-        if old.recovery_armed != new.recovery_armed {
+        if old.recovery_armed != new.recovery_armed && new.screen == Screen::Overview {
             self.draw_recovery_status(new);
         }
-        if temperature_projection(old) != temperature_projection(new) {
+        if temperature_projection(old) != temperature_projection(new)
+            && matches!(
+                new.screen,
+                Screen::Overview | Screen::Channel(_) | Screen::UsbPdInput
+            )
+        {
             self.draw_temperature(new);
         }
         match new.screen {
+            Screen::MainMenu => {
+                if old.menu_selection != new.menu_selection {
+                    let old_index = usize::from(old.menu_selection);
+                    let new_index = usize::from(new.menu_selection);
+                    self.draw_menu_item(Self::main_menu_item(old_index), old_index, false);
+                    self.draw_menu_item(Self::main_menu_item(new_index), new_index, true);
+                }
+            }
+            Screen::Awg => {
+                let damage = awg_damage(old, new);
+                for index in 0..8 {
+                    if damage.rows & (1 << index) != 0 {
+                        self.draw_awg_row(new, index);
+                    } else if damage.values & (1 << index) != 0 {
+                        self.draw_awg_value(new, index);
+                    }
+                }
+                if damage.load_heading {
+                    self.draw_awg_load_heading(new);
+                }
+                if damage.load_current {
+                    self.draw_awg_load_current(new);
+                }
+                if damage.load_power {
+                    self.draw_awg_load_power(new);
+                }
+            }
+            Screen::Settings => {
+                if old.menu_selection != new.menu_selection {
+                    let old_index = usize::from(old.menu_selection);
+                    let new_index = usize::from(new.menu_selection);
+                    self.draw_menu_item(Self::settings_item(new, old_index), old_index, false);
+                    self.draw_menu_item(Self::settings_item(new, new_index), new_index, true);
+                }
+                if old.temperature_unit != new.temperature_unit {
+                    self.draw_menu_item(Self::settings_item(new, 0), 0, new.menu_selection == 0);
+                }
+                if old.profile_status != new.profile_status {
+                    self.draw_settings_status(new);
+                }
+            }
+            Screen::ProfileSave | Screen::ProfileLoad => {
+                if old.menu_selection != new.menu_selection {
+                    let old_index = usize::from(old.menu_selection);
+                    let new_index = usize::from(new.menu_selection);
+                    self.draw_menu_item(Self::profile_item(new, old_index), old_index, false);
+                    self.draw_menu_item(Self::profile_item(new, new_index), new_index, true);
+                }
+                for index in 0..3 {
+                    if old.profile_present[index] != new.profile_present[index] {
+                        self.draw_menu_item(
+                            Self::profile_item(new, index),
+                            index,
+                            usize::from(new.menu_selection) == index,
+                        );
+                    }
+                }
+                if old.profile_status != new.profile_status {
+                    self.draw_profile_status(new);
+                }
+            }
+            Screen::System => {}
+            Screen::Help => {
+                if old.help_scroll != new.help_scroll {
+                    self.draw_help_content(new);
+                }
+            }
             Screen::Overview => {
                 for index in 0..new.channels.len() {
                     let old_focused = old.focus == ControlFocus::OverviewOutput(index as u8);

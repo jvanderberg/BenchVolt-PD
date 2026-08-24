@@ -47,12 +47,12 @@ ctk.set_default_color_theme("dark-blue")
 
 # --- Waveform / ARB Settings ---
 MIN_WAVE_FREQ_HZ = 1
-MAX_WAVE_FREQ_HZ = 125
-MAX_WAVE_FREQ_HZ_SQUARE = 125
-MAX_WAVE_FREQ_HZ_OTHER = 60
+MAX_WAVE_FREQ_HZ = 1000
+MAX_WAVE_FREQ_HZ_SQUARE = 1000
+MAX_WAVE_FREQ_HZ_OTHER = 500
 ARB_MAX_POINTS = 1024
-AUTO_ARB_MIN_DWELL_TICKS = 4
-AUTO_ARB_MULTIPLIER = 1
+AUTO_ARB_MIN_DWELL_TICKS = 1
+AUTO_ARB_MULTIPLIER = 0.5
 AUTO_ARB_REPETITION = 0
 
 
@@ -865,7 +865,12 @@ class BenchVoltUI(ctk.CTk):
                             parts = line.replace('#CONF:', '').split(',')
                             for part in parts:
                                 if 'MULTIPLIER' in part:
-                                    m_val = int(part.split('=')[-1])
+                                    parsed_multiplier = float(part.split('=')[-1])
+                                    if parsed_multiplier != 0.5 and (
+                                        parsed_multiplier < 1 or not parsed_multiplier.is_integer()
+                                    ):
+                                        raise ValueError("Multiplier must be 0.5 or a positive integer")
+                                    m_val = int(parsed_multiplier) if parsed_multiplier.is_integer() else 0.5
                                 if 'REPETITION' in part:
                                     r_val = int(part.split('=')[-1])
                             continue
@@ -876,6 +881,9 @@ class BenchVoltUI(ctk.CTk):
                             v_val = float(parts[0])
                             d_val = int(parts[1])
 
+                            if not (1 <= d_val <= 65535):
+                                raise ValueError(f"Row {i + 1} dwell must be 1..65535")
+
                             # CHANNEL-BASED VOLTAGE CONTROL
                             if not (min_v <= v_val <= max_v):
                                 print(
@@ -884,6 +892,8 @@ class BenchVoltUI(ctk.CTk):
                                 return  # Stop loading on invalid data
 
                             new_points.append((v_val, d_val))
+                            if len(new_points) > ARB_MAX_POINTS:
+                                raise ValueError(f"ARB exceeds {ARB_MAX_POINTS} points")
 
                     if new_points:
                         self.current_arb_data = new_points
@@ -1076,12 +1086,11 @@ class BenchVoltUI(ctk.CTk):
     def generate_standard_waveform_as_arb(self, wave_mode, freq_hz, v_min, v_max):
         """Generate Square/Triangle/Ramp as firmware-compatible ARB points.
 
-        Firmware timing model in main.c:
-            target_delay_us = arb_dwell_buffer[index] * g_multiplier * 1000
+        Rust firmware timing model (the command format remains C-compatible):
+            target_delay = dwell * multiplier milliseconds
 
-        Therefore, with AUTO_ARB_MULTIPLIER = 1:
-            1 dwell tick = 1 ms
-            minimum point time = AUTO_ARB_MIN_DWELL_TICKS ms
+        The Rust extension accepts multiplier 0.5, exposing the dedicated 2 kHz
+        scheduler while legacy integer multipliers retain their millisecond meaning.
         """
         if wave_mode == "Square":
             max_freq_hz = MAX_WAVE_FREQ_HZ_SQUARE
@@ -1139,7 +1148,7 @@ class BenchVoltUI(ctk.CTk):
 
         if wave_mode == "Square":
             # Square needs only two points: HIGH and LOW.
-            # At 125 Hz: period=8 ms, half-period=4 ms, so this exactly fits min dwell=4.
+            # At 125 Hz: period=8 ms, half-period=4 ms.
             dwell_ticks = int(round((period_ms / 2.0) / AUTO_ARB_MULTIPLIER))
             if dwell_ticks < AUTO_ARB_MIN_DWELL_TICKS:
                 raise ValueError(

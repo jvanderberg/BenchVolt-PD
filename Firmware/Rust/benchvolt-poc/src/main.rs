@@ -3,16 +3,30 @@
 
 mod view;
 
-use core::{cell::RefCell, fmt::Write as _};
+use core::{
+    cell::RefCell,
+    fmt::Write as _,
+    sync::atomic::{AtomicU32, AtomicU8, Ordering},
+};
 
-use benchvolt_poc::app::{Action, AppReducer, AppState, Measurement, RegulationMode};
+use benchvolt_poc::app::{
+    Action, AppReducer, AppState, AwgSource, AwgStatus, Measurement, ProfileRequest, ProfileStatus,
+    RegulationMode,
+};
+use benchvolt_poc::arb::{
+    parse_data as parse_arb_data, parse_start as parse_arb_start, Buffer as ArbBuffer,
+    DataChunk as ArbDataChunk, ParseError as ArbParseError, Scheduler as ArbScheduler,
+    Start as ArbStart, Tick as ArbTick, UploadSession as ArbUploadSession,
+};
+use benchvolt_poc::awg::Scheduler as AwgScheduler;
+use benchvolt_poc::load::LoadAccumulator;
 use benchvolt_poc::power::{
-    effect_for_transition, execute_effect, execute_global_shutdown, DriverOperation, PowerDriver,
-    ProtectionMonitor, Rail,
+    effect_for_transition, execute_effect, execute_global_shutdown, protection_output,
+    tps55289_status_fault, DriverOperation, PowerDriver, ProtectionMonitor, Rail,
 };
 use benchvolt_poc::settings::{
-    decode as decode_settings, encode as encode_settings, PersistentSettings, SettingsDebouncer,
-    SettingsRecord, RECORD_SIZE,
+    decode as decode_settings, encode as encode_settings, PersistentSettings, RecordKind,
+    SettingsDebouncer, SettingsRecord, RECORD_SIZE,
 };
 use cortex_m::interrupt::Mutex;
 use cortex_m_rt::entry;
@@ -53,18 +67,33 @@ const OVERVIEW_HOLD_MS: u16 = 500;
 const REBOOT_HOLD_MS: u16 = 3_000;
 const ENCODER_ACCELERATION_IDLE_MS: u16 = 80;
 
+static LAST_HW_OPERATION: AtomicU8 = AtomicU8::new(0);
+static LAST_HW_ERROR: AtomicU8 = AtomicU8::new(0);
+static HW_RETRY_COUNT: AtomicU32 = AtomicU32::new(0);
+static CH5_TPS_STATUS: AtomicU8 = AtomicU8::new(0);
+static ARB_INDEX: AtomicU32 = AtomicU32::new(0);
+static ARB_CYCLES: AtomicU32 = AtomicU32::new(0);
+static ARB_LATE_UPDATES: AtomicU32 = AtomicU32::new(0);
+static ARB_SKIPPED_CYCLES: AtomicU32 = AtomicU32::new(0);
+static ARB_BUFFER: Mutex<RefCell<ArbBuffer>> = Mutex::new(RefCell::new(ArbBuffer::new()));
+
+fn record_hw_retries(count: u32) {
+    let current = HW_RETRY_COUNT.load(Ordering::Relaxed);
+    HW_RETRY_COUNT.store(current.saturating_add(count), Ordering::Relaxed);
+}
+
 type BenchUsbBus = UsbBus<BenchUsb>;
 
 #[derive(Clone, Copy)]
 struct UsbMessage {
-    bytes: [u8; 64],
-    len: u8,
+    bytes: [u8; 192],
+    len: u16,
 }
 
 impl UsbMessage {
     const fn empty() -> Self {
         Self {
-            bytes: [0; 64],
+            bytes: [0; 192],
             len: 0,
         }
     }
@@ -77,7 +106,7 @@ impl UsbMessage {
         let mut message = Self::empty();
         let len = bytes.len().min(message.bytes.len());
         message.bytes[..len].copy_from_slice(&bytes[..len]);
-        message.len = len as u8;
+        message.len = len as u16;
         message
     }
 }
@@ -85,8 +114,9 @@ impl UsbMessage {
 struct UsbRuntime {
     device: UsbDevice<'static, BenchUsbBus>,
     serial: SerialPort<'static, BenchUsbBus>,
-    rx_line: [u8; 64],
+    rx_line: [u8; 192],
     rx_len: usize,
+    rx_overflow: bool,
     commands: Deque<UsbMessage, 4>,
     responses: Deque<UsbMessage, 4>,
     response_offset: usize,
@@ -102,20 +132,31 @@ impl UsbRuntime {
                 }
                 for byte in &packet[..count] {
                     if *byte == b'\n' {
+                        if self.rx_overflow {
+                            self.responses
+                                .push_back(UsbMessage::from_slice(b"ERR:LINE_TOO_LONG\r\n"))
+                                .ok();
+                            self.rx_len = 0;
+                            self.rx_overflow = false;
+                            continue;
+                        }
                         let mut message = UsbMessage::empty();
                         message.bytes[..self.rx_len].copy_from_slice(&self.rx_line[..self.rx_len]);
-                        message.len = self.rx_len as u8;
+                        message.len = self.rx_len as u16;
                         if self.commands.push_back(message).is_err() {
                             self.responses
                                 .push_back(UsbMessage::from_slice(b"ERR:BUSY\r\n"))
                                 .ok();
                         }
                         self.rx_len = 0;
+                    } else if self.rx_overflow {
+                        continue;
                     } else if self.rx_len < self.rx_line.len() {
                         self.rx_line[self.rx_len] = *byte;
                         self.rx_len += 1;
                     } else {
                         self.rx_len = 0;
+                        self.rx_overflow = true;
                     }
                 }
             }
@@ -140,7 +181,14 @@ impl UsbRuntime {
 }
 
 static USB_RUNTIME: Mutex<RefCell<Option<UsbRuntime>>> = Mutex::new(RefCell::new(None));
-static ENCODER_EVENTS: Mutex<RefCell<Deque<i8, 16>>> = Mutex::new(RefCell::new(Deque::new()));
+#[derive(Clone, Copy)]
+struct EncoderEvent {
+    direction: i8,
+    tick: u16,
+}
+
+static ENCODER_EVENTS: Mutex<RefCell<Deque<EncoderEvent, 16>>> =
+    Mutex::new(RefCell::new(Deque::new()));
 static ENCODER_EDGE_COUNT: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
 static ENCODER_DROP_COUNT: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
 
@@ -164,7 +212,10 @@ fn EXTI4_15() {
             let pushed = ENCODER_EVENTS
                 .borrow(cs)
                 .borrow_mut()
-                .push_back(if clockwise { 1 } else { -1 })
+                .push_back(EncoderEvent {
+                    direction: if clockwise { 1 } else { -1 },
+                    tick: monotonic_ms(),
+                })
                 .is_ok();
             let mut edges = ENCODER_EDGE_COUNT.borrow(cs).borrow_mut();
             *edges = edges.wrapping_add(1);
@@ -185,19 +236,47 @@ fn encoder_counts() -> (u32, u32) {
     })
 }
 
-fn take_encoder_delta() -> i8 {
+fn take_encoder_adjustment(
+    last_tick: &mut u16,
+    last_direction: &mut i8,
+    velocity: &mut u8,
+) -> (i8, i8) {
     cortex_m::interrupt::free(|cs| {
         let mut queue = ENCODER_EVENTS.borrow(cs).borrow_mut();
-        let mut delta = 0i8;
-        while let Some(direction) = queue.pop_front() {
-            delta = delta.saturating_add(direction);
+        let mut raw = 0i16;
+        let mut accelerated = 0i16;
+        while let Some(event) = queue.pop_front() {
+            let elapsed = event.tick.wrapping_sub(*last_tick);
+            if event.direction != *last_direction || elapsed > ENCODER_ACCELERATION_IDLE_MS {
+                *velocity = 1;
+            } else {
+                *velocity = velocity.saturating_add(1).min(16);
+            }
+            *last_tick = event.tick;
+            *last_direction = event.direction;
+            let multiplier: i16 = match *velocity {
+                0 | 1 => 1,
+                2..=3 => 2,
+                4..=5 => 4,
+                6..=8 => 8,
+                _ => 16,
+            };
+            raw = raw.saturating_add(i16::from(event.direction));
+            accelerated = accelerated.saturating_add(i16::from(event.direction) * multiplier);
         }
-        delta
+        (
+            raw.clamp(i16::from(i8::MIN), i16::from(i8::MAX)) as i8,
+            accelerated.clamp(i16::from(i8::MIN), i16::from(i8::MAX)) as i8,
+        )
     })
 }
 
 fn monotonic_ms() -> u16 {
     unsafe { (*pac::TIM3::ptr()).cnt.read().cnt().bits() }
+}
+
+fn monotonic_awg_tick() -> u16 {
+    unsafe { (*pac::TIM14::ptr()).cnt.read().cnt().bits() }
 }
 
 fn take_usb_command() -> Option<UsbMessage> {
@@ -500,6 +579,31 @@ where
         Ok(value)
     }
 
+    fn read_registers(
+        &mut self,
+        address: u8,
+        register: u8,
+        values: &mut [u8],
+        delay: &mut impl DelayUs<u32>,
+    ) -> Result<(), ()> {
+        self.start(delay);
+        if !self.write_byte(address << 1, delay) || !self.write_byte(register, delay) {
+            self.stop(delay);
+            return Err(());
+        }
+        self.start(delay);
+        if !self.write_byte((address << 1) | 1, delay) {
+            self.stop(delay);
+            return Err(());
+        }
+        let last = values.len().saturating_sub(1);
+        for (index, value) in values.iter_mut().enumerate() {
+            *value = self.read_byte(index != last, delay);
+        }
+        self.stop(delay);
+        Ok(())
+    }
+
     fn write_bytes(
         &mut self,
         address: u8,
@@ -563,6 +667,12 @@ where
 
     fn read_temperature(&mut self) -> Option<i16> {
         self.shared_bus.read_tmp1075(&mut self.delay)
+    }
+
+    fn read_ch5_status(&mut self) -> Result<u8, HardwareError> {
+        self.adjustable_bus
+            .read_register(Self::TPS_CH5, 0x07, &mut self.delay)
+            .map_err(|_| HardwareError::Bus)
     }
 
     fn write_gpio(port: char, pin: u8, enabled: bool) {
@@ -641,6 +751,7 @@ where
         millivolts: u16,
         current_limit_ma: u16,
         enable_output: bool,
+        forced_pwm: bool,
     ) -> Result<(), HardwareError>
     where
         SCL: OutputPin,
@@ -649,6 +760,7 @@ where
         const REF_LSB: u8 = 0x00;
         const REF_MSB: u8 = 0x01;
         const IOUT_LIMIT: u8 = 0x02;
+        const VOUT_SR: u8 = 0x03;
         const VOUT_FS: u8 = 0x04;
         const MODE: u8 = 0x06;
 
@@ -666,11 +778,25 @@ where
         } else {
             mode & !0x80
         };
+        let mode = if forced_pwm {
+            mode | 0x02
+        } else {
+            mode & !0x02
+        };
+        let slew = bus
+            .read_register(address, VOUT_SR, delay)
+            .map_err(|_| HardwareError::Bus)?;
+        let slew = if forced_pwm {
+            (slew & !0x03) | 0x03
+        } else {
+            slew
+        };
         for (register, value) in [
             (VOUT_FS, vout_fs),
             (REF_LSB, code as u8),
             (REF_MSB, ((code >> 8) & 0x07) as u8),
             (IOUT_LIMIT, current_code),
+            (VOUT_SR, slew),
             (MODE, mode),
         ] {
             bus.write_register(address, register, value, delay)
@@ -725,18 +851,34 @@ where
         SDA: OutputPin + InputPin,
     {
         let code = Self::tps_voltage_code(millivolts);
-        for (register, value) in [(0x00, code as u8), (0x01, ((code >> 8) & 0x07) as u8)] {
-            bus.write_register(address, register, value, delay)
-                .map_err(|_| HardwareError::Bus)?;
-            if bus
-                .read_register(address, register, delay)
-                .map_err(|_| HardwareError::Bus)?
-                != value
-            {
-                return Err(HardwareError::Verify);
+        let reference = [code as u8, ((code >> 8) & 0x07) as u8];
+        let mut last_error = HardwareError::Bus;
+        for attempt in 0..3 {
+            let result = bus
+                .write_bytes(address, &[0x00, reference[0], reference[1]], delay)
+                .map_err(|_| HardwareError::Bus)
+                .and_then(|()| {
+                    let mut verified = [0; 2];
+                    bus.read_registers(address, 0x00, &mut verified, delay)
+                        .map_err(|_| HardwareError::Bus)?;
+                    (verified == reference)
+                        .then_some(())
+                        .ok_or(HardwareError::Verify)
+                });
+            match result {
+                Ok(()) => {
+                    if attempt != 0 {
+                        record_hw_retries(attempt as u32);
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    last_error = error;
+                    delay.delay_us(100u32);
+                }
             }
         }
-        Ok(())
+        Err(last_error)
     }
 
     fn tps_verify<SCL, SDA>(
@@ -791,7 +933,17 @@ where
     type Error = HardwareError;
 
     fn apply(&mut self, operation: DriverOperation) -> Result<(), Self::Error> {
-        match operation {
+        let operation_code = match operation {
+            DriverOperation::SetAdjustableDac { .. } => 1,
+            DriverOperation::Ch5Voltage(_) => 2,
+            DriverOperation::ConfigureCh5 { .. } => 3,
+            DriverOperation::ClearCh5Status => 3,
+            DriverOperation::Ch5OutputEnable(_) => 4,
+            DriverOperation::ConfigureRail { .. } => 5,
+            DriverOperation::VerifyRail { .. } | DriverOperation::VerifyOutput { .. } => 6,
+            _ => 7,
+        };
+        let result = match operation {
             DriverOperation::ChannelGate { channel, enabled } => {
                 Self::channel_gate(channel, enabled)
             }
@@ -814,6 +966,7 @@ where
                     millivolts,
                     6_000,
                     true,
+                    false,
                 )?;
                 self.delay.delay_ms(50u8);
                 Ok(())
@@ -831,13 +984,22 @@ where
                 let code = 3_975u32
                     .saturating_sub((u32::from(millivolts - 500) * 3_635 + 2_250) / 4_500)
                     as u16;
-                self.adjustable_bus
-                    .write_bytes(
-                        0x60,
-                        &[((code >> 8) & 0x0f) as u8, code as u8],
-                        &mut self.delay,
-                    )
-                    .map_err(|_| HardwareError::Bus)
+                let bytes = [((code >> 8) & 0x0f) as u8, code as u8];
+                let mut result = Err(HardwareError::Bus);
+                for attempt in 0..3 {
+                    result = self
+                        .adjustable_bus
+                        .write_bytes(0x60, &bytes, &mut self.delay)
+                        .map_err(|_| HardwareError::Bus);
+                    if result.is_ok() {
+                        if attempt != 0 {
+                            record_hw_retries(attempt as u32);
+                        }
+                        break;
+                    }
+                    self.delay.delay_us(100u32);
+                }
+                result
             }
             DriverOperation::Ch5Enable(enabled) => {
                 Self::write_gpio('B', 7, enabled);
@@ -852,6 +1014,7 @@ where
             DriverOperation::ConfigureCh5 {
                 millivolts,
                 current_limit_ma,
+                forced_pwm,
             } => Self::tps_configure(
                 &mut self.adjustable_bus,
                 &mut self.delay,
@@ -859,7 +1022,9 @@ where
                 millivolts,
                 current_limit_ma,
                 false,
+                forced_pwm,
             ),
+            DriverOperation::ClearCh5Status => self.read_ch5_status().map(|_| ()),
             DriverOperation::Ch5OutputEnable(enabled) => {
                 Self::tps_set_output(
                     &mut self.adjustable_bus,
@@ -878,13 +1043,11 @@ where
                 Self::TPS_CH5,
                 millivolts,
             ),
-            DriverOperation::VerifyOutput { channel, .. } if channel == 4 => {
-                Self::tps_verify_output_enabled(
-                    &mut self.adjustable_bus,
-                    &mut self.delay,
-                    Self::TPS_CH5,
-                )
-            }
+            DriverOperation::VerifyOutput { channel: 4, .. } => Self::tps_verify_output_enabled(
+                &mut self.adjustable_bus,
+                &mut self.delay,
+                Self::TPS_CH5,
+            ),
             DriverOperation::VerifyOutput { channel, .. } => {
                 let (port, pin) = match channel {
                     0 => ('C', 12),
@@ -899,7 +1062,18 @@ where
                     Err(HardwareError::Verify)
                 }
             }
+        };
+        if let Err(error) = result {
+            LAST_HW_OPERATION.store(operation_code, Ordering::Relaxed);
+            LAST_HW_ERROR.store(
+                match error {
+                    HardwareError::Bus => 1,
+                    HardwareError::Verify => 2,
+                },
+                Ordering::Relaxed,
+            );
         }
+        result
     }
 }
 
@@ -998,6 +1172,7 @@ fn restore_boot_seal(seal: BootSeal) -> bool {
 #[derive(Clone, Copy)]
 struct SettingsStore {
     latest: Option<SettingsRecord>,
+    profiles: [Option<SettingsRecord>; 3],
     next_slot: usize,
 }
 
@@ -1013,21 +1188,30 @@ fn read_settings_slot(slot: usize) -> [u8; RECORD_SIZE] {
 
 fn load_settings_store() -> SettingsStore {
     let mut latest: Option<SettingsRecord> = None;
+    let mut profiles: [Option<SettingsRecord>; 3] = [None; 3];
     let mut next_slot = SETTINGS_SLOTS;
     for slot in 0..SETTINGS_SLOTS {
         let bytes = read_settings_slot(slot);
         if bytes.iter().all(|byte| *byte == 0xff) {
             next_slot = next_slot.min(slot);
         } else if let Some(record) = decode_settings(&bytes) {
-            if latest
+            let destination = match record.kind {
+                RecordKind::Autosave => &mut latest,
+                RecordKind::Profile(slot) => &mut profiles[usize::from(slot)],
+            };
+            if destination
                 .map(|old| record.sequence > old.sequence)
                 .unwrap_or(true)
             {
-                latest = Some(record);
+                *destination = Some(record);
             }
         }
     }
-    SettingsStore { latest, next_slot }
+    SettingsStore {
+        latest,
+        profiles,
+        next_slot,
+    }
 }
 
 fn erase_flash_page(address: usize) -> bool {
@@ -1106,6 +1290,7 @@ fn program_settings_slot(slot: usize, record: SettingsRecord) -> bool {
 
 fn compact_settings_store(store: &mut SettingsStore) -> bool {
     let latest = store.latest;
+    let profiles = store.profiles;
     if !erase_flash_page(SETTINGS_ADDR) {
         return false;
     }
@@ -1116,11 +1301,18 @@ fn compact_settings_store(store: &mut SettingsStore) -> bool {
         }
         store.next_slot = 1;
     }
+    for record in profiles.into_iter().flatten() {
+        if !program_settings_slot(store.next_slot, record) {
+            return false;
+        }
+        store.next_slot += 1;
+    }
     true
 }
 
-fn persist_settings(
+fn persist_settings_record(
     store: &mut SettingsStore,
+    kind: RecordKind,
     settings: PersistentSettings,
     outputs_physically_off: bool,
 ) -> bool {
@@ -1132,18 +1324,37 @@ fn persist_settings(
         }
     }
     let record = SettingsRecord {
-        sequence: store
-            .latest
-            .map(|record| record.sequence.wrapping_add(1))
-            .unwrap_or(1),
+        sequence: match kind {
+            RecordKind::Autosave => store.latest,
+            RecordKind::Profile(slot) => store.profiles[usize::from(slot)],
+        }
+        .map(|record| record.sequence.wrapping_add(1))
+        .unwrap_or(1),
+        kind,
         settings,
     };
     if !program_settings_slot(store.next_slot, record) {
         return false;
     }
-    store.latest = Some(record);
+    match kind {
+        RecordKind::Autosave => store.latest = Some(record),
+        RecordKind::Profile(slot) => store.profiles[usize::from(slot)] = Some(record),
+    }
     store.next_slot += 1;
     true
+}
+
+fn persist_settings(
+    store: &mut SettingsStore,
+    settings: PersistentSettings,
+    outputs_physically_off: bool,
+) -> bool {
+    persist_settings_record(
+        store,
+        RecordKind::Autosave,
+        settings,
+        outputs_physically_off,
+    )
 }
 
 enum UsbIntent {
@@ -1154,6 +1365,9 @@ enum UsbIntent {
     SetCurrentLimit { channel: u8, milliamps: u16 },
     SetRegulationMode { channel: u8, mode: RegulationMode },
     SetSinkCurrentLimit(u16),
+    ArbData(ArbDataChunk),
+    ArbStart(ArbStart),
+    ArbStop(u8),
 }
 
 fn parse_milliamps(text: &[u8]) -> Option<u16> {
@@ -1187,6 +1401,67 @@ fn handle_usb_command(
     protection_monitors: &[ProtectionMonitor; 5],
 ) -> UsbIntent {
     let command = command.strip_suffix(b"\r").unwrap_or(command);
+    for channel in 4..=5u8 {
+        let mut status_command: String<40> = String::new();
+        write!(&mut status_command, "SOUR:WAVE:CH{channel}:ARB:STAT?").ok();
+        if command == status_command.as_bytes() {
+            let owner = state.awg_source == AwgSource::Arbitrary
+                && state.active_awg_channel() + 1 == channel;
+            let status = if owner {
+                match state.awg_status {
+                    AwgStatus::Running => "RUNNING",
+                    AwgStatus::StartRequested | AwgStatus::Starting => "STARTING",
+                    AwgStatus::StopRequested => "STOPPING",
+                    AwgStatus::Fault => "FAULT",
+                    AwgStatus::Stopped => "STOPPED",
+                }
+            } else {
+                "STOPPED"
+            };
+            let mut response: String<96> = String::new();
+            write!(
+                &mut response,
+                "{},INDEX:{},CYCLES:{},LATE:{},SKIP:{}\r\n",
+                status,
+                ARB_INDEX.load(Ordering::Relaxed),
+                ARB_CYCLES.load(Ordering::Relaxed),
+                ARB_LATE_UPDATES.load(Ordering::Relaxed),
+                ARB_SKIPPED_CYCLES.load(Ordering::Relaxed),
+            )
+            .ok();
+            queue_usb_response(response.as_bytes());
+            return UsbIntent::None;
+        }
+        let mut stop_command: String<40> = String::new();
+        write!(&mut stop_command, "SOUR:WAVE:CH{channel}:ARB:STOP").ok();
+        if command == stop_command.as_bytes() {
+            return UsbIntent::ArbStop(channel - 1);
+        }
+    }
+    match parse_arb_data(command) {
+        Ok(Some(chunk)) => return UsbIntent::ArbData(chunk),
+        Err(ArbParseError::Syntax) => {
+            queue_usb_response(b"ERR:SYNTAX\r\n");
+            return UsbIntent::None;
+        }
+        Err(ArbParseError::Range) => {
+            queue_usb_response(b"ERR:RANGE\r\n");
+            return UsbIntent::None;
+        }
+        Ok(None) => {}
+    }
+    match parse_arb_start(command) {
+        Ok(Some(start)) => return UsbIntent::ArbStart(start),
+        Err(ArbParseError::Syntax) => {
+            queue_usb_response(b"ERR:SYNTAX\r\n");
+            return UsbIntent::None;
+        }
+        Err(ArbParseError::Range) => {
+            queue_usb_response(b"ERR:RANGE\r\n");
+            return UsbIntent::None;
+        }
+        Ok(None) => {}
+    }
     if let Some(rest) = command.strip_prefix(b"SYST:PROT:CH") {
         let Some(channel) = rest
             .first()
@@ -1273,6 +1548,28 @@ fn handle_usb_command(
     match command {
         b"*IDN?" => queue_usb_response(b"BenchVolt-PD,RUST-POC,S/N:2026-01\r\n"),
         b"SYST:BUILD?" => queue_usb_response(b"Rust POC 0.1.0\r\n"),
+        b"SYST:HWERR?" => {
+            let mut response: String<48> = String::new();
+            write!(
+                &mut response,
+                "OP{} ERR{} RETRIES{}\r\n",
+                LAST_HW_OPERATION.load(Ordering::Relaxed),
+                LAST_HW_ERROR.load(Ordering::Relaxed),
+                HW_RETRY_COUNT.load(Ordering::Relaxed),
+            )
+            .ok();
+            queue_usb_response(response.as_bytes());
+        }
+        b"SYST:TPS:CH5?" => {
+            let mut response: String<16> = String::new();
+            write!(
+                &mut response,
+                "0x{:02X}\r\n",
+                CH5_TPS_STATUS.load(Ordering::Relaxed)
+            )
+            .ok();
+            queue_usb_response(response.as_bytes());
+        }
         b"SYST:TICK?" => {
             let mut response: String<16> = String::new();
             write!(&mut response, "{}\r\n", monotonic_ms()).ok();
@@ -1423,6 +1720,27 @@ fn handle_usb_command(
                     )
                     .ok();
                 }
+                benchvolt_poc::app::Screen::MainMenu => {
+                    response.push_str("MENU\r\n").ok();
+                }
+                benchvolt_poc::app::Screen::Awg => {
+                    response.push_str("AWG\r\n").ok();
+                }
+                benchvolt_poc::app::Screen::Settings => {
+                    response.push_str("SETTINGS\r\n").ok();
+                }
+                benchvolt_poc::app::Screen::ProfileSave => {
+                    response.push_str("PROFILE:SAVE\r\n").ok();
+                }
+                benchvolt_poc::app::Screen::ProfileLoad => {
+                    response.push_str("PROFILE:LOAD\r\n").ok();
+                }
+                benchvolt_poc::app::Screen::System => {
+                    response.push_str("SYSTEM\r\n").ok();
+                }
+                benchvolt_poc::app::Screen::Help => {
+                    response.push_str("HELP\r\n").ok();
+                }
             }
             queue_usb_response(response.as_bytes());
         }
@@ -1529,6 +1847,19 @@ fn main() -> ! {
     dp.TIM3.arr.write(|w| w.arr().bits(u16::MAX));
     dp.TIM3.egr.write(|w| w.ug().set_bit());
     dp.TIM3.cr1.write(|w| w.cen().set_bit());
+
+    // Dedicated free-running 2 kHz AWG clock. Keeping this separate preserves
+    // the millisecond semantics of button holds, encoder acceleration, sensor
+    // cadence, persistence debounce, and protection timing.
+    unsafe {
+        (*pac::RCC::ptr())
+            .apb1enr
+            .modify(|_, w| w.tim14en().set_bit());
+    }
+    dp.TIM14.psc.write(|w| w.psc().bits(23_999));
+    dp.TIM14.arr.write(|w| w.arr().bits(u16::MAX));
+    dp.TIM14.egr.write(|w| w.ug().set_bit());
+    dp.TIM14.cr1.write(|w| w.cen().set_bit());
     let mut delay = Delay::new(cp.SYST, &rcc);
 
     let gpioa = dp.GPIOA.split(&mut rcc);
@@ -1540,24 +1871,34 @@ fn main() -> ! {
     unsafe {
         (*pac::GPIOA::ptr()).bsrr.write(|w| w.bits(1 << (15 + 16)));
         (*pac::GPIOB::ptr()).bsrr.write(|w| {
-            w.bits((1 << (2 + 16)) | (1 << (6 + 16)) | (1 << (7 + 16)) | (1 << (15 + 16)))
+            w.bits(
+                (1 << (2 + 16))
+                    | (1 << (6 + 16))
+                    | (1 << (7 + 16))
+                    | (1 << (8 + 16))
+                    | (1 << (9 + 16))
+                    | (1 << (15 + 16)),
+            )
         });
         (*pac::GPIOC::ptr())
             .bsrr
             .write(|w| w.bits((1 << (12 + 16)) | (1 << (13 + 16))));
     }
 
-    let (_en2, _en_dc2, _en4, _en5, _en1, _en3, _en_dc1) = cortex_m::interrupt::free(|cs| {
-        (
-            gpioa.pa15.into_push_pull_output(cs),
-            gpiob.pb2.into_push_pull_output(cs),
-            gpiob.pb6.into_push_pull_output(cs),
-            gpiob.pb7.into_push_pull_output(cs),
-            gpiob.pb15.into_push_pull_output(cs),
-            gpioc.pc12.into_push_pull_output(cs),
-            gpioc.pc13.into_push_pull_output(cs),
-        )
-    });
+    let (_en2, _en_dc2, _en4, _en5, _led_red, _led_blue, _en1, _en3, _en_dc1) =
+        cortex_m::interrupt::free(|cs| {
+            (
+                gpioa.pa15.into_push_pull_output(cs),
+                gpiob.pb2.into_push_pull_output(cs),
+                gpiob.pb6.into_push_pull_output(cs),
+                gpiob.pb7.into_push_pull_output(cs),
+                gpiob.pb8.into_push_pull_output(cs),
+                gpiob.pb9.into_push_pull_output(cs),
+                gpiob.pb15.into_push_pull_output(cs),
+                gpioc.pc12.into_push_pull_output(cs),
+                gpioc.pc13.into_push_pull_output(cs),
+            )
+        });
     let mut settings_store = load_settings_store();
     if settings_store.next_slot >= SETTINGS_SLOTS {
         let _ = compact_settings_store(&mut settings_store);
@@ -1653,6 +1994,8 @@ fn main() -> ! {
     if let Some(record) = settings_store.latest {
         record.settings.apply_to(&mut initial_state);
     }
+    initial_state.profile_present =
+        core::array::from_fn(|index| settings_store.profiles[index].is_some());
     let mut app = reducto::App::<AppReducer, _, 8>::new(BenchVoltView::new(display), initial_state);
     app.render_full();
 
@@ -1679,8 +2022,9 @@ fn main() -> ! {
         USB_RUNTIME.borrow(cs).replace(Some(UsbRuntime {
             device: usb_device,
             serial,
-            rx_line: [0; 64],
+            rx_line: [0; 192],
             rx_len: 0,
+            rx_overflow: false,
             commands: Deque::new(),
             responses: Deque::new(),
             response_offset: 0,
@@ -1696,11 +2040,23 @@ fn main() -> ! {
     let mut temperature_ticks = 0u16;
     let mut measurement_ticks = 0u16;
     let mut display_measurement_ticks = 0u16;
+    let mut awg_load_ticks = 0u16;
     let mut channel_accumulators = [MeasurementAccumulator::new(); 5];
     let mut sink_accumulator = MeasurementAccumulator::new();
+    let mut awg_load_accumulator = LoadAccumulator::new();
     let mut protection_monitors = [ProtectionMonitor::default(); 5];
+    // TPS STATUS is latched and read-to-clear. A single observation can be a
+    // completed startup/current-regulation event; only a same-class
+    // reassertion on the following poll represents a persistent fault.
+    let mut ch5_pending_tps_fault = None;
+    let mut awg_scheduler = AwgScheduler::new();
+    let mut arb_scheduler = ArbScheduler::new();
+    let mut active_arb_start: Option<ArbStart> = None;
+    let mut pending_arb_ack: Option<ArbStart> = None;
+    let mut arb_upload = ArbUploadSession::new();
     let mut settings_effect = SettingsDebouncer::new(PersistentSettings::from_state(app.state()));
     let mut input_ticks = monotonic_ms();
+    let mut service_tick = input_ticks;
     let mut health_ticks = 0u32;
     let mut seal_attempted = false;
     let mut last_button_tick = 0u16;
@@ -1724,6 +2080,27 @@ fn main() -> ! {
         }};
     }
 
+    macro_rules! dispatch_navigation {
+        ($action:expr) => {{
+            let mut shutdown_result = None;
+            app.dispatch_with($action, |old, new| {
+                let crosses_awg_boundary = old.screen != new.screen
+                    && (old.screen == benchvolt_poc::app::Screen::Awg
+                        || new.screen == benchvolt_poc::app::Screen::Awg);
+                if crosses_awg_boundary {
+                    shutdown_result = Some(execute_global_shutdown(&mut power_driver));
+                }
+            });
+            if let Some(result) = shutdown_result {
+                app.dispatch(if result.is_ok() {
+                    Action::GlobalShutdownApplied
+                } else {
+                    Action::GlobalShutdownFailed
+                });
+            }
+        }};
+    }
+
     loop {
         while let Some(command) = take_usb_command() {
             match handle_usb_command(command.as_slice(), app.state(), &protection_monitors) {
@@ -1743,6 +2120,29 @@ fn main() -> ! {
                     queue_usb_response(b"OK:REBOOTING\r\n");
                 }
                 UsbIntent::SetOutput { channel, enabled } => {
+                    if enabled
+                        && !matches!(
+                            app.state().awg_status,
+                            AwgStatus::Stopped | AwgStatus::Fault
+                        )
+                    {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        continue;
+                    }
+                    if !enabled
+                        && channel == app.state().active_awg_channel()
+                        && app.state().awg_status == AwgStatus::Running
+                    {
+                        if execute_global_shutdown(&mut power_driver).is_ok() {
+                            app.dispatch(Action::GlobalShutdownApplied);
+                            app.dispatch(Action::AwgStopped);
+                            queue_usb_response(b"OK\r\n");
+                        } else {
+                            app.dispatch(Action::GlobalShutdownFailed);
+                            queue_usb_response(b"ERR:HARDWARE\r\n");
+                        }
+                        continue;
+                    }
                     dispatch_with_power_effects!(Action::SetOutputRequested { channel, enabled });
                     let output = &app.state().channels[usize::from(channel)];
                     if output.physical_enabled == enabled
@@ -1774,6 +2174,15 @@ fn main() -> ! {
                     }
                 }
                 UsbIntent::SetRegulationMode { channel, mode } => {
+                    if channel == app.state().active_awg_channel()
+                        && !matches!(
+                            app.state().awg_status,
+                            AwgStatus::Stopped | AwgStatus::Fault
+                        )
+                    {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        continue;
+                    }
                     dispatch_with_power_effects!(Action::SetRegulationMode { channel, mode });
                     let output = &app.state().channels[usize::from(channel)];
                     if output.regulation_mode == mode
@@ -1792,35 +2201,128 @@ fn main() -> ! {
                         queue_usb_response(b"ERR:RANGE\r\n");
                     }
                 }
+                UsbIntent::ArbData(chunk) => {
+                    if !matches!(
+                        app.state().awg_status,
+                        AwgStatus::Stopped | AwgStatus::Fault
+                    ) {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        continue;
+                    }
+                    if arb_upload.accept(chunk).is_err() {
+                        queue_usb_response(b"ERR:SEQUENCE\r\n");
+                        continue;
+                    }
+                    cortex_m::interrupt::free(|cs| {
+                        ARB_BUFFER.borrow(cs).borrow_mut().write(chunk);
+                    });
+                    let mut response: String<32> = String::new();
+                    write!(&mut response, "OK:ACK:CH{}\r\n", chunk.channel + 1).ok();
+                    queue_usb_response(response.as_bytes());
+                }
+                UsbIntent::ArbStart(start) => {
+                    if !matches!(
+                        app.state().awg_status,
+                        AwgStatus::Stopped | AwgStatus::Fault
+                    ) {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        continue;
+                    }
+                    if !arb_upload.is_complete_for(start) {
+                        queue_usb_response(b"ERR:INCOMPLETE\r\n");
+                        continue;
+                    }
+                    let bounds = cortex_m::interrupt::free(|cs| {
+                        ARB_BUFFER.borrow(cs).borrow().validate(start)
+                    });
+                    let Some((initial_mv, low_mv, high_mv)) = bounds else {
+                        queue_usb_response(b"ERR:RANGE\r\n");
+                        continue;
+                    };
+                    app.dispatch(Action::RequestArbStart {
+                        channel: start.channel,
+                        initial_mv,
+                        low_mv,
+                        high_mv,
+                    });
+                    if app.state().awg_status == AwgStatus::StartRequested
+                        && app.state().awg_source == AwgSource::Arbitrary
+                    {
+                        arb_scheduler.stop();
+                        ARB_INDEX.store(0, Ordering::Relaxed);
+                        ARB_CYCLES.store(0, Ordering::Relaxed);
+                        ARB_LATE_UPDATES.store(0, Ordering::Relaxed);
+                        ARB_SKIPPED_CYCLES.store(0, Ordering::Relaxed);
+                        active_arb_start = Some(start);
+                        pending_arb_ack = Some(start);
+                    } else {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                    }
+                }
+                UsbIntent::ArbStop(channel) => {
+                    if app.state().awg_source == AwgSource::Arbitrary
+                        && app.state().active_awg_channel() == channel
+                        && !matches!(app.state().awg_status, AwgStatus::Stopped)
+                    {
+                        if execute_global_shutdown(&mut power_driver).is_ok() {
+                            app.dispatch(Action::GlobalShutdownApplied);
+                            app.dispatch(Action::AwgStopped);
+                            active_arb_start = None;
+                            arb_scheduler.stop();
+                            queue_usb_response(b"OK\r\n");
+                        } else {
+                            app.dispatch(Action::GlobalShutdownFailed);
+                            queue_usb_response(b"ERR:HARDWARE\r\n");
+                        }
+                    } else {
+                        queue_usb_response(b"OK\r\n");
+                    }
+                }
             }
         }
 
-        power_driver.delay_ms(1u8);
+        if app.state().awg_status != AwgStatus::Running {
+            power_driver.delay_ms(1u8);
+        }
         input_ticks = monotonic_ms();
-        health_ticks = health_ticks.saturating_add(1);
-        temperature_ticks = temperature_ticks.wrapping_add(1);
-        measurement_ticks = measurement_ticks.wrapping_add(1);
-        display_measurement_ticks = display_measurement_ticks.wrapping_add(1);
+        let elapsed_ms = input_ticks.wrapping_sub(service_tick);
+        service_tick = input_ticks;
+        health_ticks = health_ticks.saturating_add(u32::from(elapsed_ms));
+        temperature_ticks = temperature_ticks.wrapping_add(elapsed_ms);
+        measurement_ticks = measurement_ticks.wrapping_add(elapsed_ms);
+        display_measurement_ticks = display_measurement_ticks.wrapping_add(elapsed_ms);
+        awg_load_ticks = awg_load_ticks.wrapping_add(elapsed_ms);
 
-        let direction = take_encoder_delta();
+        let (direction, accelerated) = take_encoder_adjustment(
+            &mut last_encoder_tick,
+            &mut last_encoder_direction,
+            &mut encoder_velocity,
+        );
         if direction != 0 {
-            let sign = direction.signum();
-            let elapsed = input_ticks.wrapping_sub(last_encoder_tick);
-            if sign != last_encoder_direction || elapsed > ENCODER_ACCELERATION_IDLE_MS {
-                encoder_velocity = direction.unsigned_abs().min(16);
-            } else {
-                encoder_velocity = encoder_velocity
-                    .saturating_add(direction.unsigned_abs())
-                    .min(16);
-            }
-            last_encoder_tick = input_ticks;
-            last_encoder_direction = sign;
             match app.state().focus {
-                benchvolt_poc::app::ControlFocus::None => app.dispatch(if direction < 0 {
-                    Action::PreviousScreen
-                } else {
-                    Action::NextScreen
-                }),
+                benchvolt_poc::app::ControlFocus::None => {
+                    let action = if app.state().screen == benchvolt_poc::app::Screen::Awg
+                        && app.state().awg_editing
+                    {
+                        Action::AdjustAwg(accelerated)
+                    } else if matches!(
+                        app.state().screen,
+                        benchvolt_poc::app::Screen::MainMenu
+                            | benchvolt_poc::app::Screen::Awg
+                            | benchvolt_poc::app::Screen::Settings
+                            | benchvolt_poc::app::Screen::ProfileSave
+                            | benchvolt_poc::app::Screen::ProfileLoad
+                            | benchvolt_poc::app::Screen::System
+                            | benchvolt_poc::app::Screen::Help
+                    ) {
+                        Action::NavigateMenu(direction)
+                    } else if direction < 0 {
+                        Action::PreviousScreen
+                    } else {
+                        Action::NextScreen
+                    };
+                    app.dispatch(action)
+                }
                 benchvolt_poc::app::ControlFocus::Output => {
                     if let benchvolt_poc::app::Screen::Channel(channel) = app.state().screen {
                         dispatch_with_power_effects!(Action::ToggleOutputRequested { channel });
@@ -1831,26 +2333,14 @@ fn main() -> ! {
                     dispatch_with_power_effects!(Action::ToggleOutputRequested { channel });
                     true
                 }
-                _ => {
-                    let multiplier = match encoder_velocity {
-                        0 | 1 => 1,
-                        2..=3 => 2,
-                        4..=5 => 4,
-                        6..=8 => 8,
-                        _ => 16,
-                    };
-                    let accelerated = direction.saturating_mul(multiplier);
-                    app.dispatch(Action::AdjustFocused(accelerated))
-                }
+                _ => app.dispatch(Action::AdjustFocused(accelerated)),
             };
         }
 
         let next_sw_high = encoder_sw.is_high().unwrap_or(encoder_sw_high);
-        if encoder_sw_high && !next_sw_high {
-            if input_ticks.wrapping_sub(last_button_tick) >= 50 {
-                button_press_tick = Some(input_ticks);
-                overview_hold_fired = false;
-            }
+        if encoder_sw_high && !next_sw_high && input_ticks.wrapping_sub(last_button_tick) >= 50 {
+            button_press_tick = Some(input_ticks);
+            overview_hold_fired = false;
         }
         if !next_sw_high {
             if let Some(pressed_at) = button_press_tick {
@@ -1860,7 +2350,7 @@ fn main() -> ! {
                     app.dispatch(Action::RequestReboot);
                 } else if held_ms >= OVERVIEW_HOLD_MS && !overview_hold_fired {
                     overview_hold_fired = true;
-                    app.dispatch(Action::GoOverview);
+                    dispatch_navigation!(Action::GoMainMenu);
                 }
             }
         } else if !encoder_sw_high && next_sw_high {
@@ -1868,13 +2358,163 @@ fn main() -> ! {
                 let held_ms = input_ticks.wrapping_sub(pressed_at);
                 last_button_tick = input_ticks;
                 if held_ms >= OVERVIEW_HOLD_MS {
-                    app.dispatch(Action::GoOverview);
+                    dispatch_navigation!(Action::GoMainMenu);
                 } else if held_ms >= 30 {
-                    app.dispatch(Action::NextControl);
+                    dispatch_navigation!(Action::NextControl);
                 }
             }
         }
         encoder_sw_high = next_sw_high;
+
+        match app.state().profile_request {
+            ProfileRequest::None => {}
+            ProfileRequest::Save(slot) => {
+                let outputs_physically_off = app
+                    .state()
+                    .channels
+                    .iter()
+                    .all(|channel| !channel.physical_enabled);
+                let settings = PersistentSettings::from_state(app.state());
+                let status = if persist_settings_record(
+                    &mut settings_store,
+                    RecordKind::Profile(slot),
+                    settings,
+                    outputs_physically_off,
+                ) {
+                    ProfileStatus::Saved(slot)
+                } else {
+                    ProfileStatus::Failed
+                };
+                app.dispatch(Action::ProfileOperationFinished(status));
+            }
+            ProfileRequest::Load(slot) => {
+                let Some(record) = settings_store.profiles[usize::from(slot)] else {
+                    app.dispatch(Action::ProfileOperationFinished(ProfileStatus::Empty(slot)));
+                    continue;
+                };
+                if execute_global_shutdown(&mut power_driver).is_ok() {
+                    app.dispatch(Action::ApplyProfile(
+                        record.settings,
+                        ProfileStatus::Loaded(slot),
+                    ));
+                } else {
+                    app.dispatch(Action::GlobalShutdownFailed);
+                    app.dispatch(Action::ProfileOperationFinished(ProfileStatus::Failed));
+                }
+            }
+            ProfileRequest::FactoryDefaults => {
+                if execute_global_shutdown(&mut power_driver).is_ok() {
+                    let defaults = AppState::new(app.state().recovery_armed, None);
+                    app.dispatch(Action::ApplyProfile(
+                        PersistentSettings::from_state(&defaults),
+                        ProfileStatus::DefaultsLoaded,
+                    ));
+                } else {
+                    app.dispatch(Action::GlobalShutdownFailed);
+                    app.dispatch(Action::ProfileOperationFinished(ProfileStatus::Failed));
+                }
+            }
+        }
+
+        match app.state().awg_status {
+            AwgStatus::StartRequested => {
+                awg_scheduler.stop();
+                arb_scheduler.stop();
+                if execute_global_shutdown(&mut power_driver).is_ok() {
+                    app.dispatch(Action::GlobalShutdownApplied);
+                    dispatch_with_power_effects!(Action::AwgStartPrepared);
+                } else {
+                    app.dispatch(Action::GlobalShutdownFailed);
+                }
+            }
+            AwgStatus::StopRequested => {
+                awg_scheduler.stop();
+                arb_scheduler.stop();
+                if execute_global_shutdown(&mut power_driver).is_ok() {
+                    app.dispatch(Action::GlobalShutdownApplied);
+                } else {
+                    app.dispatch(Action::GlobalShutdownFailed);
+                }
+            }
+            AwgStatus::Running => match app.state().awg_source {
+                AwgSource::Builtin => {
+                    arb_scheduler.stop();
+                    if let Some(millivolts) =
+                        awg_scheduler.tick(monotonic_awg_tick(), app.state().awg)
+                    {
+                        dispatch_with_power_effects!(Action::AwgSample(millivolts));
+                    }
+                }
+                AwgSource::Arbitrary => {
+                    awg_scheduler.stop();
+                    if let Some(start) = active_arb_start {
+                        let tick = cortex_m::interrupt::free(|cs| {
+                            let buffer = ARB_BUFFER.borrow(cs).borrow();
+                            arb_scheduler.tick(monotonic_awg_tick(), start, &buffer)
+                        });
+                        let status = arb_scheduler.status();
+                        ARB_INDEX.store(u32::from(status.index), Ordering::Relaxed);
+                        ARB_CYCLES.store(status.cycles, Ordering::Relaxed);
+                        ARB_LATE_UPDATES.store(status.late_updates, Ordering::Relaxed);
+                        ARB_SKIPPED_CYCLES.store(status.skipped_cycles, Ordering::Relaxed);
+                        match tick {
+                            Some(ArbTick::Sample(millivolts)) => {
+                                dispatch_with_power_effects!(Action::AwgSample(millivolts));
+                            }
+                            Some(ArbTick::Finished) => {
+                                if execute_global_shutdown(&mut power_driver).is_ok() {
+                                    app.dispatch(Action::GlobalShutdownApplied);
+                                    app.dispatch(Action::AwgStopped);
+                                } else {
+                                    app.dispatch(Action::GlobalShutdownFailed);
+                                }
+                            }
+                            None => {}
+                        }
+                    } else {
+                        app.dispatch(Action::GlobalShutdownFailed);
+                    }
+                }
+            },
+            AwgStatus::Fault => {
+                if awg_scheduler.is_active() {
+                    awg_scheduler.stop();
+                    let _ = execute_global_shutdown(&mut power_driver);
+                }
+                if arb_scheduler.is_active() {
+                    arb_scheduler.stop();
+                    let _ = execute_global_shutdown(&mut power_driver);
+                }
+            }
+            AwgStatus::Stopped => {
+                awg_scheduler.stop();
+                arb_scheduler.stop();
+            }
+            AwgStatus::Starting => {}
+        }
+
+        if let Some(start) = pending_arb_ack {
+            if app.state().awg_status == AwgStatus::Running
+                && app.state().awg_source == AwgSource::Arbitrary
+            {
+                let mut response: String<64> = String::new();
+                write!(
+                    &mut response,
+                    "OK:CH{}_ARB_STARTED_PTS:{}\r\n",
+                    start.channel + 1,
+                    start.count
+                )
+                .ok();
+                queue_usb_response(response.as_bytes());
+                pending_arb_ack = None;
+            } else if matches!(
+                app.state().awg_status,
+                AwgStatus::Fault | AwgStatus::Stopped
+            ) {
+                queue_usb_response(b"ERR:HARDWARE\r\n");
+                pending_arb_ack = None;
+            }
+        }
 
         if temperature_ticks >= 100 {
             temperature_ticks = 0;
@@ -1897,6 +2537,35 @@ fn main() -> ! {
         }
         if measurement_ticks >= 20 {
             measurement_ticks = 0;
+            if app.state().channels[4].physical_enabled {
+                match power_driver.read_ch5_status() {
+                    Ok(status) => {
+                        CH5_TPS_STATUS.store(status, Ordering::Relaxed);
+                        if let Some(fault) = tps55289_status_fault(status) {
+                            if ch5_pending_tps_fault == Some(fault) {
+                                ch5_pending_tps_fault = None;
+                                dispatch_with_power_effects!(Action::ProtectionTrip {
+                                    channel: 4,
+                                    fault,
+                                });
+                            } else {
+                                ch5_pending_tps_fault = Some(fault);
+                            }
+                        } else {
+                            ch5_pending_tps_fault = None;
+                        }
+                    }
+                    Err(_) => {
+                        CH5_TPS_STATUS.store(0xff, Ordering::Relaxed);
+                        dispatch_with_power_effects!(Action::ProtectionTrip {
+                            channel: 4,
+                            fault: benchvolt_poc::app::Fault::Hardware,
+                        });
+                    }
+                }
+            } else {
+                ch5_pending_tps_fault = None;
+            }
             let measurements = [
                 read_channel_measurement(&mut adc, &mut ch1_voltage, &mut ch1_current, 1, 1),
                 read_channel_measurement(&mut adc, &mut ch2_voltage, &mut ch2_current, 1, 1),
@@ -1910,19 +2579,37 @@ fn main() -> ! {
                 accumulator.push(measurement);
             }
             sink_accumulator.push(sink_measurement);
+            if app.state().awg_status == AwgStatus::Running {
+                awg_load_accumulator
+                    .push(measurements[usize::from(app.state().active_awg_channel())]);
+            } else {
+                awg_load_accumulator.reset();
+                awg_load_ticks = 0;
+            }
             for channel in 0..5u8 {
-                let output = &app.state().channels[usize::from(channel)];
+                let protection_output = protection_output(app.state(), channel);
                 let measurement = measurements[usize::from(channel)];
-                let fault = protection_monitors[usize::from(channel)].observe(output, measurement);
+                let voltage_tracking = !(app.state().awg_status == AwgStatus::Running
+                    && channel == app.state().active_awg_channel());
+                let fault = protection_monitors[usize::from(channel)]
+                    .observe_with_voltage_tracking(
+                        &protection_output,
+                        measurement,
+                        voltage_tracking,
+                    );
                 if let Some(fault) = fault {
                     dispatch_with_power_effects!(Action::ProtectionTrip { channel, fault });
                 }
             }
             for channel in 3..=4u8 {
-                dispatch_with_power_effects!(Action::RegulateChannel {
-                    channel,
-                    measurement: measurements[usize::from(channel)],
-                });
+                if app.state().awg_status != AwgStatus::Running
+                    || channel != app.state().active_awg_channel()
+                {
+                    dispatch_with_power_effects!(Action::RegulateChannel {
+                        channel,
+                        measurement: measurements[usize::from(channel)],
+                    });
+                }
             }
         }
         if display_measurement_ticks >= 200 {
@@ -1935,6 +2622,10 @@ fn main() -> ! {
                 channel_accumulators[4].take(),
             ]));
             app.dispatch(Action::SinkMeasurement(sink_accumulator.take()));
+        }
+        if awg_load_ticks >= 1_000 {
+            awg_load_ticks = 0;
+            app.dispatch(Action::AwgLoadMeasurement(awg_load_accumulator.take()));
         }
 
         let current_settings = PersistentSettings::from_state(app.state());

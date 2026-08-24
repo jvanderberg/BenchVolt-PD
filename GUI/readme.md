@@ -103,6 +103,12 @@ Output: `dist/BenchVolt-PD`
 
 - SCPI-style commands over USB CDC, e.g. `SOUR:VOLT:CH4 5.00`,
   `OUTP:CH1:STAT 1`, `MEAS:VOLT:CH2?`.
+- ARB uploads retain the original `ARB:DATA` / `ARB:START` protocol. Generated
+  waveforms use multiplier `0.5` with the Rust firmware's 2 kHz scheduler;
+  custom CSV files may specify `MULTIPLIER=0.5` or a legacy positive integer.
+  The generator exposes the scheduler ceiling (1 kHz for a two-point square,
+  500 Hz for a four-point shape). These are command-rate limits, not guaranteed
+  analog bandwidth; usable limits depend on channel, voltage swing, and load.
 - PDO list query (`SOUR:PD:LIST?`) streams data between
   `UI_PDO_LIST_START` / `UI_PDO_LIST_END` markers.
 - Firmware bootloader protocol uses `CMD_START` / `CMD_DATA` /

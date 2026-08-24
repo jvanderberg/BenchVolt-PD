@@ -1,12 +1,114 @@
 use reducto::{Reducer, VersionedState};
 
+pub const HELP_MAX_SCROLL: u8 = 28;
+pub const HELP_SCROLL_STEP: u8 = 5;
+
 const VOLTAGE_SLEW_STEP_MV: u16 = 200;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum Screen {
+    MainMenu,
     Overview,
     Channel(u8),
     UsbPdInput,
+    Awg,
+    Settings,
+    ProfileSave,
+    ProfileLoad,
+    System,
+    Help,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum TemperatureUnit {
+    Celsius,
+    Fahrenheit,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum AwgWaveform {
+    Square,
+    Triangle,
+    Ramp,
+    Sine,
+}
+
+impl AwgWaveform {
+    pub const fn max_frequency_millihz(self) -> u32 {
+        match self {
+            Self::Square => 125_000,
+            Self::Triangle | Self::Ramp | Self::Sine => 120_000,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum AwgStatus {
+    Stopped,
+    StartRequested,
+    Starting,
+    Running,
+    StopRequested,
+    Fault,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum AwgSource {
+    Builtin,
+    Arbitrary,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ArbRunConfig {
+    pub channel: u8,
+    pub initial_mv: u16,
+    pub low_mv: u16,
+    pub high_mv: u16,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AwgConfig {
+    pub channel: u8,
+    pub waveform: AwgWaveform,
+    pub frequency_millihz: u32,
+    pub duty_percent: u8,
+    pub low_mv: u16,
+    pub high_mv: u16,
+}
+
+impl AwgConfig {
+    pub const fn default() -> Self {
+        Self {
+            channel: 3,
+            waveform: AwgWaveform::Square,
+            frequency_millihz: 1_000,
+            duty_percent: 50,
+            low_mv: 1_000,
+            high_mv: 5_000,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum ProfileRequest {
+    None,
+    Save(u8),
+    Load(u8),
+    FactoryDefaults,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum ProfileStatus {
+    Idle,
+    ConfirmSave(u8),
+    ConfirmLoad(u8),
+    ConfirmDefaults,
+    Working,
+    Saved(u8),
+    Loaded(u8),
+    DefaultsLoaded,
+    Empty(u8),
+    Failed,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -44,6 +146,13 @@ pub enum RegulationMode {
 impl Screen {
     fn next(self) -> Self {
         match self {
+            Self::MainMenu
+            | Self::Awg
+            | Self::Settings
+            | Self::ProfileSave
+            | Self::ProfileLoad
+            | Self::System => self,
+            Self::Help => self,
             Self::Overview => Self::Channel(0),
             Self::Channel(index) if index < 4 => Self::Channel(index + 1),
             Self::Channel(_) => Self::UsbPdInput,
@@ -53,6 +162,13 @@ impl Screen {
 
     fn previous(self) -> Self {
         match self {
+            Self::MainMenu
+            | Self::Awg
+            | Self::Settings
+            | Self::ProfileSave
+            | Self::ProfileLoad
+            | Self::System => self,
+            Self::Help => self,
             Self::Overview => Self::UsbPdInput,
             Self::Channel(index) if index > 0 => Self::Channel(index - 1),
             Self::Channel(_) => Self::Overview,
@@ -61,7 +177,7 @@ impl Screen {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(dead_code)]
 pub enum Fault {
     None,
@@ -89,6 +205,21 @@ impl Measurement {
     const INVALID: Self = Self {
         millivolts: 0,
         milliamps: 0,
+        valid: false,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoadMeasurement {
+    pub milliamps_rms: u16,
+    pub milliwatts_average: u32,
+    pub valid: bool,
+}
+
+impl LoadMeasurement {
+    pub const INVALID: Self = Self {
+        milliamps_rms: 0,
+        milliwatts_average: 0,
         valid: false,
     };
 }
@@ -136,6 +267,18 @@ pub struct AppState {
     pub temp_valid: bool,
     pub recovery_armed: bool,
     pub reboot_requested: bool,
+    pub temperature_unit: TemperatureUnit,
+    pub menu_selection: u8,
+    pub profile_request: ProfileRequest,
+    pub profile_status: ProfileStatus,
+    pub profile_present: [bool; 3],
+    pub awg: AwgConfig,
+    pub awg_source: AwgSource,
+    pub arb_run: ArbRunConfig,
+    pub awg_status: AwgStatus,
+    pub awg_editing: bool,
+    pub awg_load: LoadMeasurement,
+    pub help_scroll: u8,
 }
 
 impl AppState {
@@ -146,7 +289,7 @@ impl AppState {
         };
         Self {
             version: 0,
-            screen: Screen::Overview,
+            screen: Screen::MainMenu,
             focus: ControlFocus::None,
             channels: [
                 ChannelSnapshot::disabled(1_800),
@@ -161,6 +304,44 @@ impl AppState {
             temp_valid,
             recovery_armed,
             reboot_requested: false,
+            temperature_unit: TemperatureUnit::Celsius,
+            menu_selection: 0,
+            profile_request: ProfileRequest::None,
+            profile_status: ProfileStatus::Idle,
+            profile_present: [false; 3],
+            awg: AwgConfig::default(),
+            awg_source: AwgSource::Builtin,
+            arb_run: ArbRunConfig {
+                channel: 3,
+                initial_mv: 500,
+                low_mv: 500,
+                high_mv: 500,
+            },
+            awg_status: AwgStatus::Stopped,
+            awg_editing: false,
+            awg_load: LoadMeasurement::INVALID,
+            help_scroll: 0,
+        }
+    }
+
+    pub const fn active_awg_channel(&self) -> u8 {
+        match self.awg_source {
+            AwgSource::Builtin => self.awg.channel,
+            AwgSource::Arbitrary => self.arb_run.channel,
+        }
+    }
+
+    pub const fn active_awg_initial_mv(&self) -> u16 {
+        match self.awg_source {
+            AwgSource::Builtin => self.awg.low_mv,
+            AwgSource::Arbitrary => self.arb_run.initial_mv,
+        }
+    }
+
+    pub const fn active_awg_bounds(&self) -> (u16, u16) {
+        match self.awg_source {
+            AwgSource::Builtin => (self.awg.low_mv, self.awg.high_mv),
+            AwgSource::Arbitrary => (self.arb_run.low_mv, self.arb_run.high_mv),
         }
     }
 }
@@ -176,7 +357,25 @@ pub enum Action {
     NextScreen,
     PreviousScreen,
     GoOverview,
+    GoMainMenu,
     RequestReboot,
+    NavigateMenu(i8),
+    ActivateMenu,
+    ProfileOperationFinished(ProfileStatus),
+    ApplyProfile(crate::settings::PersistentSettings, ProfileStatus),
+    GlobalShutdownApplied,
+    GlobalShutdownFailed,
+    AdjustAwg(i8),
+    RequestArbStart {
+        channel: u8,
+        initial_mv: u16,
+        low_mv: u16,
+        high_mv: u16,
+    },
+    AwgStartPrepared,
+    AwgStopped,
+    AwgSample(u16),
+    AwgLoadMeasurement(LoadMeasurement),
     NextControl,
     AdjustFocused(i8),
     ToggleOutputRequested {
@@ -231,7 +430,7 @@ impl Reducer for AppReducer {
 
     fn reduce(state: &Self::State, action: Self::Action) -> Self::State {
         let mut next = *state;
-        let changed = match action {
+        let mut changed = match action {
             Action::NextScreen => {
                 next.screen = state.screen.next();
                 next.focus = ControlFocus::None;
@@ -252,12 +451,449 @@ impl Reducer for AppReducer {
                 next.focus = ControlFocus::None;
                 true
             }
+            Action::GoMainMenu if state.screen == Screen::MainMenu => false,
+            Action::GoMainMenu => {
+                next.screen = Screen::MainMenu;
+                next.focus = ControlFocus::None;
+                next.menu_selection = 0;
+                next.profile_status = ProfileStatus::Idle;
+                if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
+                    next.awg_status = AwgStatus::StopRequested;
+                }
+                true
+            }
+            Action::NavigateMenu(direction) => {
+                if state.screen == Screen::Help {
+                    let adjusted = if direction.is_positive() {
+                        state
+                            .help_scroll
+                            .saturating_add(HELP_SCROLL_STEP)
+                            .min(HELP_MAX_SCROLL)
+                    } else {
+                        state.help_scroll.saturating_sub(HELP_SCROLL_STEP)
+                    };
+                    if adjusted == state.help_scroll {
+                        false
+                    } else {
+                        next.help_scroll = adjusted;
+                        true
+                    }
+                } else {
+                    let count = match state.screen {
+                        Screen::MainMenu => 5,
+                        Screen::Settings => 5,
+                        Screen::ProfileSave | Screen::ProfileLoad => 4,
+                        Screen::Awg => 8,
+                        Screen::System | Screen::Help => 1,
+                        _ => 0,
+                    };
+                    if direction == 0 || count == 0 {
+                        false
+                    } else {
+                        let selection = if direction < 0 {
+                            state.menu_selection.checked_sub(1).unwrap_or(count - 1)
+                        } else if state.menu_selection + 1 >= count {
+                            0
+                        } else {
+                            state.menu_selection + 1
+                        };
+                        if selection == state.menu_selection {
+                            false
+                        } else {
+                            next.menu_selection = selection;
+                            next.profile_status = ProfileStatus::Idle;
+                            true
+                        }
+                    }
+                }
+            }
+            Action::ActivateMenu => match state.screen {
+                Screen::MainMenu => {
+                    next.screen = match state.menu_selection {
+                        0 => Screen::Overview,
+                        1 => Screen::Awg,
+                        2 => Screen::Settings,
+                        3 => Screen::System,
+                        _ => Screen::Help,
+                    };
+                    next.menu_selection = 0;
+                    next.help_scroll = 0;
+                    if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
+                        next.awg_status = AwgStatus::StopRequested;
+                    }
+                    true
+                }
+                Screen::Settings => match state.menu_selection {
+                    0 => {
+                        next.temperature_unit = match state.temperature_unit {
+                            TemperatureUnit::Celsius => TemperatureUnit::Fahrenheit,
+                            TemperatureUnit::Fahrenheit => TemperatureUnit::Celsius,
+                        };
+                        true
+                    }
+                    1 => {
+                        next.screen = Screen::ProfileSave;
+                        next.menu_selection = 0;
+                        true
+                    }
+                    2 => {
+                        next.screen = Screen::ProfileLoad;
+                        next.menu_selection = 0;
+                        true
+                    }
+                    3 if state.profile_request == ProfileRequest::None => {
+                        if state.profile_status == ProfileStatus::ConfirmDefaults {
+                            next.profile_request = ProfileRequest::FactoryDefaults;
+                            next.profile_status = ProfileStatus::Working;
+                        } else {
+                            next.profile_status = ProfileStatus::ConfirmDefaults;
+                        }
+                        true
+                    }
+                    4 => {
+                        next.screen = Screen::MainMenu;
+                        next.menu_selection = 0;
+                        true
+                    }
+                    _ => false,
+                },
+                Screen::ProfileSave => {
+                    if state.menu_selection < 3 && state.profile_request == ProfileRequest::None {
+                        let slot = state.menu_selection;
+                        if state.profile_present[usize::from(slot)]
+                            && state.profile_status != ProfileStatus::ConfirmSave(slot)
+                        {
+                            next.profile_status = ProfileStatus::ConfirmSave(slot);
+                        } else {
+                            next.profile_request = ProfileRequest::Save(slot);
+                            next.profile_status = ProfileStatus::Working;
+                        }
+                        true
+                    } else if state.menu_selection == 3 {
+                        next.screen = Screen::Settings;
+                        next.menu_selection = 1;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Screen::ProfileLoad => {
+                    if state.menu_selection < 3 && state.profile_request == ProfileRequest::None {
+                        let slot = state.menu_selection;
+                        if !state.profile_present[usize::from(slot)] {
+                            next.profile_status = ProfileStatus::Empty(slot);
+                        } else if state.profile_status == ProfileStatus::ConfirmLoad(slot) {
+                            next.profile_request = ProfileRequest::Load(slot);
+                            next.profile_status = ProfileStatus::Working;
+                        } else {
+                            next.profile_status = ProfileStatus::ConfirmLoad(slot);
+                        }
+                        true
+                    } else if state.menu_selection == 3 {
+                        next.screen = Screen::Settings;
+                        next.menu_selection = 2;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Screen::Awg => match state.menu_selection {
+                    0 if matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) => {
+                        next.awg_editing = !state.awg_editing;
+                        true
+                    }
+                    1..=2 | 4..=5
+                        if matches!(
+                            state.awg_status,
+                            AwgStatus::Stopped | AwgStatus::Running | AwgStatus::Fault
+                        ) =>
+                    {
+                        next.awg_editing = !state.awg_editing;
+                        true
+                    }
+                    3 if state.awg.waveform == AwgWaveform::Square
+                        && matches!(
+                            state.awg_status,
+                            AwgStatus::Stopped | AwgStatus::Running | AwgStatus::Fault
+                        ) =>
+                    {
+                        next.awg_editing = !state.awg_editing;
+                        true
+                    }
+                    6 => match state.awg_status {
+                        AwgStatus::Stopped => {
+                            next.awg_source = AwgSource::Builtin;
+                            next.awg_status = AwgStatus::StartRequested;
+                            true
+                        }
+                        AwgStatus::Fault => {
+                            // First acknowledge a fault with a confirmed global
+                            // shutdown. A later click is the explicit retry.
+                            next.awg_status = AwgStatus::StopRequested;
+                            true
+                        }
+                        AwgStatus::Running => {
+                            next.awg_status = AwgStatus::StopRequested;
+                            true
+                        }
+                        _ => false,
+                    },
+                    7 => {
+                        next.screen = Screen::MainMenu;
+                        next.menu_selection = 0;
+                        next.awg_editing = false;
+                        if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
+                            next.awg_status = AwgStatus::StopRequested;
+                        }
+                        true
+                    }
+                    _ => false,
+                },
+                Screen::System | Screen::Help => {
+                    next.screen = Screen::MainMenu;
+                    next.menu_selection = 0;
+                    true
+                }
+                _ => false,
+            },
+            Action::ProfileOperationFinished(status) => {
+                next.profile_request = ProfileRequest::None;
+                next.profile_status = status;
+                if let ProfileStatus::Saved(slot) = status {
+                    if let Some(present) = next.profile_present.get_mut(usize::from(slot)) {
+                        *present = true;
+                    }
+                }
+                true
+            }
+            Action::ApplyProfile(settings, status) => {
+                for channel in &mut next.channels {
+                    channel.operation = channel.operation.wrapping_add(1);
+                    channel.requested_enabled = false;
+                    channel.physical_enabled = false;
+                    channel.transition = OutputTransition::Stable;
+                    channel.fault = Fault::None;
+                }
+                settings.apply_to(&mut next);
+                next.profile_request = ProfileRequest::None;
+                next.profile_status = status;
+                true
+            }
+            Action::GlobalShutdownApplied => {
+                let mut any_changed = false;
+                for channel in &mut next.channels {
+                    let changed = channel.requested_enabled
+                        || channel.physical_enabled
+                        || channel.transition != OutputTransition::Stable;
+                    any_changed |= changed;
+                    if changed {
+                        channel.operation = channel.operation.wrapping_add(1);
+                        channel.requested_enabled = false;
+                        channel.physical_enabled = false;
+                        channel.transition = OutputTransition::Stable;
+                    }
+                }
+                if matches!(state.awg_status, AwgStatus::StopRequested) {
+                    next.awg_status = AwgStatus::Stopped;
+                    any_changed = true;
+                }
+                any_changed
+            }
+            Action::GlobalShutdownFailed => {
+                for channel in &mut next.channels {
+                    channel.operation = channel.operation.wrapping_add(1);
+                    channel.requested_enabled = false;
+                    channel.physical_enabled = false;
+                    channel.transition = OutputTransition::Stable;
+                    channel.fault = Fault::Hardware;
+                }
+                next.awg_status = AwgStatus::Fault;
+                true
+            }
+            Action::AdjustAwg(direction) => {
+                if direction == 0
+                    || !state.awg_editing
+                    || !matches!(
+                        state.awg_status,
+                        AwgStatus::Stopped | AwgStatus::Running | AwgStatus::Fault
+                    )
+                {
+                    false
+                } else {
+                    match state.menu_selection {
+                        0 if matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) => {
+                            next.awg.channel = if state.awg.channel == 3 { 4 } else { 3 };
+                            let (minimum, maximum) = if next.awg.channel == 3 {
+                                (500, 5_000)
+                            } else {
+                                (800, 22_000)
+                            };
+                            next.awg.low_mv = next.awg.low_mv.clamp(minimum, maximum);
+                            next.awg.high_mv = next.awg.high_mv.clamp(next.awg.low_mv, maximum);
+                            true
+                        }
+                        1 => {
+                            next.awg.waveform = match (state.awg.waveform, direction < 0) {
+                                (AwgWaveform::Square, true) => AwgWaveform::Sine,
+                                (AwgWaveform::Square, false) => AwgWaveform::Triangle,
+                                (AwgWaveform::Triangle, true) => AwgWaveform::Square,
+                                (AwgWaveform::Triangle, false) => AwgWaveform::Ramp,
+                                (AwgWaveform::Ramp, true) => AwgWaveform::Triangle,
+                                (AwgWaveform::Ramp, false) => AwgWaveform::Sine,
+                                (AwgWaveform::Sine, true) => AwgWaveform::Ramp,
+                                (AwgWaveform::Sine, false) => AwgWaveform::Square,
+                            };
+                            next.awg.frequency_millihz = next
+                                .awg
+                                .frequency_millihz
+                                .min(next.awg.waveform.max_frequency_millihz());
+                            true
+                        }
+                        2 => {
+                            let maximum = state.awg.waveform.max_frequency_millihz();
+                            let adjusted =
+                                i64::from(state.awg.frequency_millihz) + i64::from(direction) * 100;
+                            let adjusted = adjusted.clamp(100, i64::from(maximum)) as u32;
+                            if adjusted == state.awg.frequency_millihz {
+                                false
+                            } else {
+                                next.awg.frequency_millihz = adjusted;
+                                true
+                            }
+                        }
+                        3 if state.awg.waveform == AwgWaveform::Square => {
+                            let adjusted = i16::from(state.awg.duty_percent) + i16::from(direction);
+                            let adjusted = adjusted.clamp(1, 99) as u8;
+                            if adjusted == state.awg.duty_percent {
+                                false
+                            } else {
+                                next.awg.duty_percent = adjusted;
+                                true
+                            }
+                        }
+                        4 => {
+                            let minimum = if state.awg.channel == 3 { 500 } else { 800 };
+                            let adjusted = i32::from(state.awg.low_mv) + i32::from(direction) * 10;
+                            let adjusted =
+                                adjusted.clamp(minimum, i32::from(state.awg.high_mv)) as u16;
+                            if adjusted == state.awg.low_mv {
+                                false
+                            } else {
+                                next.awg.low_mv = adjusted;
+                                true
+                            }
+                        }
+                        5 => {
+                            let maximum = if state.awg.channel == 3 {
+                                5_000
+                            } else {
+                                22_000
+                            };
+                            let adjusted = i32::from(state.awg.high_mv) + i32::from(direction) * 10;
+                            let adjusted =
+                                adjusted.clamp(i32::from(state.awg.low_mv), maximum) as u16;
+                            if adjusted == state.awg.high_mv {
+                                false
+                            } else {
+                                next.awg.high_mv = adjusted;
+                                true
+                            }
+                        }
+                        _ => false,
+                    }
+                }
+            }
+            Action::RequestArbStart {
+                channel,
+                initial_mv,
+                low_mv,
+                high_mv,
+            } => {
+                let (minimum, maximum) = if channel == 3 {
+                    (500, 5_000)
+                } else if channel == 4 {
+                    (800, 22_000)
+                } else {
+                    return next;
+                };
+                if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault)
+                    || !(minimum..=maximum).contains(&low_mv)
+                    || !(low_mv..=maximum).contains(&high_mv)
+                    || !(low_mv..=high_mv).contains(&initial_mv)
+                {
+                    false
+                } else {
+                    next.awg_source = AwgSource::Arbitrary;
+                    next.arb_run = ArbRunConfig {
+                        channel,
+                        initial_mv,
+                        low_mv,
+                        high_mv,
+                    };
+                    next.awg_editing = false;
+                    next.awg_status = AwgStatus::StartRequested;
+                    true
+                }
+            }
+            Action::AwgStartPrepared => {
+                if state.awg_status != AwgStatus::StartRequested {
+                    false
+                } else {
+                    let output = &mut next.channels[usize::from(state.active_awg_channel())];
+                    output.operation = output.operation.wrapping_add(1);
+                    output.drive_mv = state.active_awg_initial_mv();
+                    output.requested_enabled = true;
+                    output.fault = Fault::None;
+                    output.transition = OutputTransition::Enabling(output.operation);
+                    next.awg_status = AwgStatus::Starting;
+                    true
+                }
+            }
+            Action::AwgStopped => {
+                if state.awg_status == AwgStatus::Stopped {
+                    false
+                } else {
+                    next.awg_status = AwgStatus::Stopped;
+                    true
+                }
+            }
+            Action::AwgSample(millivolts) => {
+                let (low_mv, high_mv) = state.active_awg_bounds();
+                if state.awg_status != AwgStatus::Running
+                    || !(low_mv..=high_mv).contains(&millivolts)
+                {
+                    false
+                } else {
+                    let output = &mut next.channels[usize::from(state.active_awg_channel())];
+                    if output.drive_mv == millivolts {
+                        false
+                    } else {
+                        output.drive_mv = millivolts;
+                        true
+                    }
+                }
+            }
+            Action::AwgLoadMeasurement(_measurement) if state.awg_status != AwgStatus::Running => {
+                false
+            }
+            Action::AwgLoadMeasurement(measurement) if state.awg_load == measurement => false,
+            Action::AwgLoadMeasurement(measurement) => {
+                next.awg_load = measurement;
+                true
+            }
             Action::RequestReboot if state.reboot_requested => false,
             Action::RequestReboot => {
                 next.reboot_requested = true;
                 true
             }
             Action::NextControl => match state.screen {
+                Screen::MainMenu
+                | Screen::Awg
+                | Screen::Settings
+                | Screen::ProfileSave
+                | Screen::ProfileLoad
+                | Screen::System => return Self::reduce(state, Action::ActivateMenu),
+                Screen::Help => return Self::reduce(state, Action::ActivateMenu),
                 Screen::Channel(channel) => {
                     next.focus = state.focus.next(channel);
                     true
@@ -282,7 +918,9 @@ impl Reducer for AppReducer {
                 }
             },
             Action::AdjustFocused(direction) => {
-                if direction == 0 {
+                if direction == 0
+                    || !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault)
+                {
                     false
                 } else if state.screen == Screen::UsbPdInput
                     && state.focus == ControlFocus::CurrentLimit
@@ -348,23 +986,28 @@ impl Reducer for AppReducer {
                 }
             }
             Action::ToggleOutputRequested { channel } => {
-                let Some(output) = next.channels.get_mut(usize::from(channel)) else {
-                    return next;
-                };
-                if output.transition != OutputTransition::Stable {
-                    false
-                } else {
-                    let enabled = !output.requested_enabled;
-                    output.operation = output.operation.wrapping_add(1);
-                    let operation = output.operation;
-                    output.requested_enabled = enabled;
-                    if enabled {
-                        output.fault = Fault::None;
-                        output.transition = OutputTransition::Enabling(operation);
-                    } else {
-                        output.transition = OutputTransition::Disabling(operation);
-                    }
+                if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
+                    next.awg_status = AwgStatus::StopRequested;
                     true
+                } else {
+                    let Some(output) = next.channels.get_mut(usize::from(channel)) else {
+                        return next;
+                    };
+                    if output.transition != OutputTransition::Stable {
+                        false
+                    } else {
+                        let enabled = !output.requested_enabled;
+                        output.operation = output.operation.wrapping_add(1);
+                        let operation = output.operation;
+                        output.requested_enabled = enabled;
+                        if enabled {
+                            output.fault = Fault::None;
+                            output.transition = OutputTransition::Enabling(operation);
+                        } else {
+                            output.transition = OutputTransition::Disabling(operation);
+                        }
+                        true
+                    }
                 }
             }
             Action::SetCurrentLimit { channel, milliamps } => {
@@ -500,6 +1143,12 @@ impl Reducer for AppReducer {
                 } else {
                     output.physical_enabled = enabled;
                     output.transition = OutputTransition::Stable;
+                    if enabled
+                        && state.awg_status == AwgStatus::Starting
+                        && channel == state.active_awg_channel()
+                    {
+                        next.awg_status = AwgStatus::Running;
+                    }
                     true
                 }
             }
@@ -523,6 +1172,11 @@ impl Reducer for AppReducer {
                     output.physical_enabled = false;
                     output.transition = OutputTransition::Stable;
                     output.fault = fault;
+                    if channel == state.active_awg_channel()
+                        && !matches!(state.awg_status, AwgStatus::Stopped)
+                    {
+                        next.awg_status = AwgStatus::Fault;
+                    }
                     true
                 }
             }
@@ -542,6 +1196,11 @@ impl Reducer for AppReducer {
                     output.requested_enabled = false;
                     output.fault = fault;
                     output.transition = OutputTransition::Disabling(operation);
+                    if channel == state.active_awg_channel()
+                        && !matches!(state.awg_status, AwgStatus::Stopped)
+                    {
+                        next.awg_status = AwgStatus::Fault;
+                    }
                     true
                 }
             }
@@ -555,6 +1214,11 @@ impl Reducer for AppReducer {
                 output.physical_enabled = false;
                 output.transition = OutputTransition::Stable;
                 output.fault = fault;
+                if channel == state.active_awg_channel()
+                    && !matches!(state.awg_status, AwgStatus::Stopped)
+                {
+                    next.awg_status = AwgStatus::Fault;
+                }
                 true
             }
             Action::Temperature(Some(raw))
@@ -594,9 +1258,227 @@ impl Reducer for AppReducer {
             }
         };
 
+        if next.awg_status != AwgStatus::Running && next.awg_load.valid {
+            next.awg_load = LoadMeasurement::INVALID;
+            changed = true;
+        }
+
         if changed {
             next.version = state.version.wrapping_add(1);
         }
         next
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::PersistentSettings;
+
+    #[test]
+    fn main_menu_routes_without_enabling_hardware() {
+        let state = AppState::new(true, Some(25 * 16));
+        assert!(state.screen == Screen::MainMenu);
+        let dc = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert!(dc.screen == Screen::Overview);
+        assert!(dc.channels.iter().all(|channel| !channel.requested_enabled));
+
+        let mut state = state;
+        state.menu_selection = 1;
+        let awg = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert!(awg.screen == Screen::Awg);
+        assert!(awg
+            .channels
+            .iter()
+            .all(|channel| !channel.requested_enabled));
+    }
+
+    #[test]
+    fn help_scroll_moves_five_lines_and_clamps_at_both_ends() {
+        let mut state = AppState::new(true, None);
+        state.screen = Screen::Help;
+
+        state = AppReducer::reduce(&state, Action::NavigateMenu(1));
+        assert_eq!(state.help_scroll, 5);
+        state = AppReducer::reduce(&state, Action::NavigateMenu(12));
+        assert_eq!(state.help_scroll, 10);
+        state.help_scroll = 25;
+        state = AppReducer::reduce(&state, Action::NavigateMenu(1));
+        assert_eq!(state.help_scroll, HELP_MAX_SCROLL);
+        state = AppReducer::reduce(&state, Action::NavigateMenu(-1));
+        assert_eq!(state.help_scroll, HELP_MAX_SCROLL - HELP_SCROLL_STEP);
+        state.help_scroll = 0;
+        state = AppReducer::reduce(&state, Action::NavigateMenu(-1));
+        assert_eq!(state.help_scroll, 0);
+    }
+
+    #[test]
+    fn applying_a_profile_can_never_restore_energized_state() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        for channel in &mut state.channels {
+            channel.requested_enabled = true;
+            channel.physical_enabled = true;
+        }
+        let mut configured = state;
+        configured.channels[3].setpoint_mv = 2_400;
+        configured.channels[4].setpoint_mv = 8_000;
+        configured.temperature_unit = TemperatureUnit::Fahrenheit;
+        let settings = PersistentSettings::from_state(&configured);
+
+        let loaded = AppReducer::reduce(
+            &state,
+            Action::ApplyProfile(settings, ProfileStatus::Loaded(0)),
+        );
+        assert!(loaded.channels.iter().all(|channel| {
+            !channel.requested_enabled
+                && !channel.physical_enabled
+                && channel.transition == OutputTransition::Stable
+        }));
+        assert_eq!(loaded.channels[3].setpoint_mv, 2_400);
+        assert_eq!(loaded.channels[4].setpoint_mv, 8_000);
+        assert!(loaded.temperature_unit == TemperatureUnit::Fahrenheit);
+    }
+
+    #[test]
+    fn destructive_profile_actions_require_confirmation() {
+        let mut state = AppState::new(true, None);
+        state.screen = Screen::ProfileLoad;
+        state.profile_present[0] = true;
+        let confirm = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert!(confirm.profile_status == ProfileStatus::ConfirmLoad(0));
+        assert!(confirm.profile_request == ProfileRequest::None);
+        let requested = AppReducer::reduce(&confirm, Action::ActivateMenu);
+        assert!(requested.profile_request == ProfileRequest::Load(0));
+
+        let mut state = AppState::new(true, None);
+        state.screen = Screen::Settings;
+        state.menu_selection = 3;
+        let confirm = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert!(confirm.profile_status == ProfileStatus::ConfirmDefaults);
+        assert!(confirm.profile_request == ProfileRequest::None);
+        let requested = AppReducer::reduce(&confirm, Action::ActivateMenu);
+        assert!(requested.profile_request == ProfileRequest::FactoryDefaults);
+    }
+
+    #[test]
+    fn awg_configuration_and_start_are_pure_requested_state() {
+        let mut state = AppState::new(true, None);
+        state.screen = Screen::Awg;
+        state = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert!(state.awg_editing);
+        state = AppReducer::reduce(&state, Action::AdjustAwg(1));
+        assert_eq!(state.awg.channel, 4);
+        assert!(state
+            .channels
+            .iter()
+            .all(|channel| !channel.requested_enabled));
+
+        state.awg_editing = false;
+        state.menu_selection = 6;
+        state = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert!(state.awg_status == AwgStatus::StartRequested);
+        assert!(state
+            .channels
+            .iter()
+            .all(|channel| !channel.requested_enabled));
+
+        state = AppReducer::reduce(&state, Action::AwgStartPrepared);
+        let operation = state.channels[4].operation;
+        assert!(state.awg_status == AwgStatus::Starting);
+        assert!(state.channels[4].transition == OutputTransition::Enabling(operation));
+        state = AppReducer::reduce(
+            &state,
+            Action::OutputApplied {
+                channel: 4,
+                operation,
+                enabled: true,
+            },
+        );
+        assert!(state.awg_status == AwgStatus::Running);
+        state = AppReducer::reduce(&state, Action::AwgSample(2_000));
+        assert_eq!(state.channels[4].drive_mv, 2_000);
+    }
+
+    #[test]
+    fn running_awg_accepts_live_parameter_edits_but_keeps_channel_ownership() {
+        let mut state = AppState::new(true, None);
+        state.screen = Screen::Awg;
+        state.awg_status = AwgStatus::Running;
+        state.awg_editing = true;
+        state.menu_selection = 2;
+        let adjusted = AppReducer::reduce(&state, Action::AdjustAwg(16));
+        assert_eq!(adjusted.awg.frequency_millihz, 2_600);
+
+        state.menu_selection = 0;
+        let unchanged = AppReducer::reduce(&state, Action::AdjustAwg(1));
+        assert_eq!(unchanged.awg.channel, state.awg.channel);
+        assert_eq!(unchanged.version, state.version);
+    }
+
+    #[test]
+    fn square_duty_is_live_clamped_and_inert_for_other_waveforms() {
+        let mut state = AppState::new(true, None);
+        state.screen = Screen::Awg;
+        state.awg_status = AwgStatus::Running;
+        state.awg_editing = true;
+        state.menu_selection = 3;
+
+        let adjusted = AppReducer::reduce(&state, Action::AdjustAwg(12));
+        assert_eq!(adjusted.awg.duty_percent, 62);
+        let clamped = AppReducer::reduce(&adjusted, Action::AdjustAwg(100));
+        assert_eq!(clamped.awg.duty_percent, 99);
+
+        state.awg.waveform = AwgWaveform::Triangle;
+        let unchanged = AppReducer::reduce(&state, Action::AdjustAwg(1));
+        assert_eq!(unchanged.version, state.version);
+        let click = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert!(click.screen == Screen::Awg);
+        assert_eq!(click.version, state.version);
+    }
+
+    #[test]
+    fn shaped_awg_waveforms_allow_120_hz() {
+        for waveform in [AwgWaveform::Triangle, AwgWaveform::Ramp, AwgWaveform::Sine] {
+            assert_eq!(waveform.max_frequency_millihz(), 120_000);
+        }
+        assert_eq!(AwgWaveform::Square.max_frequency_millihz(), 125_000);
+    }
+
+    #[test]
+    fn remote_arb_request_is_pure_and_preserves_builtin_configuration() {
+        let state = AppState::new(true, None);
+        let requested = AppReducer::reduce(
+            &state,
+            Action::RequestArbStart {
+                channel: 4,
+                initial_mv: 900,
+                low_mv: 800,
+                high_mv: 2_000,
+            },
+        );
+        assert!(requested.awg_source == AwgSource::Arbitrary);
+        assert!(requested.awg_status == AwgStatus::StartRequested);
+        assert_eq!(requested.active_awg_channel(), 4);
+        assert_eq!(requested.active_awg_initial_mv(), 900);
+        assert_eq!(requested.active_awg_bounds(), (800, 2_000));
+        assert!(requested.awg == state.awg);
+        assert!(
+            PersistentSettings::from_state(&requested) == PersistentSettings::from_state(&state)
+        );
+        assert!(requested
+            .channels
+            .iter()
+            .all(|channel| !channel.requested_enabled && !channel.physical_enabled));
+
+        let prepared = AppReducer::reduce(&requested, Action::AwgStartPrepared);
+        assert!(prepared.channels[4].requested_enabled);
+        assert_eq!(prepared.channels[4].drive_mv, 900);
+        assert!(!prepared.channels[3].requested_enabled);
+
+        let mut running = prepared;
+        running.awg_status = AwgStatus::Running;
+        let ui_toggle = AppReducer::reduce(&running, Action::ToggleOutputRequested { channel: 0 });
+        assert!(ui_toggle.awg_status == AwgStatus::StopRequested);
+        assert!(!ui_toggle.channels[0].requested_enabled);
     }
 }

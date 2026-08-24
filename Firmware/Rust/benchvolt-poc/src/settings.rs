@@ -1,7 +1,7 @@
-use crate::app::{AppState, RegulationMode};
+use crate::app::{AppState, AwgConfig, AwgSource, AwgWaveform, RegulationMode, TemperatureUnit};
 
-pub const RECORD_SIZE: usize = 32;
-const MAGIC: u32 = 0x4256_5331;
+pub const RECORD_SIZE: usize = 48;
+const MAGIC: u32 = 0x4256_5333;
 const COMMIT: u32 = 0x434f_4d54;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -12,6 +12,8 @@ pub struct PersistentSettings {
     pub ch4_regulation_mode: RegulationMode,
     pub ch5_regulation_mode: RegulationMode,
     pub sink_current_limit_ma: u16,
+    pub temperature_unit: TemperatureUnit,
+    pub awg: AwgConfig,
 }
 
 impl PersistentSettings {
@@ -23,6 +25,8 @@ impl PersistentSettings {
             ch4_regulation_mode: state.channels[3].regulation_mode,
             ch5_regulation_mode: state.channels[4].regulation_mode,
             sink_current_limit_ma: state.sink_current_limit_ma,
+            temperature_unit: state.temperature_unit,
+            awg: state.awg,
         }
     }
 
@@ -37,12 +41,22 @@ impl PersistentSettings {
         state.channels[3].regulation_mode = self.ch4_regulation_mode;
         state.channels[4].regulation_mode = self.ch5_regulation_mode;
         state.sink_current_limit_ma = self.sink_current_limit_ma.min(5_000);
+        state.temperature_unit = self.temperature_unit;
+        state.awg = self.awg;
+        state.awg_source = AwgSource::Builtin;
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum RecordKind {
+    Autosave,
+    Profile(u8),
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct SettingsRecord {
     pub sequence: u32,
+    pub kind: RecordKind,
     pub settings: PersistentSettings,
 }
 
@@ -102,7 +116,13 @@ fn crc32(bytes: &[u8]) -> u32 {
 pub fn encode(record: SettingsRecord) -> [u8; RECORD_SIZE] {
     let mut bytes = [0xff; RECORD_SIZE];
     bytes[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-    bytes[4..8].copy_from_slice(&record.sequence.to_le_bytes());
+    let kind = match record.kind {
+        RecordKind::Autosave => 0,
+        RecordKind::Profile(slot @ 0..=2) => u32::from(slot) + 1,
+        RecordKind::Profile(_) => 0,
+    };
+    let tagged_sequence = (record.sequence & 0x3fff_ffff) | (kind << 30);
+    bytes[4..8].copy_from_slice(&tagged_sequence.to_le_bytes());
     for (index, limit) in record.settings.current_limits_ma.iter().enumerate() {
         let offset = 8 + index * 2;
         bytes[offset..offset + 2].copy_from_slice(&limit.to_le_bytes());
@@ -121,23 +141,54 @@ pub fn encode(record: SettingsRecord) -> [u8; RECORD_SIZE] {
             0
         };
     bytes[20..22].copy_from_slice(&ch5_voltage_and_mode.to_le_bytes());
-    bytes[22..24].copy_from_slice(&record.settings.sink_current_limit_ma.to_le_bytes());
-    let crc = crc32(&bytes[..24]);
-    bytes[24..28].copy_from_slice(&crc.to_le_bytes());
-    bytes[28..32].copy_from_slice(&COMMIT.to_le_bytes());
+    let sink_limit_and_unit = record.settings.sink_current_limit_ma
+        | if record.settings.temperature_unit == TemperatureUnit::Fahrenheit {
+            0x8000
+        } else {
+            0
+        };
+    bytes[22..24].copy_from_slice(&sink_limit_and_unit.to_le_bytes());
+    bytes[24] = record.settings.awg.channel;
+    bytes[25] = match record.settings.awg.waveform {
+        AwgWaveform::Square => 0,
+        AwgWaveform::Triangle => 1,
+        AwgWaveform::Ramp => 2,
+        AwgWaveform::Sine => 3,
+    };
+    bytes[26..30].copy_from_slice(&record.settings.awg.frequency_millihz.to_le_bytes());
+    bytes[30..32].copy_from_slice(&record.settings.awg.low_mv.to_le_bytes());
+    bytes[32..34].copy_from_slice(&record.settings.awg.high_mv.to_le_bytes());
+    bytes[34] = record.settings.awg.duty_percent;
+    let crc = crc32(&bytes[..40]);
+    bytes[40..44].copy_from_slice(&crc.to_le_bytes());
+    bytes[44..48].copy_from_slice(&COMMIT.to_le_bytes());
     bytes
 }
 
 pub fn decode(bytes: &[u8; RECORD_SIZE]) -> Option<SettingsRecord> {
     let word = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-    if word(0) != MAGIC || word(28) != COMMIT || word(24) != crc32(&bytes[..24]) {
+    if word(0) != MAGIC || word(44) != COMMIT || word(40) != crc32(&bytes[..40]) {
         return None;
     }
     let half = |offset| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
     let ch4_voltage_and_mode = half(18);
     let ch5_voltage_and_mode = half(20);
+    let tagged_sequence = word(4);
+    let kind = match tagged_sequence >> 30 {
+        0 => RecordKind::Autosave,
+        value => RecordKind::Profile((value - 1) as u8),
+    };
+    let sink_limit_and_unit = half(22);
+    let waveform = match bytes[25] {
+        0 => AwgWaveform::Square,
+        1 => AwgWaveform::Triangle,
+        2 => AwgWaveform::Ramp,
+        3 => AwgWaveform::Sine,
+        _ => return None,
+    };
     let record = SettingsRecord {
-        sequence: word(4),
+        sequence: tagged_sequence & 0x3fff_ffff,
+        kind,
         settings: PersistentSettings {
             current_limits_ma: core::array::from_fn(|index| half(8 + index * 2)),
             ch4_voltage_mv: ch4_voltage_and_mode & 0x7fff,
@@ -152,7 +203,20 @@ pub fn decode(bytes: &[u8; RECORD_SIZE]) -> Option<SettingsRecord> {
             } else {
                 RegulationMode::Cv
             },
-            sink_current_limit_ma: half(22),
+            sink_current_limit_ma: sink_limit_and_unit & 0x7fff,
+            temperature_unit: if sink_limit_and_unit & 0x8000 != 0 {
+                TemperatureUnit::Fahrenheit
+            } else {
+                TemperatureUnit::Celsius
+            },
+            awg: AwgConfig {
+                channel: bytes[24],
+                waveform,
+                frequency_millihz: word(26),
+                low_mv: half(30),
+                high_mv: half(32),
+                duty_percent: bytes[34],
+            },
         },
     };
     let valid = record
@@ -163,7 +227,24 @@ pub fn decode(bytes: &[u8; RECORD_SIZE]) -> Option<SettingsRecord> {
         && (500..=5_000).contains(&record.settings.ch4_voltage_mv)
         && (800..=22_000).contains(&record.settings.ch5_voltage_mv)
         && record.settings.sink_current_limit_ma <= 5_000;
-    valid.then_some(record)
+    let awg_minimum = if record.settings.awg.channel == 3 {
+        500
+    } else {
+        800
+    };
+    let awg_maximum = if record.settings.awg.channel == 3 {
+        5_000
+    } else {
+        22_000
+    };
+    let awg_max_frequency = record.settings.awg.waveform.max_frequency_millihz();
+    (valid
+        && matches!(record.settings.awg.channel, 3 | 4)
+        && (awg_minimum..=awg_maximum).contains(&record.settings.awg.low_mv)
+        && (record.settings.awg.low_mv..=awg_maximum).contains(&record.settings.awg.high_mv)
+        && (1..=99).contains(&record.settings.awg.duty_percent)
+        && (100..=awg_max_frequency).contains(&record.settings.awg.frequency_millihz))
+    .then_some(record)
 }
 
 #[cfg(test)]
@@ -174,6 +255,7 @@ mod tests {
     fn record_round_trips_and_rejects_torn_or_corrupt_data() {
         let record = SettingsRecord {
             sequence: 42,
+            kind: RecordKind::Profile(1),
             settings: PersistentSettings {
                 current_limits_ma: [100, 200, 300, 400, 500],
                 ch4_voltage_mv: 2_500,
@@ -181,18 +263,52 @@ mod tests {
                 ch4_regulation_mode: RegulationMode::Cc,
                 ch5_regulation_mode: RegulationMode::Cc,
                 sink_current_limit_ma: 4_250,
+                temperature_unit: TemperatureUnit::Fahrenheit,
+                awg: AwgConfig::default(),
             },
         };
         let encoded = encode(record);
         assert!(decode(&encoded) == Some(record));
 
         let mut torn = encoded;
-        torn[28..32].fill(0xff);
+        torn[44..48].fill(0xff);
         assert!(decode(&torn).is_none());
 
         let mut corrupt = encoded;
         corrupt[12] ^= 1;
         assert!(decode(&corrupt).is_none());
+
+        let mut invalid_duty_record = record;
+        invalid_duty_record.settings.awg.duty_percent = 0;
+        assert!(decode(&encode(invalid_duty_record)).is_none());
+    }
+
+    #[test]
+    fn record_kinds_and_temperature_units_are_independent() {
+        for kind in [
+            RecordKind::Autosave,
+            RecordKind::Profile(0),
+            RecordKind::Profile(1),
+            RecordKind::Profile(2),
+        ] {
+            for temperature_unit in [TemperatureUnit::Celsius, TemperatureUnit::Fahrenheit] {
+                let record = SettingsRecord {
+                    sequence: 0x1234,
+                    kind,
+                    settings: PersistentSettings {
+                        current_limits_ma: [10, 20, 30, 40, 50],
+                        ch4_voltage_mv: 3_300,
+                        ch5_voltage_mv: 9_000,
+                        ch4_regulation_mode: RegulationMode::Cv,
+                        ch5_regulation_mode: RegulationMode::Cc,
+                        sink_current_limit_ma: 350,
+                        temperature_unit,
+                        awg: AwgConfig::default(),
+                    },
+                };
+                assert!(decode(&encode(record)) == Some(record));
+            }
+        }
     }
 
     #[test]

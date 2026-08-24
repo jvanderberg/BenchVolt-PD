@@ -428,7 +428,7 @@ void StepwiseUpdateDisplay() {
         case 19: PCBTemperature = read_temp(0);
         case 20:
         	char buffer[16];
-			snprintf(buffer, sizeof(buffer), "Temp:%.2fC", PCBTemperature);
+			snprintf(buffer, sizeof(buffer), "Temp:%.2fF", PCBTemperature * 9.0f / 5.0f + 32.0f);
 			ST7789_WriteString(235, 15, buffer, Font_7x10, WHITE, BLACK);
 			break;
 
@@ -877,7 +877,7 @@ void WriteExtraInfoStepByStep(void)
             break;
 
         case 1:
-            snprintf(buffer, sizeof(buffer), "Temp:%.2fC", PCBTemperature);
+            snprintf(buffer, sizeof(buffer), "Temp:%.2fF", PCBTemperature * 9.0f / 5.0f + 32.0f);
             ST7789_WriteString(235, 15, buffer, Font_7x10, WHITE, BLACK);
             break;
 

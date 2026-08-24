@@ -42,12 +42,45 @@ The existing bootloader is not built or modified by this crate. This
 application links at `0x08008000` and is limited to the 92 KiB application
 partition ending before `0x0801f000`.
 
-CH1–CH5 current limits, CH4/CH5 voltage setpoints, the CH4/CH5 CV/CC modes, and the
-USB-PD input alarm limit are persisted as versioned, CRC-checked append-only records in the
+CH1–CH5 current limits, CH4/CH5 voltage setpoints, the CH4/CH5 CV/CC modes,
+USB-PD input alarm limit, and temperature unit are persisted as versioned,
+CRC-checked append-only records in the
 reserved `0x0801f000..0x0801f7ff` settings page after an edit has remained
 quiet. Torn or corrupt records are ignored. Runtime saves only program a blank
 slot. If the journal fills, page erase/compaction is deferred until every power
-output is physically off. Output states and faults are never persisted.
+output is physically off. Three explicit profile slots store validated snapshots
+of those settings. Loading a profile or Factory Defaults first performs a global
+hardware shutdown. Output states, faults, UI location, and active operation are
+never persisted.
+
+The main menu contains DC Power, AWG, Settings, System, and Help. AWG supports
+CH4/CH5 selection, square/triangle/ramp/sine waveforms, frequency, square-wave
+duty cycle from 1% to 99%, low/high voltage, and Start/Stop. Duty is unavailable
+and electrically inert for non-square waveforms. A field click enters or leaves
+edit mode. Starting AWG
+first globally shuts down every DC output, then enables only the selected
+channel at the low voltage. Leaving AWG, stopping it, a protection trip, or an
+I2C failure shuts the waveform output down. Scheduling uses absolute monotonic
+deadlines and a phase accumulator; late service emits one phase-correct sample
+instead of stale catch-up writes. The local generator runs from a dedicated
+2 kHz scheduler; square waves reach
+125 Hz, and triangle/ramp/interpolated-sine waves reach 120 Hz.
+
+The desktop-compatible arbitrary-waveform interface accepts contiguous chunks
+of up to eight `(centivolts,dwell)` pairs with
+`SOUR:WAVE:CHn:ARB:DATA start,...`, followed by
+`SOUR:WAVE:CHn:ARB:START count,multiplier,repetitions`. Integer multipliers
+retain the original millisecond meaning; multiplier `0.5` selects one 2 kHz
+scheduler tick per dwell unit. Uploads are limited to 1024 validated points and
+the physical range of the selected channel. `DATA` ACKs mean the chunk was
+stored; the final `START` ACK is sent only after global shutdown and verified
+enable of the selected output. Repetition zero runs continuously. Finite
+completion, `OUTP:CHn OFF`, a UI conflict, or any protection/driver fault safely
+disables the waveform output. Remote ARB metadata is operational state and does
+not overwrite the persisted on-device AWG configuration. The Rust extension
+also provides `SOUR:WAVE:CHn:ARB:STOP` and `...:ARB:STAT?`; status reports the
+current point, completed cycles, late updates, and cycles skipped to preserve
+absolute time.
 
 For recovery testing, the POC erases the bootloader CRC metadata page once at
 startup. It continues running normally. On the next reset, the unchanged
@@ -57,12 +90,20 @@ USB commands:
 
 - `*IDN?`
 - `SYST:BUILD?`
+- `SOUR:WAVE:CH4:ARB:DATA ...` / `SOUR:WAVE:CH5:ARB:DATA ...`
+- `SOUR:WAVE:CH4:ARB:START ...` / `SOUR:WAVE:CH5:ARB:START ...`
+- `SOUR:WAVE:CH4:ARB:STOP` / `SOUR:WAVE:CH5:ARB:STOP`
+- `SOUR:WAVE:CH4:ARB:STAT?` / `SOUR:WAVE:CH5:ARB:STAT?`
 - `SYST:TICK?` (free-running hardware milliseconds, for timing diagnostics)
 - `MEAS:TEMP?`
 - `MEAS:CH1?` through `MEAS:CH5?`
 - `MEAS:SINK?`
 - `SYST:PROT:CH1?` through `SYST:PROT:CH5?` (raw protection
   sample, peak current, grace/counter state, and the last latched trip sample)
+- `SYST:TPS:CH5?` (last raw TPS55289 STATUS byte; `0x80` SCP, `0x40`
+  OCP, `0x20` OVP, and `0xFF` means the health read failed; STATUS is
+  read-to-clear and a shutdown requires the same fault class to reassert on
+  the following 20 ms poll)
 - `SINK:LIMIT?`
 - `SINK:LIMIT 4.250`
 - `SOUR:CURR:CH1?` through `SOUR:CURR:CH5?`
@@ -86,7 +127,7 @@ setting is focused to adjust it in 10 mV or 10 mA steps. Settings are locked
 only during an output transition. Live CH4/CH5 voltage changes pass through
 verified hardware side effects; software current thresholds change immediately.
 With no focus, rotation navigates
-screens; holding for 500 ms returns to Overview immediately without
+screens; holding for 500 ms returns to the main menu immediately without
 waiting for release. Encoder acceleration tracks successive detents over real
 elapsed time and ramps through 2x/4x/8x/16x, while an isolated detent retains
 10 mV/10 mA precision.
@@ -97,7 +138,7 @@ detail-screen `CC` label turn green when the physical drive is below the
 voltage-compliance setting, indicating that the current-control loop is
 actively governing the output. Holding the
 encoder button for three seconds requests a safe reboot; the firmware first
-shuts down every output and shared rail. The 500 ms Overview action does
+shuts down every output and shared rail. The 500 ms main-menu action does
 not stop the hold timer from reaching that reboot threshold.
 
 On Overview, short clicks focus the compact output switches in row order from

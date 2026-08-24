@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-reducto = { git = "https://github.com/jvanderberg/reducto", rev = "9a3543b59e5241002f2034e7a6098ed9ded7b1aa" }
+reducto = { path = "/Users/joshv/projects/reducto" }
 
 [target.'cfg(target_arch = "arm")'.dependencies]
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
@@ -25,4 +25,4 @@ usbd-serial = "0.2.2"
 codegen-units = 1
 debug = 1
 lto = true
-opt-level = "s"
+opt-level = "z"

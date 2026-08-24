@@ -53,6 +53,13 @@ The required Rust startup sequence is:
 9. Verify I2C acknowledgements and, where readable, converter register values or status.
 10. Leave all outputs disabled. Outputs are enabled only by an explicit DC or AWG user action.
 
+PB8 and PB9 are global red and blue status LED outputs, not per-channel fault
+inputs. The bootloader toggles both as its waiting heartbeat and jumps without
+resetting GPIO configuration, so the application must claim both pins and drive
+them low during safe startup. The original C application later sets PB8 when a
+foreground iteration exceeds 4 ms; that diagnostic behavior is not evidence of
+a converter fault and must never be wired into output protection semantics.
+
 The C application does not follow the safe order above. It raises all seven hardware enables before initializing and programming the converters. That ordering is not a requirement to preserve.
 
 ## TPS55289 configuration and re-enable sequence
@@ -79,7 +86,8 @@ Driving a TPS55289 hardware EN pin low resets its registers. Therefore CH5 recov
 2. Raise `EN5` and allow the device's required startup delay.
 3. Reapply internal-feedback configuration.
 4. Reapply the persisted CH5 voltage and the CH5 hardware current limit.
-5. Clear or inspect status as required by the device.
+5. Read the read-to-clear STATUS register twice, matching the original C
+   initialization and discarding power-up/configuration history.
 6. Set the converter output-enable bit.
 7. Confirm output or status within a bounded timeout.
 8. Mark the channel enabled only after successful completion.
@@ -146,12 +154,23 @@ Exact inter-stage settle delays must be verified from component data sheets and 
 ## AWG constraints
 
 - AWG is available only on CH4 and CH5.
-- On-device AWG controls are channel, waveform, frequency, low voltage, high voltage, and Start/Stop.
+- On-device AWG controls are channel, waveform, frequency, duty, low voltage, high voltage, and Start/Stop. Duty is a persisted 1% through 99% HIGH-time setting for square waves only; it is unavailable and must have no scheduler effect for triangle, ramp, or sine.
 - Built-in waveforms are square, triangle, ramp, and sine. Custom ARB remains available through the SCPI-like interface and is not edited on-device.
 - Only one AWG channel may be active.
 - Entering or starting AWG disables every DC output first. The selected AWG channel is configured and enabled only after the others are confirmed off.
 - Leaving the AWG section stops waveform scheduling and turns all outputs off.
 - A channel disable, overcurrent, overtemperature, I2C failure, or scheduler failure stops AWG and disables its output.
+- While CH5 is physically enabled, the power service reads the TPS55289 latched,
+  read-to-clear STATUS register every 20 ms. A single fault-bearing read can
+  describe a completed startup transient or current-regulation event, so it is
+  not by itself a shutdown request. The same fault class must reassert on the
+  next 20 ms read before the service dispatches the normal typed protection trip
+  and shuts down AWG. The converter's independent hardware OCP/SCP/OVP remains
+  active throughout this bounded confirmation. A failed health read still fails
+  closed immediately. The last raw byte remains diagnostic state after shutdown;
+  UI or SCPI code may observe it but may not read or clear the converter register
+  directly.
+- ADC voltage-window tracking is disabled while AWG owns a channel because the 50 Hz protection sample is not phase-synchronized to waveform commands and aliases at higher frequencies. Overcurrent sampling, temperature, sensor validity, GPIO/converter verification, and I2C write/readback failure protection remain active.
 - Waveform timing must use absolute monotonic deadlines and a phase accumulator. It must not set the next schedule origin to the delayed time of the previous sample.
 - When an update is late, advance phase by elapsed ticks and emit the current sample. Do not issue a burst of stale catch-up setpoints.
 - I2C writes occur outside interrupt handlers. The timer interrupt may only advance bounded scheduler state and signal pending work.
@@ -159,6 +178,9 @@ Exact inter-stage settle delays must be verified from component data sheets and 
 - Frequency and waveform limits must be clamped per channel using measured output settling behavior, not only DAC or I2C bus speed.
 - CH4's MCP4725 has a typical 6 microsecond DAC settling time, but the downstream voltage-margin loop and power stage are the practical limit.
 - CH5 is a closed-loop buck-boost converter with programmable slew behavior. Its switching frequency is not the AWG bandwidth.
+- CH5 AWG startup configures the TPS55289 for forced-PWM and its fastest documented voltage slew. PFM is prohibited for CH5 AWG because it prevents reverse inductor current at light/no load, leaving the output capacitor charged and destroying every falling waveform edge. Ordinary DC mode retains PFM. Forced-PWM selection is a typed startup side effect and must be verified before OE is enabled.
+- The desktop ARB command format and integer multiplier retain their original millisecond semantics. The Rust adapter additionally accepts multiplier `0.5`, making one dwell unit one dedicated 2 kHz timer tick. Uploaded ARBs are limited to 1024 contiguous, fully initialized points inside the selected channel's voltage range. Missing chunks, zero dwell, cross-channel uploads, multiple owners, and out-of-range start parameters are rejected before any output transition. A DATA ACK means only that a chunk was accepted; START success is returned only after global shutdown and verified enable. Finite completion disables the output rather than leaving the last point energized as the C implementation does.
+- The local built-in generator uses the same voltage bounds, a 125 Hz square limit, and 120 Hz triangle/ramp/interpolated-sine limits on a dedicated 2 kHz timer. This gives a 120 Hz shaped waveform about 17 command points per cycle. Absolute phase scheduling skips stale updates when foreground work is late. Oscilloscope characterization may establish lower product-output limits for large-signal operation, but the UI must not substitute an arbitrary low-frequency cap for that measurement.
 
 The existing ARB implementation uses shared 1024-element voltage and dwell arrays, services CH4 before CH5, and schedules each point relative to the time it was actually serviced. Its timing drift and mutual-exclusion behavior are evidence for the replacement requirements, not an implementation to copy.
 
@@ -166,7 +188,7 @@ The existing ARB implementation uses shared 1024-element voltage and dwell array
 
 - Encoder edge processing must debounce and enqueue an input event only. It must not draw, perform I2C, write flash, or execute an output transition inside the interrupt.
 - Button processing must distinguish short release from long press without blocking. A continuous 500 ms hold returns to the main menu immediately without waiting for release. Keeping the same press held for three seconds requests a safe reboot, which must globally shut down hardware before resetting. Both thresholds use a free-running hardware millisecond counter and must be verified against wall-clock time.
-- DC detail screens do not display or focus a Menu control. They rely on long press for direct return to Overview.
+- DC detail screens do not display or focus a Menu control. They rely on long press for direct return to the main menu.
 - The DC screen carousel is Overview, CH1, CH2, CH3, CH4, CH5, and USB PD Input.
 - CH1 through CH3 control focus cycles Output, Current Limit, and none. CH4 and CH5 focus cycles Output, Voltage Compliance, CV/CC Mode, Current Limit, and none. The mode control is rendered between the voltage and current settings.
 - Rotating either direction while Output is focused toggles that channel on or off. Direction only matters for navigation and numeric adjustment.
@@ -175,6 +197,8 @@ The existing ARB implementation uses shared 1024-element voltage and dwell array
 - Overview short clicks cycle focus through the compact CH1, CH2, CH3, CH4, and CH5 output switches, then back to no focus. Rotating either direction while an overview switch is focused dispatches the same typed output-toggle action as the detail screen. With no focus, rotation navigates screens.
 - Encoder acceleration is based on elapsed time across successive detents, not on how many edges happen to remain queued in one foreground pass. Direction reversal and an 80 ms idle pause reset acceleration to fine mode.
 - Display rendering is immediate and has no retained drawing tree or framebuffer requirement. Reducto state is the application state, not retained drawing state.
+- AWG Channel, Waveform, Frequency, Duty, Low, High, and Output are independent view projections. An encoder edit repaints only the changed value cell; focus changes repaint only the old and new focused rows; waveform scheduler samples repaint no AWG controls. A waveform change also repaints Duty because its availability is waveform-dependent. A blanket AWG-screen or all-row invalidation for a single field change is prohibited.
+- Frequency, waveform, square-wave duty, low voltage, and high voltage remain editable while AWG is running and take effect through the scheduler without restarting or energizing another output. Channel ownership is locked until Stop because changing it requires a global shutdown and a new safe-enable transaction.
 - Display SPI/DMA has one owner. Rendering is serialized, bounded, and lower priority than measurement and protection.
 - The C display code busy-waits indefinitely for DMA readiness and previously exhibited UI lockups when drawing from rotary paths. This must not be reproduced.
 
@@ -218,6 +242,8 @@ Preserve the existing USB CDC transport and established command spellings where 
 
 Compatibility targets include identification and build queries, per-channel output control, per-channel current limits, CH4 and CH5 voltage settings, per-channel and bulk measurements, converter status queries, explicit USB-PD commands, ARB upload/start, and bootloader entry. Accept the colon form emitted by the desktop client and the space form documented by the C source where both have historically worked.
 
+ARB compatibility specifically preserves the Python client's `SOUR:WAVE:CHn:ARB:DATA start,v,d,...` grammar, eight-pair chunking, `OK:ACK:CHn` response, `SOUR:WAVE:CHn:ARB:START count,multiplier,repetitions` grammar, centivolt voltage units, integer-millisecond multiplier behavior, zero-as-continuous repetition, and final `OK:CHn_ARB_STARTED_PTS:count` response. Safety validation and the `0.5` ms multiplier extension are intentional strict supersets; do not reproduce the C buffer overflow, dual-owner, drift, or energized-completion behavior.
+
 Preserve direct shared-converter commands such as `OUTP:DCn`, `SOUR:VOLT:DCn`, and `SOUR:CURR:DCn` for initial compatibility. They still pass through typed engineering commands and the power service. The SCPI adapter may not touch hardware directly. Their current syntax and externally useful behavior are retained where safe, while range checks, dependency-state reconciliation, and fail-closed error handling are added. Revisit whether these commands should remain public after compatibility testing.
 
 The bulk measurement response should retain its existing field order for desktop compatibility. New fields require a versioned query rather than silently changing the legacy response. Unknown commands and malformed parameters always receive an error response.
@@ -232,8 +258,13 @@ Persist only:
 - CH5 voltage setting
 - CH4 and CH5 CV/CC regulation modes
 - Current limit for CH1 through CH5
+- USB PD input current limit
+- Temperature display unit
+- Three explicitly saved user profiles containing the same editable settings
 
-Do not persist output enabled states, active faults, current screen, focus, AWG running state, or live measurements. AWG parameter persistence remains a product decision.
+The ordinary settings journal is the automatic startup configuration. Profile slots are explicit snapshots and do not replace automatic persistence. Loading any profile or Factory Defaults first stops AWG and globally disables every physical output; only after successful shutdown are validated settings applied. Saving or loading a profile must never serialize or restore output enabled state.
+
+Do not persist output enabled states, active faults, current screen, focus, AWG running state, or live measurements. Persist the last valid AWG channel, waveform, frequency, square-wave duty, and voltage range, but never persist an armed or running state.
 
 Settings records require a format version, monotonically increasing sequence, payload length, and CRC. A torn or corrupt record is ignored. Flash writes are deferred until the value has been quiet for a debounce interval and outputs are not in a timing-critical transition. Runtime settings change immediately in RAM. Append into blank slots during ordinary operation. If the settings page is full, defer erase/compaction until every output is confirmed physically off; never stall flash for journal maintenance while delivering power.
 

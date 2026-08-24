@@ -20,7 +20,9 @@ use benchvolt_poc::cadence::ServiceCadence;
 use benchvolt_poc::input_policy::{encoder_action, ButtonTracker};
 use benchvolt_poc::measurement::MeasurementWindows;
 use benchvolt_poc::monitoring::{ProtectionService, TpsStatusObservation};
-use benchvolt_poc::pd::{Service as PdService, ServiceEvent as PdServiceEvent};
+use benchvolt_poc::pd::{
+    BootContractAction, Service as PdService, ServiceEvent as PdServiceEvent,
+};
 use benchvolt_poc::reset_cause::ResetReason;
 use benchvolt_poc::power::{
     execute_global_shutdown, FirmwareEffectPlanner, PowerExecutor, Rail,
@@ -429,6 +431,7 @@ fn main() -> ! {
     let mut input_ticks = monotonic_ms();
     let mut service_tick = input_ticks;
     let mut seal_attempted = false;
+    let mut legacy_pd_requested_at = None;
     let mut button = ButtonTracker::new(encoder_sw.is_high().unwrap_or(true));
     let mut last_encoder_tick = input_ticks;
     let mut last_encoder_direction = 0i8;
@@ -1014,14 +1017,29 @@ fn main() -> ! {
             && app.state().temp_valid
             && outputs_physically_off
         {
-            seal_attempted = true;
-            if let Some(seal) = boot_seal {
-                let restored = restore_boot_seal(seal);
-                dispatch_app(
-                    &mut app,
-                    &mut power_driver,
-                    Action::BootRecoveryStatus(restored),
-                );
+            match benchvolt_poc::pd::boot_contract_action(
+                app.state().pd_contract.map(|contract| contract.millivolts),
+                legacy_pd_requested_at,
+                input_ticks,
+            ) {
+                BootContractAction::Wait => {}
+                BootContractAction::Request => {
+                    legacy_pd_requested_at = Some(input_ticks);
+                    let _ = benchvolt_poc::pd::request_legacy_boot_contract(
+                        &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
+                    );
+                }
+                BootContractAction::Seal => {
+                    seal_attempted = true;
+                    if let Some(seal) = boot_seal {
+                        let restored = restore_boot_seal(seal);
+                        dispatch_app(
+                            &mut app,
+                            &mut power_driver,
+                            Action::BootRecoveryStatus(restored),
+                        );
+                    }
+                }
             }
         }
         if app.state().reboot_requested {

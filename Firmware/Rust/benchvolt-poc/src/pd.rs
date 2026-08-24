@@ -158,6 +158,34 @@ pub fn request_legacy_boot_contract(bus: &mut impl PdBus) -> Result<(), PdError>
         .map_err(|_| PdError::Bus)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BootContractAction {
+    Wait,
+    Request,
+    Seal,
+}
+
+/// Keep crash recovery armed while the legacy soft-reset request can still
+/// reset the VBUS-powered MCU. USB PD requires the transition to complete in
+/// 275 ms; 500 ms is a bounded margin before normal boot sealing resumes.
+pub const fn boot_contract_action(
+    contract_mv: Option<u16>,
+    requested_at: Option<u16>,
+    now: u16,
+) -> BootContractAction {
+    if matches!(contract_mv, Some(millivolts) if millivolts >= 20_000) {
+        BootContractAction::Seal
+    } else if let Some(start) = requested_at {
+        if now.wrapping_sub(start) >= 500 {
+            BootContractAction::Seal
+        } else {
+            BootContractAction::Wait
+        }
+    } else {
+        BootContractAction::Request
+    }
+}
+
 fn ftp_wait(bus: &mut impl PdBus) -> Result<(), PdError> {
     for _ in 0..255 {
         let mut status = [0];
@@ -897,6 +925,20 @@ mod tests {
 
         assert_eq!(request_legacy_boot_contract(&mut bus), Ok(()));
         assert!(bus.0.is_empty());
+    }
+
+    #[test]
+    fn boot_pd_gate_keeps_recovery_open_until_contract_or_bounded_settle() {
+        assert_eq!(boot_contract_action(Some(20_000), None, 100), BootContractAction::Seal);
+        assert_eq!(boot_contract_action(Some(5_000), None, 100), BootContractAction::Request);
+        assert_eq!(
+            boot_contract_action(Some(5_000), Some(u16::MAX - 99), 100),
+            BootContractAction::Wait
+        );
+        assert_eq!(
+            boot_contract_action(Some(5_000), Some(u16::MAX - 399), 100),
+            BootContractAction::Seal
+        );
     }
 
     #[test]

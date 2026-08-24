@@ -607,7 +607,7 @@ fn main() -> ! {
                             queue_usb_response(b"OK:PD:NVM_UPDATED:POWER_CYCLE\r\n")
                         }
                         Ok(benchvolt_poc::pd::NvmUpdate::AlreadyConfigured) => {
-                            queue_usb_response(b"OK:PD:NVM_CONFIGURED\r\n")
+                            pd_service.request_negotiation(app.state().sink_current_limit_ma);
                         }
                         Err(_) => queue_usb_response(b"ERR:PD:NVM\r\n"),
                     }

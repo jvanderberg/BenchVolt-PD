@@ -67,15 +67,33 @@ const FLASH_READY_SPINS: u32 = 12_000_000;
 /// Turn off every independent output control without relying on initialized
 /// drivers, interrupts, or either I2C bus.
 unsafe fn raw_emergency_shutdown() {
-    const GPIOA_BSRR: *mut u32 = 0x4800_0018 as *mut u32;
-    const GPIOB_BSRR: *mut u32 = 0x4800_0418 as *mut u32;
-    const GPIOC_BSRR: *mut u32 = 0x4800_0818 as *mut u32;
-    core::ptr::write_volatile(GPIOA_BSRR, 1 << (15 + 16));
-    core::ptr::write_volatile(
-        GPIOB_BSRR,
-        (1 << (2 + 16)) | (1 << (6 + 16)) | (1 << (7 + 16)) | (1 << (15 + 16)),
-    );
-    core::ptr::write_volatile(GPIOC_BSRR, (1 << (12 + 16)) | (1 << (13 + 16)));
+    for port in benchvolt_poc::early_shutdown::PORTS {
+        unsafe {
+            core::ptr::write_volatile(port.bsrr, u32::from(port.pin_mask) << 16);
+        }
+    }
+}
+
+/// Make the raw shutdown path effective before watchdog and clock setup can
+/// fail: clock the GPIO banks, latch every enable low, then select output mode.
+unsafe fn prepare_emergency_shutdown() {
+    use benchvolt_poc::early_shutdown::{output_modes, GPIO_CLOCK_ENABLE_MASK, PORTS, RCC_AHBENR};
+
+    unsafe {
+        let clocks = core::ptr::read_volatile(RCC_AHBENR);
+        core::ptr::write_volatile(RCC_AHBENR, clocks | GPIO_CLOCK_ENABLE_MASK);
+        // Readback provides the required peripheral-clock enable delay before
+        // the first GPIO access.
+        let _ = core::ptr::read_volatile(RCC_AHBENR);
+    }
+    for port in PORTS {
+        let modes = output_modes(port.pin_mask);
+        unsafe {
+            core::ptr::write_volatile(port.bsrr, u32::from(port.pin_mask) << 16);
+            let current = core::ptr::read_volatile(port.moder);
+            core::ptr::write_volatile(port.moder, (current & !modes.clear) | modes.set);
+        }
+    }
 }
 
 fn emergency_reset(reason: ResetReason) -> ! {
@@ -182,6 +200,9 @@ fn benchvolt_display_offset(_: &ModelOptions) -> (u16, u16) {
 fn main() -> ! {
     let mut dp = pac::Peripherals::take().unwrap();
     let mut cp = cortex_m::Peripherals::take().unwrap();
+
+    // Establish a physical all-off state before any fallible boot operation.
+    unsafe { prepare_emergency_shutdown() };
 
     // RCC reset flags are sticky and may overlap (for example PIN + POR).
     // Capture them before any initialization, then clear them for the next boot.

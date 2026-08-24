@@ -1,6 +1,7 @@
 #![no_main]
 #![no_std]
 
+mod arb_runtime;
 mod board;
 mod boot;
 mod input;
@@ -11,13 +12,12 @@ mod usb_transport;
 mod view;
 
 use core::{
-    cell::RefCell,
     fmt::Write as _,
     sync::atomic::{AtomicU32, AtomicU8, Ordering},
 };
 
 use benchvolt_poc::app::{Action, AppReducer, AppState, AwgSource, AwgStatus};
-use benchvolt_poc::arb::{Buffer as ArbBuffer, UploadSession as ArbUploadSession};
+use benchvolt_poc::arb::UploadSession as ArbUploadSession;
 use benchvolt_poc::cadence::ServiceCadence;
 use benchvolt_poc::input_policy::{encoder_action, ButtonTracker};
 use benchvolt_poc::measurement::MeasurementWindows;
@@ -42,7 +42,6 @@ use boot::{
     compact_settings_store, erase_flash_page, invalidate_boot_metadata, load_settings_store,
     persist_settings, restore_boot_seal, BOOT_METADATA_ADDR, SETTINGS_SLOTS,
 };
-use cortex_m::interrupt::Mutex;
 use cortex_m_rt::{entry, exception, ExceptionFrame};
 use display_interface_spi::SPIInterface;
 use embedded_hal::digital::v2::InputPin;
@@ -171,11 +170,6 @@ static RESET_CAUSES: AtomicU8 = AtomicU8::new(0);
 static RESET_REASON: AtomicU8 = AtomicU8::new(0);
 static HW_RETRY_COUNT: AtomicU32 = AtomicU32::new(0);
 static CH5_TPS_STATUS: AtomicU8 = AtomicU8::new(0);
-static ARB_INDEX: AtomicU32 = AtomicU32::new(0);
-static ARB_CYCLES: AtomicU32 = AtomicU32::new(0);
-static ARB_LATE_UPDATES: AtomicU32 = AtomicU32::new(0);
-static ARB_SKIPPED_CYCLES: AtomicU32 = AtomicU32::new(0);
-static ARB_BUFFER: Mutex<RefCell<ArbBuffer>> = Mutex::new(RefCell::new(ArbBuffer::new()));
 
 fn record_hw_retries(count: u32) {
     let current = HW_RETRY_COUNT.load(Ordering::Relaxed);
@@ -679,9 +673,7 @@ fn main() -> ! {
                         queue_usb_response(b"ERR:SEQUENCE\r\n");
                         break 'usb_command;
                     }
-                    cortex_m::interrupt::free(|cs| {
-                        ARB_BUFFER.borrow(cs).borrow_mut().write(chunk);
-                    });
+                    arb_runtime::write(chunk);
                     let mut response: String<32> = String::new();
                     write!(&mut response, "OK:ACK:CH{}\r\n", chunk.channel + 1).ok();
                     queue_usb_response(response.as_bytes());
@@ -698,9 +690,7 @@ fn main() -> ! {
                         queue_usb_response(b"ERR:INCOMPLETE\r\n");
                         break 'usb_command;
                     }
-                    let bounds = cortex_m::interrupt::free(|cs| {
-                        ARB_BUFFER.borrow(cs).borrow().validate(start)
-                    });
+                    let bounds = arb_runtime::validate(start);
                     let Some((initial_mv, low_mv, high_mv)) = bounds else {
                         queue_usb_response(b"ERR:RANGE\r\n");
                         break 'usb_command;
@@ -718,10 +708,7 @@ fn main() -> ! {
                     if app.state().awg_status == AwgStatus::StartRequested
                         && app.state().awg_source == AwgSource::Arbitrary
                     {
-                        ARB_INDEX.store(0, Ordering::Relaxed);
-                        ARB_CYCLES.store(0, Ordering::Relaxed);
-                        ARB_LATE_UPDATES.store(0, Ordering::Relaxed);
-                        ARB_SKIPPED_CYCLES.store(0, Ordering::Relaxed);
+                        arb_runtime::reset_status();
                         waveform_service.arm_arbitrary(start);
                     } else {
                         queue_usb_response(b"ERR:BUSY\r\n");
@@ -839,14 +826,13 @@ fn main() -> ! {
         let waveform_directive = if waveform_status == AwgStatus::Running
             && waveform_source == AwgSource::Arbitrary
         {
-            cortex_m::interrupt::free(|cs| {
-                let buffer = ARB_BUFFER.borrow(cs).borrow();
+            arb_runtime::with_buffer(|buffer| {
                 waveform_service.tick(
                     waveform_status,
                     waveform_source,
                     waveform_config,
                     waveform_tick,
-                    Some(&buffer),
+                    Some(buffer),
                 )
             })
         } else {
@@ -859,10 +845,7 @@ fn main() -> ! {
             )
         };
         let arb_status = waveform_service.arb_status();
-        ARB_INDEX.store(u32::from(arb_status.index), Ordering::Relaxed);
-        ARB_CYCLES.store(arb_status.cycles, Ordering::Relaxed);
-        ARB_LATE_UPDATES.store(arb_status.late_updates, Ordering::Relaxed);
-        ARB_SKIPPED_CYCLES.store(arb_status.skipped_cycles, Ordering::Relaxed);
+        arb_runtime::update_status(arb_status);
         match waveform_directive {
             WaveformDirective::None => {}
             WaveformDirective::Sample(millivolts) => {

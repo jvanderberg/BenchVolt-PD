@@ -1,8 +1,8 @@
 use crate::input::{encoder_counts, monotonic_ms};
 use crate::usb_transport::queue_usb_response;
 use crate::{
-    ARB_CYCLES, ARB_INDEX, ARB_LATE_UPDATES, ARB_SKIPPED_CYCLES, CH5_TPS_STATUS, HW_RETRY_COUNT,
-    LAST_HW_ERROR, LAST_HW_OPERATION, RESET_CAUSES, RESET_REASON,
+    arb_runtime, CH5_TPS_STATUS, HW_RETRY_COUNT, LAST_HW_ERROR, LAST_HW_OPERATION, RESET_CAUSES,
+    RESET_REASON,
 };
 use benchvolt_poc::{
     app::{AppState, AwgSource, AwgStatus, RegulationMode},
@@ -41,15 +41,16 @@ pub(crate) fn handle_usb_command(
             } else {
                 "STOPPED"
             };
+            let (index, cycles, late_updates, skipped_cycles) = arb_runtime::status();
             let mut response: String<96> = String::new();
             write!(
                 &mut response,
                 "{},INDEX:{},CYCLES:{},LATE:{},SKIP:{}\r\n",
                 status,
-                ARB_INDEX.load(Ordering::Relaxed),
-                ARB_CYCLES.load(Ordering::Relaxed),
-                ARB_LATE_UPDATES.load(Ordering::Relaxed),
-                ARB_SKIPPED_CYCLES.load(Ordering::Relaxed),
+                index,
+                cycles,
+                late_updates,
+                skipped_cycles,
             )
             .ok();
             queue_usb_response(response.as_bytes());

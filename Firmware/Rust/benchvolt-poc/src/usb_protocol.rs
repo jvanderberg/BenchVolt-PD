@@ -1,6 +1,6 @@
 use crate::{
     ARB_CYCLES, ARB_INDEX, ARB_LATE_UPDATES, ARB_SKIPPED_CYCLES, CH5_TPS_STATUS,
-    HW_RETRY_COUNT, LAST_HW_ERROR, LAST_HW_OPERATION, RESET_CAUSES,
+    HW_RETRY_COUNT, LAST_HW_ERROR, LAST_HW_OPERATION, RESET_CAUSES, RESET_REASON,
 };
 use crate::input::{encoder_counts, monotonic_ms};
 use crate::usb_transport::queue_usb_response;
@@ -196,7 +196,7 @@ pub(crate) fn handle_usb_command(
         }
         b"SYST:RESET?" => {
             let causes = RESET_CAUSES.load(Ordering::Relaxed);
-            let mut response: String<64> = String::new();
+            let mut response: String<96> = String::new();
             write!(&mut response, "0x{causes:02X}").ok();
             for (mask, label) in [
                 (benchvolt_poc::reset_cause::OPTION_BYTE, "OPTION"),
@@ -211,6 +211,11 @@ pub(crate) fn handle_usb_command(
                 if causes & mask != 0 {
                     write!(&mut response, ",{label}").ok();
                 }
+            }
+            if let Some(reason) = benchvolt_poc::reset_cause::ResetReason::from_raw(u32::from(
+                RESET_REASON.load(Ordering::Relaxed),
+            )) {
+                write!(&mut response, ",CAUSE:{}", reason.label()).ok();
             }
             response.push_str("\r\n").ok();
             queue_usb_response(response.as_bytes());

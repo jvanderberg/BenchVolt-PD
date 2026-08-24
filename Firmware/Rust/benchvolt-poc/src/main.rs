@@ -4,6 +4,7 @@
 mod board;
 mod boot;
 mod input;
+mod reset_marker;
 mod runtime;
 mod usb_protocol;
 mod usb_transport;
@@ -25,6 +26,7 @@ use benchvolt_poc::input_policy::{encoder_action, ButtonTracker};
 use benchvolt_poc::measurement::MeasurementWindows;
 use benchvolt_poc::monitoring::{ProtectionService, TpsStatusObservation};
 use benchvolt_poc::pd::{Service as PdService, ServiceEvent as PdServiceEvent};
+use benchvolt_poc::reset_cause::ResetReason;
 use benchvolt_poc::power::{
     execute_global_shutdown, FirmwareEffectPlanner, Rail,
 };
@@ -74,41 +76,53 @@ unsafe fn raw_emergency_shutdown() {
     core::ptr::write_volatile(GPIOC_BSRR, (1 << (12 + 16)) | (1 << (13 + 16)));
 }
 
-fn emergency_reset() -> ! {
+fn emergency_reset(reason: ResetReason) -> ! {
     cortex_m::interrupt::disable();
     unsafe { raw_emergency_shutdown() };
+    unsafe { reset_marker::record(reason) };
     cortex_m::peripheral::SCB::sys_reset()
 }
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-    emergency_reset()
+    emergency_reset(ResetReason::Panic)
 }
 
 #[exception]
 unsafe fn HardFault(_frame: &ExceptionFrame) -> ! {
-    emergency_reset()
+    emergency_reset(ResetReason::HardFault)
 }
 
-fn start_watchdog() {
+fn start_watchdog() -> bool {
     const IWDG_BASE: usize = 0x4000_3000;
     const KR: *mut u32 = IWDG_BASE as *mut u32;
     const PR: *mut u32 = (IWDG_BASE + 0x04) as *mut u32;
     const RLR: *mut u32 = (IWDG_BASE + 0x08) as *mut u32;
     const SR: *const u32 = (IWDG_BASE + 0x0c) as *const u32;
     unsafe {
+        reset_marker::record(ResetReason::WatchdogConfiguration);
         // 40 kHz LSI / 256 / (624 + 1) gives a nominal four-second timeout.
         core::ptr::write_volatile(KR, 0xcccc);
         core::ptr::write_volatile(KR, 0x5555);
         core::ptr::write_volatile(PR, 6);
         core::ptr::write_volatile(RLR, 624);
+        let mut ready = false;
         for _ in 0..FLASH_READY_SPINS {
             if core::ptr::read_volatile(SR) & 0b11 == 0 {
+                ready = true;
                 break;
             }
         }
+        if !ready
+            || core::ptr::read_volatile(PR) & 0x07 != 6
+            || core::ptr::read_volatile(RLR) & 0x0fff != 624
+        {
+            return false;
+        }
         core::ptr::write_volatile(KR, 0xaaaa);
+        reset_marker::clear();
     }
+    true
 }
 
 fn feed_watchdog() {
@@ -134,6 +148,7 @@ fn benchvolt_wait_for_flash_ready(status: *const u32) -> bool {
 static LAST_HW_OPERATION: AtomicU8 = AtomicU8::new(0);
 static LAST_HW_ERROR: AtomicU8 = AtomicU8::new(0);
 static RESET_CAUSES: AtomicU8 = AtomicU8::new(0);
+static RESET_REASON: AtomicU8 = AtomicU8::new(0);
 static HW_RETRY_COUNT: AtomicU32 = AtomicU32::new(0);
 static CH5_TPS_STATUS: AtomicU8 = AtomicU8::new(0);
 static ARB_INDEX: AtomicU32 = AtomicU32::new(0);
@@ -172,12 +187,27 @@ fn main() -> ! {
         benchvolt_poc::reset_cause::decode_rcc_csr(dp.RCC.csr.read().bits()),
         Ordering::Relaxed,
     );
+    let reset_reason = unsafe {
+        reset_marker::take(
+            RESET_CAUSES.load(Ordering::Relaxed),
+            dp.FLASH.obr.read().ram_parity_check().is_disabled(),
+        )
+    };
+    RESET_REASON.store(reset_reason.map_or(0, |reason| reason as u8), Ordering::Relaxed);
     dp.RCC.csr.modify(|_, w| w.rmvf().set_bit());
 
     // Start recovery supervision before boot-metadata flash access. Startup is
     // bounded and feeds explicitly; steady-state feeds only after a complete
     // foreground pass.
-    start_watchdog();
+    if !start_watchdog() {
+        cortex_m::interrupt::disable();
+        unsafe { raw_emergency_shutdown() };
+        // IWDG was already started and cannot be disabled. Do not continue
+        // initialization with an unverified timeout; let it reset the device.
+        loop {
+            cortex_m::asm::nop();
+        }
+    }
 
     // USB has the highest urgency. Encoder capture is deliberately lowest and
     // performs only a pending-bit clear, GPIO read, and bounded queue push.
@@ -320,7 +350,7 @@ fn main() -> ! {
     });
     let mut adc = match BoundedAdc::new(dp.ADC, &mut rcc) {
         Ok(adc) => adc,
-        Err(()) => emergency_reset(),
+        Err(()) => emergency_reset(ResetReason::AdcInitialization),
     };
 
     let (sck, miso, mosi, dc, rst, cs, scl, sda, aux_scl, aux_sda, pd_scl, pd_sda, _pd_alert) =
@@ -440,7 +470,7 @@ fn main() -> ! {
                     queue_usb_response(b"OK:JUMPING_TO_BOOTLOADER\r\n");
                     unsafe { raw_emergency_shutdown() };
                     cortex_m::asm::delay(4_800_000);
-                    cortex_m::peripheral::SCB::sys_reset();
+                    emergency_reset(ResetReason::BootloaderRequest);
                 }
                 UsbIntent::Reboot => {
                     dispatch_app(&mut app, &mut power_driver, Action::RequestReboot);
@@ -963,7 +993,7 @@ fn main() -> ! {
             let _ = execute_global_shutdown(&mut power_driver);
             unsafe { raw_emergency_shutdown() };
             cortex_m::asm::delay(480_000);
-            cortex_m::peripheral::SCB::sys_reset();
+            emergency_reset(ResetReason::UserReboot);
         }
         feed_watchdog();
     }

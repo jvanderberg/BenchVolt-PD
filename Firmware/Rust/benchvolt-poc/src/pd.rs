@@ -139,6 +139,25 @@ pub fn read_diagnostics(bus: &mut impl PdBus) -> Result<Diagnostics, BusError> {
     })
 }
 
+/// Replays the RAM-PDO sequence used by the archived original firmware before
+/// asking the source to renegotiate. These writes are volatile and do not wear
+/// or modify the STUSB4500 NVM.
+pub fn request_legacy_boot_contract(bus: &mut impl PdBus) -> Result<(), PdError> {
+    const LEGACY_PDOS: [u8; 12] = [
+        0xc8, 0x20, 0x03, 0x00, // 10 V, 2 A
+        0x2c, 0x21, 0x03, 0x00, // 10 V, 3 A
+        0xf4, 0x41, 0x06, 0x00, // 20 V, 5 A
+    ];
+    for (offset, value) in LEGACY_PDOS.into_iter().enumerate() {
+        bus.write(SINK_PDO1 + offset as u8, &[value])
+            .map_err(|_| PdError::Bus)?;
+    }
+    bus.write(TX_HEADER, &[0x0d])
+        .map_err(|_| PdError::Bus)?;
+    bus.write(COMMAND_CTRL, &[SEND_COMMAND])
+        .map_err(|_| PdError::Bus)
+}
+
 fn ftp_wait(bus: &mut impl PdBus) -> Result<(), PdError> {
     for _ in 0..255 {
         let mut status = [0];
@@ -858,6 +877,25 @@ mod tests {
                 active_rdo: [0xc8, 0x58, 0x02, 0x30],
             })
         );
+        assert!(bus.0.is_empty());
+    }
+
+    #[test]
+    fn legacy_boot_request_replays_the_original_ram_pdos_then_soft_resets() {
+        let legacy_pdos = [
+            0xc8, 0x20, 0x03, 0x00, // 10 V, 2 A
+            0x2c, 0x21, 0x03, 0x00, // 10 V, 3 A
+            0xf4, 0x41, 0x06, 0x00, // 20 V, 5 A
+        ];
+        let mut operations = VecDeque::new();
+        for (offset, value) in legacy_pdos.into_iter().enumerate() {
+            operations.push_back(Operation::Write(SINK_PDO1 + offset as u8, vec![value]));
+        }
+        operations.push_back(Operation::Write(TX_HEADER, vec![0x0d]));
+        operations.push_back(Operation::Write(COMMAND_CTRL, vec![SEND_COMMAND]));
+        let mut bus = ScriptBus(operations);
+
+        assert_eq!(request_legacy_boot_contract(&mut bus), Ok(()));
         assert!(bus.0.is_empty());
     }
 

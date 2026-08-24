@@ -430,7 +430,7 @@ void Bootloader_ShowProgress(uint32_t writtenBytes, uint32_t totalBytes)
     if (percent > 100)
         percent = 100;
 
-    snprintf(text, sizeof(text), "%lu%%", percent);
+    snprintf(text, sizeof(text), "%u%%", (unsigned int)percent);
 
     // Ortaya yakın bölgeyi temizle
     ST7789_DrawFilledRectangle(70, 90, 180, 140, BLACK);

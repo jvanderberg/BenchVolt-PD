@@ -3,6 +3,7 @@
 pub mod app;
 pub mod arb;
 pub mod awg;
+pub mod cadence;
 pub mod input_policy;
 pub mod limits;
 pub mod load;

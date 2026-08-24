@@ -18,6 +18,7 @@ use core::{
 
 use benchvolt_poc::app::{Action, AppReducer, AppState, AwgSource, AwgStatus};
 use benchvolt_poc::arb::{Buffer as ArbBuffer, UploadSession as ArbUploadSession};
+use benchvolt_poc::cadence::ServiceCadence;
 use benchvolt_poc::input_policy::{encoder_action, ButtonTracker};
 use benchvolt_poc::measurement::MeasurementWindows;
 use benchvolt_poc::monitoring::{ProtectionService, TpsStatusObservation};
@@ -412,10 +413,7 @@ fn main() -> ! {
     unsafe { cortex_m::interrupt::enable() };
     cortex_m::peripheral::NVIC::pend(pac::Interrupt::USB);
 
-    let mut temperature_ticks = 0u16;
-    let mut measurement_ticks = 0u16;
-    let mut display_measurement_ticks = 0u16;
-    let mut awg_load_ticks = 0u16;
+    let mut cadence = ServiceCadence::default();
     let mut measurement_windows = MeasurementWindows::new();
     let mut protection = ProtectionService::default();
     let mut waveform_service = WaveformService::new();
@@ -424,7 +422,6 @@ fn main() -> ! {
     let mut pd_service = PdService::new(app.state().sink_current_limit_ma);
     let mut input_ticks = monotonic_ms();
     let mut service_tick = input_ticks;
-    let mut health_ticks = 0u32;
     let mut seal_attempted = false;
     let mut button = ButtonTracker::new(encoder_sw.is_high().unwrap_or(true));
     let mut last_encoder_tick = input_ticks;
@@ -728,11 +725,7 @@ fn main() -> ! {
         input_ticks = monotonic_ms();
         let elapsed_ms = input_ticks.wrapping_sub(service_tick);
         service_tick = input_ticks;
-        health_ticks = health_ticks.saturating_add(u32::from(elapsed_ms));
-        temperature_ticks = temperature_ticks.wrapping_add(elapsed_ms);
-        measurement_ticks = measurement_ticks.wrapping_add(elapsed_ms);
-        display_measurement_ticks = display_measurement_ticks.wrapping_add(elapsed_ms);
-        awg_load_ticks = awg_load_ticks.wrapping_add(elapsed_ms);
+        let mut due = cadence.advance(elapsed_ms);
 
         let outputs_off = app
             .state()
@@ -865,8 +858,7 @@ fn main() -> ! {
             }
         }
 
-        if temperature_ticks >= 100 {
-            temperature_ticks = 0;
+        if due.temperature {
             let temperature = power_driver.read_temperature();
             dispatch_app(
                 &mut app,
@@ -884,8 +876,7 @@ fn main() -> ! {
                 let _ = execute_global_shutdown(&mut power_driver);
             }
         }
-        if measurement_ticks >= 20 {
-            measurement_ticks = 0;
+        if due.measurement {
             for (rail, channels) in [(Rail::Dc1, [0u8, 1]), (Rail::Dc2, [2u8, 3])] {
                 let active = channels.into_iter().any(|channel| {
                     let output = &app.state().channels[usize::from(channel)];
@@ -946,7 +937,7 @@ fn main() -> ! {
                 dispatch_app(&mut app, &mut power_driver, action);
             }
             if !measurement_windows.record(app.state(), measurements, sink_measurement) {
-                awg_load_ticks = 0;
+                cadence.invalidate_awg_window(&mut due);
             }
             for channel in 0..5u8 {
                 let measurement = measurements[usize::from(channel)];
@@ -971,8 +962,7 @@ fn main() -> ! {
                 }
             }
         }
-        if display_measurement_ticks >= 200 {
-            display_measurement_ticks = 0;
+        if due.display_measurement {
             let (measurements, sink_measurement) = measurement_windows.take_display();
             dispatch_app(
                 &mut app,
@@ -985,8 +975,7 @@ fn main() -> ! {
                 Action::SinkMeasurement(sink_measurement),
             );
         }
-        if awg_load_ticks >= 1_000 {
-            awg_load_ticks = 0;
+        if due.awg_load {
             dispatch_app(
                 &mut app,
                 &mut power_driver,
@@ -1051,7 +1040,7 @@ fn main() -> ! {
         }
 
         if !seal_attempted
-            && health_ticks >= 3_000
+            && cadence.healthy_for(3_000)
             && app.state().temp_valid
             && outputs_physically_off
         {

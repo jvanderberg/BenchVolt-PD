@@ -1,7 +1,8 @@
 use crate::{
-    encoder_counts, monotonic_ms, ARB_CYCLES, ARB_INDEX, ARB_LATE_UPDATES,
-    ARB_SKIPPED_CYCLES, CH5_TPS_STATUS, HW_RETRY_COUNT, LAST_HW_ERROR, LAST_HW_OPERATION,
+    ARB_CYCLES, ARB_INDEX, ARB_LATE_UPDATES, ARB_SKIPPED_CYCLES, CH5_TPS_STATUS,
+    HW_RETRY_COUNT, LAST_HW_ERROR, LAST_HW_OPERATION,
 };
+use crate::input::{encoder_counts, monotonic_ms};
 use crate::usb_transport::queue_usb_response;
 use benchvolt_poc::{
     app::{AppState, AwgSource, AwgStatus, RegulationMode},

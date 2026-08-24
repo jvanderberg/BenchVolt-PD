@@ -3,6 +3,7 @@ use crate::{record_hw_retries, LAST_HW_ERROR, LAST_HW_OPERATION};
 use benchvolt_poc::power::{
     tps55289_configuration_registers, tps55289_current_code, tps55289_output_acknowledged,
     tps55289_output_mode, tps55289_voltage_code, DriverOperation, PowerDriver, Rail,
+    SHARED_RAIL_LIMIT_MA,
 };
 use core::sync::atomic::Ordering;
 use embedded_hal::{
@@ -339,7 +340,7 @@ where
                     &mut self.delay,
                     address,
                     millivolts,
-                    5_000,
+                    SHARED_RAIL_LIMIT_MA,
                     true,
                     false,
                 )?;

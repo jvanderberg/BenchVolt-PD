@@ -599,12 +599,18 @@ fn main() -> ! {
                         queue_usb_response(b"ERR:BUSY\r\n");
                         break 'usb_command;
                     }
-                    pd_service.request_negotiation(app.state().sink_current_limit_ma);
-                    dispatch_app(
-                        &mut app,
-                        &mut power_driver,
-                        Action::PdNegotiationStarted,
+                    let result = benchvolt_poc::pd::configure_request_source_current(
+                        &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
                     );
+                    match result {
+                        Ok(benchvolt_poc::pd::NvmUpdate::Updated) => {
+                            queue_usb_response(b"OK:PD:NVM_UPDATED:POWER_CYCLE\r\n")
+                        }
+                        Ok(benchvolt_poc::pd::NvmUpdate::AlreadyConfigured) => {
+                            queue_usb_response(b"OK:PD:NVM_CONFIGURED\r\n")
+                        }
+                        Err(_) => queue_usb_response(b"ERR:PD:NVM\r\n"),
+                    }
                 }
                 UsbIntent::ArbData(chunk) => {
                     if !matches!(

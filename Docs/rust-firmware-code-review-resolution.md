@@ -19,14 +19,19 @@ because `main.rs` has been reduced from 2,663 to 1,012 lines.
 - Protection timing preserves scheduler phase and fails closed after repeated
   late measurement windows (`6e434c0`).
 - STUSB4500 support models and supervises the active PD contract. Startup
-  discovery is read-only; bus transmission occurs only after an explicit CLI
-  request. Detach, RDO identity change, invalid contract voltage, or missing
+  discovery is read-only and does not transmit PD messages. Detach, RDO
+  identity change, invalid contract voltage, or missing
   contract while outputs are active causes global shutdown.
 - The STUSB4500 software-I2C clock now uses a tested 2 us half-cycle. This
   keeps its requested clock within the controller's 400 kHz Fast-mode limit
   instead of relying on incidental GPIO overhead to slow a nominal 500 kHz
-  request. After writing a selected sink PDO, active negotiation now sends the
-  documented PD Soft Reset before verifying the new RDO.
+  request. Connected testing showed that RAM-only PDO changes followed by
+  either Get Source Capabilities or PD Soft Reset can drop VBUS, reset the MCU,
+  and lose the volatile change. The explicit negotiation command therefore
+  programs the STUSB4500 `REQ_SRC_CURRENT` NVM bit once, verifies the complete
+  eight-byte sector, and leaves subsequent cold-attach negotiation autonomous.
+  The software-I2C transport now supports the NVM sector's eight-byte write;
+  its former four-byte limit was sufficient for PDOs but rejected NVM writes.
 - Passive RDO import rejects capability mismatch, impossible current fields,
   operating current above the matched local sink PDO, and fixed-supply current
   above 5 A (`8026e56`). Input protection uses the lower of the user limit and

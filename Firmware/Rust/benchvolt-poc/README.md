@@ -174,14 +174,16 @@ contract negotiated autonomously by the STUSB4500. Import requires sink-ready
 state, a valid non-mismatch RDO, a valid input ADC sample, and measured VBUS to
 match one of the controller's enabled fixed sink PDO voltages. It never sends a
 PD message. From a terminal, `SYST:PD:NEGOTIATE` (or the legacy
-`SOUR:PD:CONF:MAX`) explicitly starts one bounded active attempt. The firmware
-selects the highest-power fixed PDO at or below 20 V, caps requested current to
-the configured sink limit, writes the STUSB4500's third sink PDO in RAM,
-requests renegotiation, and verifies the resulting RDO. The command receives
-`OK` only after verification, or a typed `ERR:PD:*` terminal cause. Failed
-active attempts never retry without another explicit command. A valid contract
-is required before any output can enable; after changing the limit, explicitly
-negotiate again while outputs are off.
+`SOUR:PD:CONF:MAX`) enables the STUSB4500 NVM `REQ_SRC_CURRENT` mode. That mode
+makes the controller autonomously request all current advertised by the matched
+source PDO on subsequent cold attachments. The update reads sector 4, changes
+only that mode bit, erases and programs only sector 4, then requires an exact
+eight-byte readback before returning success. If an interrupted earlier update
+left the sector erased, it restores the checked-in legacy NVM sector image. An
+already-configured controller is not rewritten and no PD message is sent. After
+`OK:PD:NVM_UPDATED:POWER_CYCLE`, remove all VBUS sources before cold-starting
+from the intended PD source. A valid imported contract is required before any
+output can enable.
 
 During operation, three consecutive valid ADC samples above the lower of the
 configured limit and negotiated operating current latch an input overcurrent

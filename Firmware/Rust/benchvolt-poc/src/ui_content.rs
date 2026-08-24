@@ -5,7 +5,7 @@ pub const AWG_ITEM_COUNT: u8 = 8;
 
 pub const HELP_VISIBLE_LINES: u8 = 7;
 pub const HELP_SCROLL_STEP: u8 = 5;
-pub const HELP_TEXT: &str = "MAIN MENU\nSelect an item:\nPower - control all five DC outputs\nAWG - waveforms on CH4 / CH5\nSettings - save / restore settings\nSystem - firmware version and status\nHelp - this guide\nNAVIGATION\nLong press - go back\nClick - move focus between controls\nTurn - menu selection or control edit\nPOWER SCREENS\nOverview shows all outputs and status.\nClick to focus a channel switch.\nTurn either way to toggle it.\nClick past CH5 to finish.\nWith no focus, turn between screens.\nOn a channel, click through Output,\nVoltage, CV/CC, and Current Limit.\nTurn to edit the focused control.\nClick until focus clears to navigate.\nCV / CC\nCH4 and CH5 support CC mode.\nSelect CC, then set Current Limit.\nThe loop lowers voltage to hold current.\nCC turns green while regulating.\nAWG\nGenerates waveforms on CH4 or CH5.\nTurn, click to edit, turn, then click.\nSine, triangle, ramp, and square.\nFrequency is available up to 120 Hz.\nSquare adds a duty-cycle setting.\nSet Low and High, then choose Start.\nRMS amps and average watts appear\nin the load panel on the right.";
+pub const HELP_TEXT: &str = "MAIN MENU\nPower - five DC outputs\nAWG - CH4 / CH5 waveforms\nSettings - save / restore\nSystem - version and status\nNAVIGATION\nLong press - go back\nClick - move focus\nTurn - select or edit\nPOWER\nOverview shows output status.\nClick to focus, turn to toggle.\nWith no focus, turn screens.\nClick through Output, Voltage,\nCV/CC, and Current Limit.\nTurn to edit, click to finish.\nCV / CC\nCH4 and CH5 support CC.\nSet CC and Current Limit.\nAWG\nCH4 or CH5, up to 120 Hz.\nSquare includes duty cycle.\nSet Low, High, then Start.\nLoad: RMS A and average W.";
 
 const fn line_count(text: &str) -> u8 {
     let bytes = text.as_bytes();
@@ -31,7 +31,7 @@ mod tests {
     fn menu_counts_and_help_bounds_come_from_the_painted_content() {
         assert_eq!(MAIN_MENU_ITEMS.len(), 5);
         assert_eq!(HELP_TEXT.lines().count(), usize::from(HELP_LINE_COUNT));
-        assert_eq!(HELP_MAX_SCROLL, 28);
+        assert_eq!(HELP_MAX_SCROLL, 17);
         assert_eq!(HELP_MAX_SCROLL + HELP_VISIBLE_LINES, HELP_LINE_COUNT);
     }
 }

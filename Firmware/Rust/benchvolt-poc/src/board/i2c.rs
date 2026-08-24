@@ -198,6 +198,23 @@ where
         self.stop(delay);
         Ok(())
     }
+
+    pub(crate) fn write_registers(
+        &mut self,
+        address: u8,
+        register: u8,
+        values: &[u8],
+        delay: &mut impl DelayUs<u32>,
+    ) -> Result<(), ()> {
+        self.start(delay);
+        let mut acknowledged = self.write_byte(address << 1, delay)
+            && self.write_byte(register, delay);
+        for value in values {
+            acknowledged &= self.write_byte(*value, delay);
+        }
+        self.stop(delay);
+        if acknowledged { Ok(()) } else { Err(()) }
+    }
 }
 
 pub(crate) struct SoftPdBus<'a, SCL, SDA> {
@@ -226,14 +243,8 @@ where
     }
 
     fn write(&mut self, register: u8, values: &[u8]) -> Result<(), PdBusError> {
-        if values.len() > 4 {
-            return Err(PdBusError);
-        }
-        let mut bytes = [0u8; 5];
-        bytes[0] = register;
-        bytes[1..values.len() + 1].copy_from_slice(values);
         self.bus
-            .write_bytes(STUSB4500_ADDRESS, &bytes[..values.len() + 1], self.delay)
+            .write_registers(STUSB4500_ADDRESS, register, values, self.delay)
             .map_err(|_| PdBusError)
     }
 }

@@ -19,11 +19,15 @@ const SINK_PDO_COUNT: u8 = 0x70;
 const SINK_PDO1: u8 = 0x85;
 const SINK_PDO3: u8 = 0x8d;
 const ACTIVE_RDO: u8 = 0x91;
+const FTP_PASSWORD: u8 = 0x95;
+const FTP_CTRL0: u8 = 0x96;
+const FTP_CTRL1: u8 = 0x97;
+const FTP_BUFFER: u8 = 0x53;
+const CANONICAL_NVM_SECTOR4: [u8; 8] = [0x00, 0x64, 0x90, 0x21, 0x43, 0x00, 0x50, 0xfb];
 const DEVICE_IDS: [u8; 2] = [0x25, 0x21];
 const PE_SINK_READY: u8 = 0x18;
 const PD_MESSAGE_RECEIVED: u8 = 0x04;
 const GET_SOURCE_CAPABILITIES: [u8; 2] = [0x07, 0x00];
-const SOFT_RESET: [u8; 2] = [0x0d, 0x00];
 const SEND_COMMAND: u8 = 0x26;
 const OPERATION_TIMEOUT_MS: u16 = 500;
 const PASSIVE_DISCOVERY_MS: u16 = 500;
@@ -70,6 +74,12 @@ pub struct Contract {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BusError;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NvmUpdate {
+    AlreadyConfigured,
+    Updated,
+}
 
 pub trait PdBus {
     fn read(&mut self, register: u8, values: &mut [u8]) -> Result<(), BusError>;
@@ -123,6 +133,77 @@ pub fn read_diagnostics(bus: &mut impl PdBus) -> Result<Diagnostics, BusError> {
         sink_pdo_count,
         active_rdo,
     })
+}
+
+fn ftp_wait(bus: &mut impl PdBus) -> Result<(), PdError> {
+    for _ in 0..255 {
+        let mut status = [0];
+        bus.read(FTP_CTRL0, &mut status).map_err(|_| PdError::Bus)?;
+        if status[0] & 0x10 == 0 {
+            return Ok(());
+        }
+    }
+    Err(PdError::Timeout)
+}
+
+fn ftp_exit(bus: &mut impl PdBus) -> Result<(), PdError> {
+    bus.write(FTP_CTRL0, &[0x40]).map_err(|_| PdError::Bus)?;
+    bus.write(FTP_CTRL1, &[0]).map_err(|_| PdError::Bus)?;
+    bus.write(FTP_PASSWORD, &[0]).map_err(|_| PdError::Bus)
+}
+
+fn read_nvm_sector4(bus: &mut impl PdBus) -> Result<[u8; 8], PdError> {
+    bus.write(FTP_PASSWORD, &[0x47]).map_err(|_| PdError::Bus)?;
+    bus.write(FTP_CTRL0, &[0]).map_err(|_| PdError::Bus)?;
+    bus.write(FTP_CTRL0, &[0xc0]).map_err(|_| PdError::Bus)?;
+    bus.write(FTP_CTRL1, &[0]).map_err(|_| PdError::Bus)?;
+    bus.write(FTP_CTRL0, &[0xd4]).map_err(|_| PdError::Bus)?;
+    ftp_wait(bus)?;
+    let mut sector = [0; 8];
+    bus.read(FTP_BUFFER, &mut sector).map_err(|_| PdError::Bus)?;
+    bus.write(FTP_CTRL0, &[0]).map_err(|_| PdError::Bus)?;
+    ftp_exit(bus)?;
+    Ok(sector)
+}
+
+/// Persist the STUSB4500 mode that requests all current advertised by a
+/// matching source PDO. Only sector 4 is erased, the other seven bytes are
+/// preserved, and the programmed bit is read back before success is returned.
+pub fn configure_request_source_current(bus: &mut impl PdBus) -> Result<NvmUpdate, PdError> {
+    let mut sector = read_nvm_sector4(bus)?;
+    let erased = sector == [0xff; 8];
+    if erased {
+        sector = CANONICAL_NVM_SECTOR4;
+    }
+    if !erased && sector[6] & 0x10 != 0 {
+        return Ok(NvmUpdate::AlreadyConfigured);
+    }
+    if !erased {
+        sector[6] |= 0x10;
+    }
+
+    bus.write(FTP_PASSWORD, &[0x47]).map_err(|_| PdError::Bus)?;
+    bus.write(FTP_BUFFER, &[0]).map_err(|_| PdError::Bus)?;
+    bus.write(FTP_CTRL0, &[0]).map_err(|_| PdError::Bus)?;
+    bus.write(FTP_CTRL0, &[0xc0]).map_err(|_| PdError::Bus)?;
+    for opcode in [0x82, 0x07, 0x05] {
+        bus.write(FTP_CTRL1, &[opcode]).map_err(|_| PdError::Bus)?;
+        bus.write(FTP_CTRL0, &[0xd0]).map_err(|_| PdError::Bus)?;
+        ftp_wait(bus)?;
+    }
+    bus.write(FTP_BUFFER, &sector).map_err(|_| PdError::Bus)?;
+    for (opcode, control) in [(0x01, 0xd0), (0x06, 0xd4)] {
+        bus.write(FTP_CTRL0, &[0xc0]).map_err(|_| PdError::Bus)?;
+        bus.write(FTP_CTRL1, &[opcode]).map_err(|_| PdError::Bus)?;
+        bus.write(FTP_CTRL0, &[control]).map_err(|_| PdError::Bus)?;
+        ftp_wait(bus)?;
+    }
+    ftp_exit(bus)?;
+
+    if read_nvm_sector4(bus)? != sector {
+        return Err(PdError::ContractMismatch);
+    }
+    Ok(NvmUpdate::Updated)
 }
 
 pub fn decode_fixed_pdo(raw: u32, source_position: u8) -> Option<FixedPdo> {
@@ -440,13 +521,6 @@ impl Negotiator {
             .map_err(|_| PdError::Bus)
     }
 
-    fn send_soft_reset(bus: &mut impl PdBus) -> Result<(), PdError> {
-        bus.write(TX_HEADER, &SOFT_RESET)
-            .map_err(|_| PdError::Bus)?;
-        bus.write(COMMAND_CTRL, &[SEND_COMMAND])
-            .map_err(|_| PdError::Bus)
-    }
-
     fn import_passive(
         &mut self,
         bus: &mut impl PdBus,
@@ -544,7 +618,11 @@ impl Negotiator {
                         .ok_or(PdError::NoSuitablePdo)?;
                         bus.write(SINK_PDO3, &sink_pdo.to_le_bytes())
                             .map_err(|_| PdError::Bus)?;
-                        Self::send_soft_reset(bus)?;
+                        // Re-advertising the source capabilities makes the STUSB4500
+                        // re-run its autonomous match against the updated RAM PDO.
+                        // A PD Soft Reset drops VBUS on the tested PPS source, resets
+                        // the MCU, and loses the volatile PDO before it can be used.
+                        Self::send_get_source_capabilities(bus)?;
                         self.state = State::WaitContract {
                             deadline: now.wrapping_add(OPERATION_TIMEOUT_MS),
                             selection,
@@ -656,6 +734,77 @@ mod tests {
         fn write(&mut self, _: u8, _: &[u8]) -> Result<(), BusError> {
             Err(BusError)
         }
+    }
+
+    struct NvmBus {
+        sector: [u8; 8],
+        buffer: [u8; 8],
+        opcode: u8,
+        programs: u8,
+    }
+
+    impl PdBus for NvmBus {
+        fn read(&mut self, register: u8, values: &mut [u8]) -> Result<(), BusError> {
+            match register {
+                FTP_CTRL0 => values[0] = 0,
+                FTP_BUFFER => values.copy_from_slice(&self.buffer[..values.len()]),
+                _ => return Err(BusError),
+            }
+            Ok(())
+        }
+
+        fn write(&mut self, register: u8, values: &[u8]) -> Result<(), BusError> {
+            match register {
+                FTP_PASSWORD => {}
+                FTP_CTRL1 => self.opcode = values[0] & 7,
+                FTP_BUFFER if values.len() == 8 => self.buffer.copy_from_slice(values),
+                FTP_BUFFER => self.buffer.fill(values[0]),
+                FTP_CTRL0 if values[0] & 0x10 != 0 => match self.opcode {
+                    0 => self.buffer = self.sector,
+                    5 => self.sector.fill(0xff),
+                    6 => {
+                        self.sector = self.buffer;
+                        self.programs += 1;
+                    }
+                    _ => {}
+                },
+                FTP_CTRL0 => {}
+                _ => return Err(BusError),
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn request_source_current_nvm_update_is_verified_and_idempotent() {
+        let original = [0x00, 0x64, 0x90, 0x21, 0x43, 0x00, 0x40, 0xfb];
+        let mut bus = NvmBus {
+            sector: original,
+            buffer: [0; 8],
+            opcode: 0,
+            programs: 0,
+        };
+
+        assert_eq!(
+            configure_request_source_current(&mut bus),
+            Ok(NvmUpdate::Updated)
+        );
+        assert_eq!(bus.sector[6], 0x50);
+        assert_eq!(&bus.sector[..6], &original[..6]);
+        assert_eq!(bus.sector[7], original[7]);
+        assert_eq!(bus.programs, 1);
+        assert_eq!(
+            configure_request_source_current(&mut bus),
+            Ok(NvmUpdate::AlreadyConfigured)
+        );
+        assert_eq!(bus.programs, 1);
+
+        bus.sector = [0xff; 8];
+        assert_eq!(
+            configure_request_source_current(&mut bus),
+            Ok(NvmUpdate::Updated)
+        );
+        assert_eq!(bus.sector, CANONICAL_NVM_SECTOR4);
     }
 
     #[test]
@@ -981,7 +1130,7 @@ mod tests {
             Operation::Read(RX_BYTE_COUNT, vec![12]),
             Operation::Read(RX_DATA, source_bytes),
             Operation::Write(SINK_PDO3, requested.to_vec()),
-            Operation::Write(TX_HEADER, SOFT_RESET.to_vec()),
+            Operation::Write(TX_HEADER, GET_SOURCE_CAPABILITIES.to_vec()),
             Operation::Write(COMMAND_CTRL, vec![SEND_COMMAND]),
             Operation::Read(PORT_STATUS, vec![1]),
             Operation::Read(PE_FSM, vec![PE_SINK_READY]),

@@ -16,6 +16,7 @@ const PD_MESSAGE_RECEIVED: u8 = 0x04;
 const GET_SOURCE_CAPABILITIES: [u8; 2] = [0x07, 0x00];
 const SEND_COMMAND: u8 = 0x26;
 const OPERATION_TIMEOUT_MS: u16 = 500;
+const RETRY_BACKOFF_MS: u16 = 2_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PdError {
@@ -179,6 +180,7 @@ pub enum ServiceEvent {
 pub struct Service {
     negotiator: Negotiator,
     cadence_ms: u16,
+    retry_ms: u16,
 }
 
 impl Service {
@@ -186,6 +188,7 @@ impl Service {
         Self {
             negotiator: Negotiator::new(current_cap_ma),
             cadence_ms: 0,
+            retry_ms: 0,
         }
     }
 
@@ -197,14 +200,27 @@ impl Service {
         requested_current_cap_ma: u16,
         bus: &mut B,
     ) -> [Option<ServiceEvent>; 2] {
+        if outputs_off && self.negotiator.failed().is_some() {
+            self.retry_ms = self.retry_ms.saturating_add(elapsed_ms);
+        } else {
+            self.retry_ms = 0;
+        }
         self.cadence_ms = self.cadence_ms.wrapping_add(elapsed_ms);
+        let mut events = [None; 2];
+        let retried = outputs_off && self.retry_ms >= RETRY_BACKOFF_MS;
+        if retried {
+            self.negotiator.restart(requested_current_cap_ma);
+            self.retry_ms = 0;
+            self.cadence_ms = self.cadence_ms.max(20);
+            events[0] = Some(ServiceEvent::NegotiationStarted);
+        }
         if self.cadence_ms < 20 {
-            return [None; 2];
+            return events;
         }
         self.cadence_ms = 0;
-        let mut events = [None; 2];
         if outputs_off && self.negotiator.current_cap_ma() != requested_current_cap_ma {
             self.negotiator.restart(requested_current_cap_ma);
+            self.retry_ms = 0;
             events[0] = Some(ServiceEvent::NegotiationStarted);
         }
         events[1] = self.negotiator.step(bus, now).map(ServiceEvent::Pd);
@@ -445,6 +461,25 @@ mod tests {
 
         let events = service.tick(20, 40, true, 2_000, &mut bus);
         assert_eq!(events[0], Some(ServiceEvent::NegotiationStarted));
+    }
+
+    #[test]
+    fn failed_pd_negotiation_retries_with_outputs_off_after_backoff() {
+        let mut service = Service::new(2_000);
+        let mut bus = FailingBus;
+        assert_eq!(
+            service.tick(20, 20, true, 2_000, &mut bus),
+            [None, Some(ServiceEvent::Pd(PdEvent::Lost(PdError::Bus)))]
+        );
+
+        assert_eq!(service.tick(2_000, 2_020, false, 2_000, &mut bus), [None; 2]);
+        assert_eq!(service.tick(1_999, 4_019, true, 2_000, &mut bus), [None; 2]);
+        let retried = service.tick(1, 4_020, true, 2_000, &mut bus);
+        assert_eq!(retried[0], Some(ServiceEvent::NegotiationStarted));
+        assert_eq!(
+            retried[1],
+            Some(ServiceEvent::Pd(PdEvent::Lost(PdError::Bus)))
+        );
     }
 
     fn fixed(millivolts: u16, milliamps: u16) -> u32 {

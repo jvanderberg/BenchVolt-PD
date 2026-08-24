@@ -54,6 +54,47 @@ pub const fn tps55289_current_code(milliamps: u16) -> u8 {
     }
 }
 
+#[inline(always)]
+pub const fn tps55289_configuration_registers(
+    vout_fs: u8,
+    mode: u8,
+    slew: u8,
+    enable_output: bool,
+    forced_pwm: bool,
+) -> Option<[u8; 3]> {
+    if vout_fs == 0xff || mode == 0xff || slew == 0xff {
+        return None;
+    }
+    let vout_fs = (vout_fs & !(0x80 | 0x03)) | 0x03;
+    let mode = if enable_output {
+        mode | 0x80
+    } else {
+        mode & !0x80
+    };
+    let mode = if forced_pwm {
+        mode | 0x02
+    } else {
+        mode & !0x02
+    };
+    let slew = if forced_pwm {
+        (slew & !0x03) | 0x03
+    } else {
+        slew
+    };
+    Some([vout_fs, mode, slew])
+}
+
+#[inline(always)]
+pub const fn tps55289_output_mode(mode: u8, enabled: bool) -> Option<u8> {
+    if mode == 0xff {
+        None
+    } else if enabled {
+        Some(mode | 0x80)
+    } else {
+        Some(mode & !0x80)
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ProtectionSnapshot {
     pub active: bool,
@@ -1218,6 +1259,28 @@ mod tests {
         assert_eq!(tps55289_current_code(50), 0x81);
         assert_eq!(tps55289_current_code(3_000), 0xbc);
         assert_eq!(tps55289_current_code(u16::MAX), 0xff);
+    }
+
+    #[test]
+    fn tps_register_updates_reject_invalid_readback_before_output_enable() {
+        assert_eq!(
+            tps55289_configuration_registers(0x80, 0x02, 0x00, false, false),
+            Some([0x03, 0x00, 0x00])
+        );
+        assert_eq!(
+            tps55289_configuration_registers(0x00, 0x00, 0x00, true, true),
+            Some([0x03, 0x82, 0x03])
+        );
+        for invalid in [(0xff, 0x00, 0x00), (0x00, 0xff, 0x00), (0x00, 0x00, 0xff)] {
+            assert_eq!(
+                tps55289_configuration_registers(invalid.0, invalid.1, invalid.2, true, false),
+                None
+            );
+        }
+        assert_eq!(tps55289_output_mode(0x02, true), Some(0x82));
+        assert_eq!(tps55289_output_mode(0x82, false), Some(0x02));
+        assert_eq!(tps55289_output_mode(0xff, true), None);
+        assert_eq!(tps55289_output_mode(0xff, false), None);
     }
 
     #[derive(Default)]

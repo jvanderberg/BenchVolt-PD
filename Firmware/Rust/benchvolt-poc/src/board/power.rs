@@ -1,8 +1,8 @@
 use super::i2c::SoftI2c;
 use crate::{record_hw_retries, LAST_HW_ERROR, LAST_HW_OPERATION};
 use benchvolt_poc::power::{
-    tps55289_current_code, tps55289_output_acknowledged, tps55289_voltage_code, DriverOperation,
-    PowerDriver, Rail,
+    tps55289_configuration_registers, tps55289_current_code, tps55289_output_acknowledged,
+    tps55289_output_mode, tps55289_voltage_code, DriverOperation, PowerDriver, Rail,
 };
 use core::sync::atomic::Ordering;
 use embedded_hal::{
@@ -155,30 +155,17 @@ where
         let vout_fs = bus
             .read_register(address, VOUT_FS, delay)
             .map_err(|_| HardwareError::Bus)?;
-        let vout_fs = (vout_fs & !(0x80 | 0x03)) | 0x03;
         let code = tps55289_voltage_code(millivolts);
         let current_code = tps55289_current_code(current_limit_ma);
         let mode = bus
             .read_register(address, MODE, delay)
             .map_err(|_| HardwareError::Bus)?;
-        let mode = if enable_output {
-            mode | 0x80
-        } else {
-            mode & !0x80
-        };
-        let mode = if forced_pwm {
-            mode | 0x02
-        } else {
-            mode & !0x02
-        };
         let slew = bus
             .read_register(address, VOUT_SR, delay)
             .map_err(|_| HardwareError::Bus)?;
-        let slew = if forced_pwm {
-            (slew & !0x03) | 0x03
-        } else {
-            slew
-        };
+        let [vout_fs, mode, slew] =
+            tps55289_configuration_registers(vout_fs, mode, slew, enable_output, forced_pwm)
+                .ok_or(HardwareError::Verify)?;
         for (register, value) in [
             (VOUT_FS, vout_fs),
             (REF_LSB, code as u8),
@@ -214,7 +201,7 @@ where
         let old = bus
             .read_register(address, MODE, delay)
             .map_err(|_| HardwareError::Bus)?;
-        let next = if enabled { old | 0x80 } else { old & !0x80 };
+        let next = tps55289_output_mode(old, enabled).ok_or(HardwareError::Verify)?;
         bus.write_register(address, MODE, next, delay)
             .map_err(|_| HardwareError::Bus)?;
         if bus

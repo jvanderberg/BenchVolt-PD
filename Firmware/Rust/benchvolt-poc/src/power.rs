@@ -783,6 +783,7 @@ impl<D: PowerDriver> PowerExecutor<D> {
         Some(Self::completion(plan))
     }
 
+    #[inline(never)]
     pub fn submit(&mut self, state: &AppState, effect: PowerEffect) -> Option<Action> {
         if let PowerEffect::Voltage {
             channel,

@@ -11,7 +11,7 @@ use core::{
 };
 
 use benchvolt_poc::app::{
-    Action, AppReducer, AppState, AwgSource, AwgStatus, Measurement, ProfileRequest, ProfileStatus,
+    Action, AppReducer, AppState, AwgSource, AwgStatus, ProfileRequest, ProfileStatus,
     RegulationMode,
 };
 use benchvolt_poc::arb::{
@@ -32,12 +32,14 @@ use benchvolt_poc::settings::{
     decode as decode_settings, encode as encode_settings, PersistentSettings, RecordKind,
     SettingsDebouncer, SettingsRecord, RECORD_SIZE,
 };
-use board::i2c::{SoftI2c, SoftPdBus};
+use board::{
+    adc::{read_channel_measurement, BoundedAdc, MeasurementAccumulator},
+    i2c::{SoftI2c, SoftPdBus},
+};
 use cortex_m::interrupt::Mutex;
 use cortex_m_rt::{entry, exception, ExceptionFrame};
 use display_interface_spi::SPIInterface;
 use embedded_hal::{
-    adc::{Channel, OneShot},
     blocking::delay::{DelayMs, DelayUs},
     digital::v2::{InputPin, OutputPin},
 };
@@ -46,7 +48,6 @@ use mipidsi::{Builder, ColorInversion, ModelOptions, Orientation};
 use reducto::EffectApp;
 use stm32_usbd::{MemoryAccess, UsbBus, UsbPeripheral};
 use stm32f0xx_hal::{
-    adc::{Adc, AdcSampleTime},
     delay::Delay,
     gpio::{
         gpioa::{PA11, PA12},
@@ -378,99 +379,6 @@ fn queue_usb_response(bytes: &[u8]) {
 
 fn benchvolt_display_offset(_: &ModelOptions) -> (u16, u16) {
     (0, 35)
-}
-
-fn read_adc_mv<P>(adc: &mut Adc, pin: &mut P) -> Option<u16>
-where
-    P: Channel<Adc, ID = u8>,
-{
-    const SAMPLE_COUNT: u32 = 4;
-    // The STM32F0 ADC sample capacitor retains the previous mux channel.
-    // Discard the first conversion so a high-impedance voltage divider cannot
-    // appear as a false current spike on the immediately following channel.
-    let _: u16 = adc.read(pin).ok()?;
-    let mut sum = 0u32;
-    for _ in 0..SAMPLE_COUNT {
-        let sample: u16 = match adc.read(pin) {
-            Ok(value) => value,
-            Err(_) => return None,
-        };
-        sum += u32::from(sample);
-    }
-    Some(((sum * 3_300 / SAMPLE_COUNT + 2_047) / 4_095) as u16)
-}
-
-fn read_channel_measurement<VP, IP>(
-    adc: &mut Adc,
-    voltage_pin: &mut VP,
-    current_pin: &mut IP,
-    voltage_scale_numerator: u16,
-    voltage_scale_denominator: u16,
-) -> Measurement
-where
-    VP: Channel<Adc, ID = u8>,
-    IP: Channel<Adc, ID = u8>,
-{
-    match (read_adc_mv(adc, voltage_pin), read_adc_mv(adc, current_pin)) {
-        (Some(input_mv), Some(current_input_mv)) => Measurement {
-            millivolts: ((u32::from(input_mv) * u32::from(voltage_scale_numerator)
-                / u32::from(voltage_scale_denominator))
-            .min(u32::from(u16::MAX))) as u16,
-            milliamps: u32::from(current_input_mv)
-                .saturating_mul(2)
-                .min(u32::from(u16::MAX)) as u16,
-            valid: true,
-        },
-        _ => Measurement {
-            millivolts: 0,
-            milliamps: 0,
-            valid: false,
-        },
-    }
-}
-
-#[derive(Clone, Copy)]
-struct MeasurementAccumulator {
-    millivolts: u32,
-    milliamps: u32,
-    samples: u8,
-    valid: bool,
-}
-
-impl MeasurementAccumulator {
-    const fn new() -> Self {
-        Self {
-            millivolts: 0,
-            milliamps: 0,
-            samples: 0,
-            valid: true,
-        }
-    }
-
-    fn push(&mut self, measurement: Measurement) {
-        self.valid &= measurement.valid;
-        self.millivolts += u32::from(measurement.millivolts);
-        self.milliamps += u32::from(measurement.milliamps);
-        self.samples = self.samples.saturating_add(1);
-    }
-
-    fn take(&mut self) -> Measurement {
-        let result = if self.valid && self.samples > 0 {
-            Measurement {
-                millivolts: (self.millivolts / u32::from(self.samples)) as u16,
-                milliamps: (self.milliamps / u32::from(self.samples)) as u16,
-                valid: true,
-            }
-        } else {
-            Measurement {
-                millivolts: 0,
-                milliamps: 0,
-                valid: false,
-            }
-        };
-        *self = Self::new();
-        result
-    }
 }
 
 struct BenchUsb {
@@ -1885,8 +1793,10 @@ fn main() -> ! {
             gpioc.pc0.into_analog(cs),
         )
     });
-    let mut adc = Adc::new(dp.ADC, &mut rcc);
-    adc.set_sample_time(AdcSampleTime::T_71);
+    let mut adc = match BoundedAdc::new(dp.ADC, &mut rcc) {
+        Ok(adc) => adc,
+        Err(()) => emergency_reset(),
+    };
 
     let (sck, miso, mosi, dc, rst, cs, scl, sda, aux_scl, aux_sda, pd_scl, pd_sda, _pd_alert) =
         cortex_m::interrupt::free(|cs_token| {

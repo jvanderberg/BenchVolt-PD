@@ -1,81 +1,95 @@
-# r3 USB-C routing erratum
+# r3 USB-C routing and shared-VBUS erratum
 
-This note applies to the r3 schematic and boards assembled from it. The stacked
-`XUBF-0336-24B02` connector does not route both CC contacts of either physical
-USB-C receptacle to the STUSB4500. USB-C attachment is therefore dependent on
-plug orientation, and the two receptacles are not independent power domains.
+This note applies to the r3 schematic and boards assembled from it. It records
+the definitive wiring of the stacked `XUBF-0336-24B02` connector, the shared
+VBUS hazard, and connected-board failures observed on the PD/COMM receptacle.
 
 ## Definitive schematic connections
 
-The upper receptacle is labelled `A: USB PD/COMM SIDE`:
+The connector symbol groups contacts by receptacle number, not by their
+vertical placement in the drawing.
 
-- `1A5 / CC1` is connected to the STUSB4500 `CC1` pin.
-- `2B5 / CC2` is unconnected.
-- `USB_A_P` and `USB_A_N` can be selected by mechanical switch S2 for MCU USB
-  data.
+Receptacle A is labelled `USB PD/COMM SIDE`:
 
-The lower receptacle is labelled `B: USB COMM SIDE`:
+- `1A5 / CC1` connects to STUSB4500 `CC1`.
+- `1B5 / CC2` connects to STUSB4500 `CC2`.
+- Both plug orientations' D+/D- contacts connect to `USB_A_P` and `USB_A_N`.
+- Mechanical switch S2 can connect `USB_A_P` and `USB_A_N` to the MCU USB data
+  pair.
 
-- `1B5 / CC2` is connected to the STUSB4500 `CC2` pin.
-- `2A5 / CC1` is unconnected.
-- `USB_B_P` and `USB_B_N` can be selected by S2 for MCU USB data.
+Receptacle B is labelled `USB COMM SIDE`:
+
+- `2A5 / CC1` and `2B5 / CC2` are both unconnected. This receptacle has no
+  USB-C sink termination and is not expected to work from a USB-C-to-USB-C
+  host connection.
+- Both plug orientations' D+/D- contacts connect to `USB_B_P` and `USB_B_N`.
+- S2 can connect `USB_B_P` and `USB_B_N` to the MCU USB data pair.
+- A USB-A-to-USB-C cable can carry data because a legacy USB-A source supplies
+  VBUS without relying on USB-C CC attachment.
 
 All VBUS contacts of both receptacles connect to the same `VBUS` net. There is
-no power isolation between the upper and lower receptacles. Q1 separates this
-shared connector-side VBUS from downstream `VBUS_SINK`; it does not isolate
-the receptacles from each other. S2 switches only the USB 2.0 data pair.
+no power isolation between receptacles A and B. Q1 separates the shared
+connector-side VBUS from downstream `VBUS_SINK`; it does not isolate the two
+receptacles. S2 switches only D+ and D-.
 
-## Consequences
+## Connected-board evidence
 
-- The upper PD/COMM receptacle can advertise the STUSB4500 sink termination in
-  only one plug orientation. In the other orientation the source sees the
-  unconnected `2B5 / CC2` contact, so the controller remains detached and PDO
-  negotiation cannot start.
-- Flipping the USB-C plug at the board changes whether the routed CC contact is
-  used. A working orientation should change `SYST:PD:RAW?` from `PORT0x00
-  CC0x20 TYPEC0x01` to an attached state before any PD command is attempted.
-- Connecting a normal powered USB-A-to-USB-C COM cable to the lower receptacle
-  while a PD source powers the upper receptacle connects both sources to the
-  same VBUS net. This is not a supported or safe operating arrangement.
-- Legacy C firmware could appear to work when the upper cable happened to use
-  its routed CC orientation. It also allowed outputs without verifying a PD
-  contract, so powered outputs alone did not prove successful negotiation.
+Receptacle A should support one-cable power and USB data in either plug
+orientation when S2 selects `USB_A`. On the tested board, however:
+
+- No S2 position or cable orientation produced USB CDC data when receptacle A
+  was connected directly to a computer.
+- With a standards-compliant PPS source connected to receptacle A, repeated
+  `SYST:PD:RAW?` snapshots reported `PORT0x00 CC0x20 TYPEC0x01`, meaning the
+  STUSB4500 saw neither source Rp and remained in `ATTACHWAIT_SNK`.
+- The independent sink ADC measured about 19.37 V despite the STUSB4500 having
+  no active RDO. VBUS presence is therefore not evidence of a live PD contract.
+
+The schematic does not explain those failures as intended behavior: both CC
+contacts and both USB 2.0 data orientations are routed for receptacle A. The
+fault boundary is the assembled receptacle-A path: connector joints/footprint,
+CC1 and CC2 continuity through D3 to the STUSB4500, USB_A D+/D- continuity
+through S2, or the corresponding populated components.
 
 ## Safe connection modes
 
 ### One cable for power and data
 
-Use only the upper `USB PD/COMM` receptacle. The other receptacle must remain
-unconnected.
+The schematic-supported arrangement uses only receptacle A, with receptacle B
+unconnected:
 
-1. Connect the upper receptacle to a USB-C host or dock that supplies both USB
-   data and PD power. A charger-only PPS brick does not provide the USB host
-   data connection required for CDC.
-2. Put mechanical switch S2 in the `USB_A_P` / `USB_A_N` position so the MCU
-   data pair is connected to the upper receptacle.
-3. If the STUSB4500 reports detached, flip the USB-C plug at the board because
-   only one CC orientation is routed.
-4. Confirm CDC enumeration, then query `SYST:PD:RAW?`. Require an attached
-   Type-C state and a nonzero RDO before enabling an output.
+1. Connect receptacle A to a USB-C host or dock that supplies both USB data and
+   power. A charger-only PPS brick cannot provide the USB host data connection
+   required for CDC.
+2. Put S2 in the `USB_A_P` / `USB_A_N` position.
+3. Confirm USB CDC enumeration and query `SYST:PD:RAW?`.
+4. Require Type-C attachment and a verified RDO before enabling outputs.
 
-The available fixed PDOs and maximum power are determined by the USB-C host or
-dock. A host that offers data but only 5 V cannot provide the brick's higher
-power merely because the cable supports it.
+This arrangement is presently a diagnostic target, not a verified working
+mode on the tested board. The available fixed PDOs and maximum power are
+determined by the host or dock.
 
 ### Separate PPS source and COM connection
 
-Do not use an ordinary powered USB-A COM cable in this mode. The COM path must
-have its VBUS conductor absent or blocked while retaining D+, D-, and ground,
-for example with a purpose-built USB VBUS blocker/data-only adapter. Without
-such isolation, disconnect the USB-A COM cable before connecting the PPS
-source.
+Do not connect an ordinary powered USB-A-to-USB-C COM cable to receptacle B
+while a separate PD source powers receptacle A. Both sources would connect to
+the same VBUS net. The COM path needs a purpose-built VBUS blocker/data-only
+adapter that retains D+, D-, and ground. Without one, disconnect the USB-A COM
+cable before connecting the PPS source.
 
-## Required board correction
+## Required hardware checks and correction
 
-A corrected revision must route both CC contacts of the intended PD/COMM
-receptacle to the corresponding STUSB4500 `CC1` and `CC2` pins. The COM
-receptacle must not place a second external source directly onto the PD VBUS
-net; add appropriate power-path isolation or omit its VBUS connection according
-to the intended USB architecture.
+With all cables and power removed:
+
+1. Verify continuity from receptacle-A `1A5/CC1` and `1B5/CC2` through D3 to
+   STUSB4500 pins 2 and 4 respectively; check that neither path is shorted to
+   ground.
+2. Verify both receptacle-A D+/D- contact pairs reach `USB_A_P/N` and that S2
+   connects that pair to MCU USB D+/D- in exactly one position.
+3. Inspect the stacked connector footprint, solder joints, D3, and S2 against
+   the populated part numbers.
+4. Correct any assembly/footprint fault found. A later board revision must also
+   isolate or intentionally omit receptacle-B VBUS so a COM cable cannot place
+   a second external source on the PD VBUS net.
 
 Source: [`Schematics/USB_PowerSupply_r3.pdf`](../Schematics/USB_PowerSupply_r3.pdf).

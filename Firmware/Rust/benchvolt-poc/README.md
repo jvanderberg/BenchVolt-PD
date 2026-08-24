@@ -198,11 +198,11 @@ message.
 
 Before connecting both USB receptacles on an r3 board, read the repository's
 [r3 USB-C routing erratum](../../../Docs/r3-usb-c-routing-erratum.md). Both
-receptacles share VBUS, and neither receptacle has both CC orientations routed.
-An ordinary powered USB-A COM cable must not be used at the same time as a
-separate PD source. The supported one-cable arrangement uses the upper
-PD/COMM receptacle, S2 in the USB-A data position, and a USB-C host or dock that
-provides both data and PD power; the board-end plug may need to be flipped.
+receptacles share VBUS without source isolation. An ordinary powered USB-A COM
+cable must not be used at the same time as a separate PD source. The schematic-
+supported one-cable arrangement uses the PD/COMM receptacle, S2 in the USB-A
+data position, and a USB-C host or dock that provides both data and power. That
+mode has not yet enumerated successfully on the tested board.
 
 Use the checked-in uploader rather than importing the desktop GUI. It uses the
 hardened protocol's 60-byte payloads (one 64-byte CDC packet including the

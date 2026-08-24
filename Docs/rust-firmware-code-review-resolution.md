@@ -33,9 +33,11 @@ because `main.rs` has been reduced from 2,663 to 1,012 lines.
   The software-I2C transport now supports the NVM sector's eight-byte write;
   its former four-byte limit was sufficient for PDOs but rejected NVM writes.
 - Passive RDO import rejects capability mismatch, impossible current fields,
-  operating current above the matched local sink PDO, and fixed-supply current
-  above 5 A (`8026e56`). Input protection uses the lower of the user limit and
-  negotiated operating current (`066a3be`, `b8e4325`).
+  and fixed-supply current above 5 A (`8026e56`). Operating current above the
+  matched sink PDO is accepted only when it equals the RDO maximum, which is
+  the STUSB4500 `REQ_SRC_CURRENT` representation of the matched source's full
+  current. Input protection uses the lower of the user limit and negotiated
+  operating current (`066a3be`, `b8e4325`).
 - TPS55289 conversions match the reference C equations; invalid register
   readback fails closed; the two shared rails use the reference hardware's 6 A
   limit; CH5 status read failure is an immediate hardware fault.

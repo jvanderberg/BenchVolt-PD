@@ -330,7 +330,13 @@ pub fn match_passive_contract(
         .min_by_key(|pdo| pdo.millivolts.abs_diff(measured_vbus_mv))
         .ok_or(PdError::ContractMismatch)?;
 
-    if rdo.operating_milliamps > matched.milliamps {
+    // Normally the operating current comes from the matched sink PDO. With
+    // STUSB4500 REQ_SRC_CURRENT enabled, both RDO current fields instead carry
+    // the matched source PDO current, which may legitimately exceed the sink
+    // PDO's minimum requirement.
+    if rdo.operating_milliamps > matched.milliamps
+        && rdo.operating_milliamps != rdo.maximum_milliamps
+    {
         return Err(PdError::ContractMismatch);
     }
 
@@ -963,6 +969,10 @@ mod tests {
         // The RDO maximum reflects source capability and may exceed the local
         // sink PDO as long as the operating current stays within the sink limit.
         assert!(match_passive_contract(&sink_pdos, rdo(1_500, 5_000), 20_000).is_ok());
+
+        // REQ_SRC_CURRENT deliberately books the matched source's full current,
+        // so both RDO fields can exceed the sink PDO's minimum current.
+        assert!(match_passive_contract(&sink_pdos, rdo(5_000, 5_000), 20_000).is_ok());
     }
 
     #[test]

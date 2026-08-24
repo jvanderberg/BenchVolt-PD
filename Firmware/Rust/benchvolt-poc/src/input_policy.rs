@@ -7,6 +7,16 @@ const BUTTON_CLICK_MIN_MS: u16 = 30;
 const OVERVIEW_HOLD_MS: u16 = 500;
 const REBOOT_HOLD_MS: u16 = 3_000;
 
+/// Match the r3 encoder wiring and the legacy C convention: PB13 high on the
+/// PB12 rising edge is an upward/positive adjustment.
+pub const fn encoder_direction(dt_high: bool) -> i8 {
+    if dt_high {
+        1
+    } else {
+        -1
+    }
+}
+
 pub fn encoder_action(state: &AppState, direction: i8, accelerated: i8) -> Option<Action> {
     if direction == 0 {
         return None;
@@ -131,6 +141,12 @@ mod tests {
             encoder_action(&state, -1, -8),
             Some(Action::AdjustFocused(-8))
         ));
+    }
+
+    #[test]
+    fn encoder_direction_matches_the_legacy_hardware_mapping() {
+        assert_eq!(encoder_direction(true), 1);
+        assert_eq!(encoder_direction(false), -1);
     }
 
     #[test]

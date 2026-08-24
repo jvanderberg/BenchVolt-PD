@@ -4,6 +4,8 @@ use cortex_m::interrupt::Mutex;
 use heapless::Deque;
 use stm32f0xx_hal::pac::{self, interrupt};
 
+use benchvolt_poc::input_policy::encoder_direction;
+
 const ENCODER_ACCELERATION_IDLE_MS: u16 = 80;
 
 #[derive(Clone, Copy)]
@@ -23,13 +25,13 @@ fn EXTI4_15() {
     if exti.pr.read().pr12().bit_is_set() {
         // Clear first so another edge can pend while this bounded ISR exits.
         exti.pr.write(|w| w.pr12().set_bit());
-        let clockwise = unsafe { (*pac::GPIOB::ptr()).idr.read().idr13().bit_is_clear() };
+        let dt_high = unsafe { (*pac::GPIOB::ptr()).idr.read().idr13().bit_is_set() };
         cortex_m::interrupt::free(|cs| {
             let pushed = ENCODER_EVENTS
                 .borrow(cs)
                 .borrow_mut()
                 .push_back(EncoderEvent {
-                    direction: if clockwise { 1 } else { -1 },
+                    direction: encoder_direction(dt_high),
                     tick: monotonic_ms(),
                 })
                 .is_ok();

@@ -1,6 +1,7 @@
 #![no_main]
 #![no_std]
 
+mod board;
 mod view;
 
 use core::{
@@ -20,7 +21,7 @@ use benchvolt_poc::arb::{
 };
 use benchvolt_poc::awg::Scheduler as AwgScheduler;
 use benchvolt_poc::load::LoadAccumulator;
-use benchvolt_poc::pd::{BusError as PdBusError, Negotiator as PdNegotiator, PdBus, PdEvent};
+use benchvolt_poc::pd::{Negotiator as PdNegotiator, PdEvent};
 use benchvolt_poc::power::{
     execute_effect, execute_global_shutdown, protection_output, tps55289_status_fault,
     DriverOperation, FirmwareEffectPlanner, PowerDriver, ProtectionMonitor, Rail,
@@ -31,6 +32,7 @@ use benchvolt_poc::settings::{
     decode as decode_settings, encode as encode_settings, PersistentSettings, RecordKind,
     SettingsDebouncer, SettingsRecord, RECORD_SIZE,
 };
+use board::i2c::{SoftI2c, SoftPdBus};
 use cortex_m::interrupt::Mutex;
 use cortex_m_rt::{entry, exception, ExceptionFrame};
 use display_interface_spi::SPIInterface;
@@ -505,237 +507,6 @@ unsafe impl UsbPeripheral for BenchUsb {
 
     fn startup_delay() {
         cortex_m::asm::delay(72);
-    }
-}
-
-struct SoftI2c<SCL, SDA, const HALF_CYCLE_US: u32 = 2> {
-    scl: SCL,
-    sda: SDA,
-}
-
-impl<SCL, SDA, const HALF_CYCLE_US: u32> SoftI2c<SCL, SDA, HALF_CYCLE_US>
-where
-    SCL: OutputPin,
-    SDA: OutputPin + InputPin,
-{
-    fn new(mut scl: SCL, mut sda: SDA) -> Self {
-        scl.set_high().ok();
-        sda.set_high().ok();
-        Self { scl, sda }
-    }
-
-    fn half_cycle(delay: &mut impl DelayUs<u32>) {
-        delay.delay_us(HALF_CYCLE_US);
-    }
-
-    fn start(&mut self, delay: &mut impl DelayUs<u32>) {
-        self.sda.set_high().ok();
-        self.scl.set_high().ok();
-        Self::half_cycle(delay);
-        self.sda.set_low().ok();
-        Self::half_cycle(delay);
-        self.scl.set_low().ok();
-    }
-
-    fn stop(&mut self, delay: &mut impl DelayUs<u32>) {
-        self.sda.set_low().ok();
-        Self::half_cycle(delay);
-        self.scl.set_high().ok();
-        Self::half_cycle(delay);
-        self.sda.set_high().ok();
-        Self::half_cycle(delay);
-    }
-
-    fn write_byte(&mut self, mut value: u8, delay: &mut impl DelayUs<u32>) -> bool {
-        for _ in 0..8 {
-            if value & 0x80 == 0 {
-                self.sda.set_low().ok();
-            } else {
-                self.sda.set_high().ok();
-            }
-            Self::half_cycle(delay);
-            self.scl.set_high().ok();
-            Self::half_cycle(delay);
-            self.scl.set_low().ok();
-            value <<= 1;
-        }
-        self.sda.set_high().ok();
-        Self::half_cycle(delay);
-        self.scl.set_high().ok();
-        Self::half_cycle(delay);
-        let acknowledged = self.sda.is_low().unwrap_or(false);
-        self.scl.set_low().ok();
-        acknowledged
-    }
-
-    fn read_byte(&mut self, acknowledge: bool, delay: &mut impl DelayUs<u32>) -> u8 {
-        self.sda.set_high().ok();
-        let mut value = 0u8;
-        for _ in 0..8 {
-            value <<= 1;
-            self.scl.set_high().ok();
-            Self::half_cycle(delay);
-            if self.sda.is_high().unwrap_or(false) {
-                value |= 1;
-            }
-            self.scl.set_low().ok();
-            Self::half_cycle(delay);
-        }
-        if acknowledge {
-            self.sda.set_low().ok();
-        } else {
-            self.sda.set_high().ok();
-        }
-        Self::half_cycle(delay);
-        self.scl.set_high().ok();
-        Self::half_cycle(delay);
-        self.scl.set_low().ok();
-        self.sda.set_high().ok();
-        value
-    }
-
-    fn read_tmp1075(&mut self, delay: &mut impl DelayUs<u32>) -> Option<i16> {
-        const ADDR_WRITE: u8 = 0x48 << 1;
-        const ADDR_READ: u8 = ADDR_WRITE | 1;
-
-        self.start(delay);
-        if !self.write_byte(ADDR_WRITE, delay) || !self.write_byte(0, delay) {
-            self.stop(delay);
-            return None;
-        }
-        self.start(delay);
-        if !self.write_byte(ADDR_READ, delay) {
-            self.stop(delay);
-            return None;
-        }
-        let msb = self.read_byte(true, delay);
-        let lsb = self.read_byte(false, delay);
-        self.stop(delay);
-        Some(i16::from_be_bytes([msb, lsb]) >> 4)
-    }
-
-    fn write_register(
-        &mut self,
-        address: u8,
-        register: u8,
-        value: u8,
-        delay: &mut impl DelayUs<u32>,
-    ) -> Result<(), ()> {
-        self.start(delay);
-        let acknowledged = self.write_byte(address << 1, delay)
-            && self.write_byte(register, delay)
-            && self.write_byte(value, delay);
-        self.stop(delay);
-        if acknowledged {
-            Ok(())
-        } else {
-            Err(())
-        }
-    }
-
-    fn read_register(
-        &mut self,
-        address: u8,
-        register: u8,
-        delay: &mut impl DelayUs<u32>,
-    ) -> Result<u8, ()> {
-        self.start(delay);
-        if !self.write_byte(address << 1, delay) || !self.write_byte(register, delay) {
-            self.stop(delay);
-            return Err(());
-        }
-        self.start(delay);
-        if !self.write_byte((address << 1) | 1, delay) {
-            self.stop(delay);
-            return Err(());
-        }
-        let value = self.read_byte(false, delay);
-        self.stop(delay);
-        Ok(value)
-    }
-
-    fn read_registers(
-        &mut self,
-        address: u8,
-        register: u8,
-        values: &mut [u8],
-        delay: &mut impl DelayUs<u32>,
-    ) -> Result<(), ()> {
-        self.start(delay);
-        if !self.write_byte(address << 1, delay) || !self.write_byte(register, delay) {
-            self.stop(delay);
-            return Err(());
-        }
-        self.start(delay);
-        if !self.write_byte((address << 1) | 1, delay) {
-            self.stop(delay);
-            return Err(());
-        }
-        let last = values.len().saturating_sub(1);
-        for (index, value) in values.iter_mut().enumerate() {
-            *value = self.read_byte(index != last, delay);
-        }
-        self.stop(delay);
-        Ok(())
-    }
-
-    fn write_bytes(
-        &mut self,
-        address: u8,
-        bytes: &[u8],
-        delay: &mut impl DelayUs<u32>,
-    ) -> Result<(), ()> {
-        self.start(delay);
-        if !self.write_byte(address << 1, delay) {
-            self.stop(delay);
-            return Err(());
-        }
-        for byte in bytes {
-            if !self.write_byte(*byte, delay) {
-                self.stop(delay);
-                return Err(());
-            }
-        }
-        self.stop(delay);
-        Ok(())
-    }
-}
-
-struct SoftPdBus<'a, SCL, SDA> {
-    bus: &'a mut SoftI2c<SCL, SDA, 1>,
-    delay: &'a mut Delay,
-}
-
-impl<SCL, SDA> PdBus for SoftPdBus<'_, SCL, SDA>
-where
-    SCL: OutputPin,
-    SDA: OutputPin + InputPin,
-{
-    fn read(&mut self, register: u8, values: &mut [u8]) -> Result<(), PdBusError> {
-        self.bus
-            .read_registers(
-                benchvolt_poc::pd::STUSB4500_ADDRESS,
-                register,
-                values,
-                self.delay,
-            )
-            .map_err(|_| PdBusError)
-    }
-
-    fn write(&mut self, register: u8, values: &[u8]) -> Result<(), PdBusError> {
-        if values.len() > 4 {
-            return Err(PdBusError);
-        }
-        let mut bytes = [0u8; 5];
-        bytes[0] = register;
-        bytes[1..values.len() + 1].copy_from_slice(values);
-        self.bus
-            .write_bytes(
-                benchvolt_poc::pd::STUSB4500_ADDRESS,
-                &bytes[..values.len() + 1],
-                self.delay,
-            )
-            .map_err(|_| PdBusError)
     }
 }
 
@@ -2472,10 +2243,7 @@ fn main() -> ! {
                 pd_negotiator.restart(app.state().sink_current_limit_ma);
             }
             let event = pd_negotiator.step(
-                &mut SoftPdBus {
-                    bus: &mut pd_bus,
-                    delay: &mut power_driver.delay,
-                },
+                &mut SoftPdBus::new(&mut pd_bus, &mut power_driver.delay),
                 input_ticks,
             );
             if let Some(event) = event {

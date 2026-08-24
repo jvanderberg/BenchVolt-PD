@@ -8,6 +8,8 @@ const RX_BYTE_COUNT: u8 = 0x30;
 const RX_HEADER: u8 = 0x31;
 const RX_DATA: u8 = 0x33;
 const TX_HEADER: u8 = 0x51;
+const SINK_PDO_COUNT: u8 = 0x70;
+const SINK_PDO1: u8 = 0x85;
 const SINK_PDO3: u8 = 0x8d;
 const ACTIVE_RDO: u8 = 0x91;
 const DEVICE_IDS: [u8; 2] = [0x25, 0x21];
@@ -16,6 +18,7 @@ const PD_MESSAGE_RECEIVED: u8 = 0x04;
 const GET_SOURCE_CAPABILITIES: [u8; 2] = [0x07, 0x00];
 const SEND_COMMAND: u8 = 0x26;
 const OPERATION_TIMEOUT_MS: u16 = 500;
+const PASSIVE_DISCOVERY_MS: u16 = 500;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PdError {
@@ -154,6 +157,46 @@ pub fn decode_rdo(bytes: [u8; 4]) -> Result<Rdo, PdError> {
     })
 }
 
+pub fn match_passive_contract(
+    sink_pdos: &[u32],
+    rdo_bytes: [u8; 4],
+    measured_vbus_mv: u16,
+) -> Result<Contract, PdError> {
+    let rdo = decode_rdo(rdo_bytes)?;
+    if rdo.capability_mismatch
+        || rdo.operating_milliamps == 0
+        || rdo.maximum_milliamps == 0
+        || measured_vbus_mv == 0
+    {
+        return Err(PdError::ContractMismatch);
+    }
+
+    // The RDO contains current and source-object position, but no voltage.
+    // A non-mismatch autonomous contract must match one enabled local fixed
+    // sink PDO, so use independently measured VBUS to identify that voltage.
+    let matched = sink_pdos
+        .iter()
+        .copied()
+        .take(3)
+        .enumerate()
+        .filter_map(|(index, raw)| decode_fixed_pdo(raw, index as u8 + 1))
+        .filter(|pdo| pdo.millivolts <= 20_000)
+        .filter(|pdo| {
+            let measured = u32::from(measured_vbus_mv) * 100;
+            let nominal = u32::from(pdo.millivolts);
+            measured >= nominal * 80 && measured <= nominal * 120
+        })
+        .min_by_key(|pdo| pdo.millivolts.abs_diff(measured_vbus_mv))
+        .ok_or(PdError::ContractMismatch)?;
+
+    Ok(Contract {
+        source_position: rdo.source_position,
+        millivolts: matched.millivolts,
+        operating_milliamps: rdo.operating_milliamps,
+        maximum_milliamps: rdo.maximum_milliamps,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
     Discover,
@@ -208,12 +251,30 @@ impl Service {
         &mut self,
         elapsed_ms: u16,
         now: u16,
-        _outputs_off: bool,
-        _requested_current_cap_ma: u16,
+        outputs_off: bool,
+        requested_current_cap_ma: u16,
+        measured_vbus_mv: Option<u16>,
         bus: &mut B,
     ) -> [Option<ServiceEvent>; 2] {
         let mut events = [None; 2];
         if !self.active {
+            self.cadence_ms = self.cadence_ms.saturating_add(elapsed_ms);
+            if self.cadence_ms < PASSIVE_DISCOVERY_MS {
+                return events;
+            }
+            self.cadence_ms = 0;
+            if outputs_off {
+                if let Some(measured_vbus_mv) = measured_vbus_mv {
+                    if let Ok(contract) = self.negotiator.import_passive(
+                        bus,
+                        measured_vbus_mv,
+                        requested_current_cap_ma,
+                    ) {
+                        self.active = true;
+                        events[1] = Some(ServiceEvent::Pd(PdEvent::Negotiated(contract)));
+                    }
+                }
+            }
             return events;
         }
         if self.started_pending {
@@ -290,6 +351,43 @@ impl Negotiator {
             .map_err(|_| PdError::Bus)?;
         bus.write(COMMAND_CTRL, &[SEND_COMMAND])
             .map_err(|_| PdError::Bus)
+    }
+
+    fn import_passive(
+        &mut self,
+        bus: &mut impl PdBus,
+        measured_vbus_mv: u16,
+        current_cap_ma: u16,
+    ) -> Result<Contract, PdError> {
+        let identity = Self::read_byte(bus, DEVICE_ID)?;
+        if !DEVICE_IDS.contains(&identity) {
+            return Err(PdError::WrongDevice);
+        }
+        if Self::read_byte(bus, PORT_STATUS)? & 1 == 0
+            || Self::read_byte(bus, PE_FSM)? != PE_SINK_READY
+        {
+            return Err(PdError::Detached);
+        }
+        let count = usize::from(Self::read_byte(bus, SINK_PDO_COUNT)? & 0x07);
+        if !(1..=3).contains(&count) {
+            return Err(PdError::ContractMismatch);
+        }
+        let mut pdo_bytes = [0u8; 12];
+        bus.read(SINK_PDO1, &mut pdo_bytes[..count * 4])
+            .map_err(|_| PdError::Bus)?;
+        let mut sink_pdos = [0u32; 3];
+        for (pdo, bytes) in sink_pdos
+            .iter_mut()
+            .zip(pdo_bytes[..count * 4].chunks_exact(4))
+        {
+            *pdo = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        }
+        let mut rdo = [0u8; 4];
+        bus.read(ACTIVE_RDO, &mut rdo).map_err(|_| PdError::Bus)?;
+        let contract = match_passive_contract(&sink_pdos[..count], rdo, measured_vbus_mv)?;
+        self.current_cap_ma = current_cap_ma;
+        self.state = State::Ready(contract);
+        Ok(contract)
     }
 
     fn step_result(&mut self, bus: &mut impl PdBus, now: u16) -> Result<Option<PdEvent>, PdError> {
@@ -459,16 +557,19 @@ mod tests {
     }
 
     #[test]
-    fn service_is_passive_until_a_deliberate_request() {
+    fn service_never_transmits_until_a_deliberate_request() {
         let mut service = Service::new(2_000);
         let mut bus = FailingBus;
         for now in [20, 2_020, 4_020, 60_000] {
-            assert_eq!(service.tick(2_000, now, true, 5_000, &mut bus), [None; 2]);
+            assert_eq!(
+                service.tick(2_000, now, true, 5_000, None, &mut bus),
+                [None; 2]
+            );
         }
 
         service.request_negotiation(1_500);
         assert_eq!(
-            service.tick(0, 60_001, true, 5_000, &mut bus),
+            service.tick(0, 60_001, true, 5_000, None, &mut bus),
             [
                 Some(ServiceEvent::NegotiationStarted),
                 Some(ServiceEvent::Pd(PdEvent::Lost(PdError::Bus)))
@@ -483,11 +584,14 @@ mod tests {
         let mut bus = FailingBus;
         service.request_negotiation(2_000);
         assert_eq!(
-            service.tick(0, 0, true, 2_000, &mut bus)[1],
+            service.tick(0, 0, true, 2_000, None, &mut bus)[1],
             Some(ServiceEvent::Pd(PdEvent::Lost(PdError::Bus)))
         );
         for now in [2_000, 4_000, 30_000] {
-            assert_eq!(service.tick(2_000, now, true, 2_000, &mut bus), [None; 2]);
+            assert_eq!(
+                service.tick(2_000, now, true, 2_000, None, &mut bus),
+                [None; 2]
+            );
         }
     }
 
@@ -507,6 +611,34 @@ mod tests {
         assert!(encode_sink_fixed_pdo(9_001, 1_000).is_none());
         assert!(encode_sink_fixed_pdo(9_000, 1_001).is_none());
         assert!(decode_fixed_pdo((1 << 30) | fixed(9_000, 1_000), 1).is_none());
+    }
+
+    #[test]
+    fn passive_contract_uses_measured_vbus_to_identify_the_local_sink_profile() {
+        let sink_pdos = [
+            fixed(5_000, 3_000),
+            fixed(12_000, 2_000),
+            fixed(20_000, 1_500),
+        ];
+        let rdo = ((4u32 << 28) | (1_500u32 / 10 << 10) | (2_250u32 / 10)).to_le_bytes();
+        assert_eq!(
+            match_passive_contract(&sink_pdos, rdo, 19_750),
+            Ok(Contract {
+                source_position: 4,
+                millivolts: 20_000,
+                operating_milliamps: 1_500,
+                maximum_milliamps: 2_250,
+            })
+        );
+        assert_eq!(
+            match_passive_contract(&sink_pdos, rdo, 8_000),
+            Err(PdError::ContractMismatch)
+        );
+        let mismatch = u32::from_le_bytes(rdo) | (1 << 26);
+        assert_eq!(
+            match_passive_contract(&sink_pdos, mismatch.to_le_bytes(), 20_000),
+            Err(PdError::ContractMismatch)
+        );
     }
 
     #[test]
@@ -583,6 +715,47 @@ mod tests {
                 _ => Err(BusError),
             }
         }
+    }
+
+    #[test]
+    fn service_imports_an_autonomous_contract_with_reads_only_after_settling() {
+        let sink_pdos = [
+            fixed(5_000, 3_000),
+            fixed(12_000, 2_000),
+            fixed(20_000, 1_500),
+        ];
+        let rdo = ((3u32 << 28) | (1_500u32 / 10 << 10) | (2_000u32 / 10)).to_le_bytes();
+        let mut bus = ScriptBus(VecDeque::from(vec![
+            Operation::Read(DEVICE_ID, vec![0x25]),
+            Operation::Read(PORT_STATUS, vec![1]),
+            Operation::Read(PE_FSM, vec![PE_SINK_READY]),
+            Operation::Read(SINK_PDO_COUNT, vec![3]),
+            Operation::Read(SINK_PDO1, sink_pdos.map(u32::to_le_bytes).concat()),
+            Operation::Read(ACTIVE_RDO, rdo.to_vec()),
+        ]));
+        let mut service = Service::new(5_000);
+
+        assert_eq!(
+            service.tick(499, 499, true, 2_500, Some(19_800), &mut bus),
+            [None; 2]
+        );
+        assert_eq!(bus.0.len(), 6);
+        assert_eq!(
+            service.tick(1, 500, false, 2_500, Some(19_800), &mut bus),
+            [None; 2]
+        );
+        assert_eq!(bus.0.len(), 6);
+        assert_eq!(
+            service.tick(500, 1_000, true, 2_500, Some(19_800), &mut bus)[1],
+            Some(ServiceEvent::Pd(PdEvent::Negotiated(Contract {
+                source_position: 3,
+                millivolts: 20_000,
+                operating_milliamps: 1_500,
+                maximum_milliamps: 2_000,
+            })))
+        );
+        assert!(bus.0.is_empty());
+        assert_eq!(service.current_cap_ma(), 2_500);
     }
 
     #[test]

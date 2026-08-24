@@ -165,15 +165,20 @@ current, and power in the same tabular format as the overview. A short press
 focuses the sink current protection limit; rotation adjusts it from 0 to 5 A in
 10 mA steps. Startup is deliberately passive: the firmware never transmits a
 PD request or automatically retries one during boot, because some VBUS-powered
-sources hard-reset the supply in response and can create a reboot loop. From a
-terminal, `SYST:PD:NEGOTIATE` (or the legacy `SOUR:PD:CONF:MAX`) explicitly
-starts one bounded attempt. The firmware selects the highest-power fixed PDO at
-or below 20 V, caps requested current to the configured sink limit, writes the
-STUSB4500's third sink PDO in RAM, requests renegotiation, and verifies the
-resulting RDO. The command receives `OK` only after verification, or a typed
-`ERR:PD:*` terminal cause. Failed attempts never retry without another explicit
-command. A valid contract is required before any output can enable; after
-changing the limit, explicitly negotiate again while outputs are off.
+sources hard-reset the supply in response and can create a reboot loop. After
+the recommended 500 ms attach interval, read-only status polling can import a
+contract negotiated autonomously by the STUSB4500. Import requires sink-ready
+state, a valid non-mismatch RDO, a valid input ADC sample, and measured VBUS to
+match one of the controller's enabled fixed sink PDO voltages. It never sends a
+PD message. From a terminal, `SYST:PD:NEGOTIATE` (or the legacy
+`SOUR:PD:CONF:MAX`) explicitly starts one bounded active attempt. The firmware
+selects the highest-power fixed PDO at or below 20 V, caps requested current to
+the configured sink limit, writes the STUSB4500's third sink PDO in RAM,
+requests renegotiation, and verifies the resulting RDO. The command receives
+`OK` only after verification, or a typed `ERR:PD:*` terminal cause. Failed
+active attempts never retry without another explicit command. A valid contract
+is required before any output can enable; after changing the limit, explicitly
+negotiate again while outputs are off.
 
 During operation, three consecutive valid ADC samples above the lower of the
 configured limit and negotiated operating current latch an input overcurrent

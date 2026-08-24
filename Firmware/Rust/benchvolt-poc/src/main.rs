@@ -776,6 +776,7 @@ fn main() -> ! {
                 input_ticks,
                 outputs_off,
                 app.state().sink_current_limit_ma,
+                app.state().sink.valid.then_some(app.state().sink.millivolts),
                 &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
             )
             .into_iter()

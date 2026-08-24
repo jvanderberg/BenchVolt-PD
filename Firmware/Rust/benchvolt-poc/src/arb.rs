@@ -29,6 +29,64 @@ pub struct Start {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeDirective {
+    Run(Start),
+    Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeState {
+    active: Option<Start>,
+    pending_ack: Option<Start>,
+}
+
+impl RuntimeState {
+    pub const fn new() -> Self {
+        Self {
+            active: None,
+            pending_ack: None,
+        }
+    }
+
+    pub fn arm(&mut self, start: Start) {
+        self.active = Some(start);
+        self.pending_ack = Some(start);
+    }
+
+    pub fn directive(&self) -> RuntimeDirective {
+        self.active
+            .map_or(RuntimeDirective::Shutdown, RuntimeDirective::Run)
+    }
+
+    pub fn pending_ack(&self) -> Option<Start> {
+        self.pending_ack
+    }
+
+    pub fn take_pending_ack(&mut self) -> Option<Start> {
+        self.pending_ack.take()
+    }
+
+    pub fn cancel(&mut self, channel: u8) -> bool {
+        let matches = self.active.map(|start| start.channel) == Some(channel)
+            || self.pending_ack.map(|start| start.channel) == Some(channel);
+        if matches {
+            self.active = None;
+            self.pending_ack = None;
+        }
+        matches
+    }
+
+    pub fn finish(&mut self) {
+        self.active = None;
+    }
+
+    pub fn clear(&mut self) {
+        self.active = None;
+        self.pending_ack = None;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParseError {
     Syntax,
     Range,
@@ -351,6 +409,39 @@ impl Default for Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_start(channel: u8) -> Start {
+        Start {
+            channel,
+            count: 3,
+            multiplier_ticks: 1,
+            repetitions: 1,
+        }
+    }
+
+    #[test]
+    fn runtime_stop_cancels_active_start_and_deferred_ack_together() {
+        let start = runtime_start(3);
+        let mut runtime = RuntimeState::new();
+        runtime.arm(start);
+
+        assert!(runtime.cancel(start.channel));
+        assert_eq!(runtime.directive(), RuntimeDirective::Shutdown);
+        assert_eq!(runtime.pending_ack(), None);
+    }
+
+    #[test]
+    fn runtime_stop_for_another_channel_preserves_the_session() {
+        let start = runtime_start(4);
+        let mut runtime = RuntimeState::new();
+        runtime.arm(start);
+
+        assert!(!runtime.cancel(3));
+        assert_eq!(runtime.directive(), RuntimeDirective::Run(start));
+        assert_eq!(runtime.take_pending_ack(), Some(start));
+        assert_eq!(runtime.take_pending_ack(), None);
+        assert_eq!(runtime.directive(), RuntimeDirective::Run(start));
+    }
 
     #[test]
     fn parses_desktop_chunks_and_legacy_or_2khz_start() {

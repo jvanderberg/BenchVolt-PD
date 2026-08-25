@@ -413,7 +413,7 @@ fn menu_flow(out_dir: &Path) {
         let mut data = rgb.clone();
         let mut frame =
             gif::Frame::from_rgb_speed((WIDTH * SCALE) as u16, (HEIGHT * SCALE) as u16, &mut data, 10);
-        frame.delay = 10; // 100 ms -> ~10 fps
+        frame.delay = 30; // 300 ms per frame
         encoder.write_frame(&frame).expect("gif frame");
     }
     println!("wrote menu_flow.gif ({} frames)", rec.frames.len());

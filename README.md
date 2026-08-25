@@ -111,10 +111,12 @@ Notes:
 - USB-C input supporting **PD sink mode**
 - Up to **100 W** USB-PD power input
 
-> [!WARNING]
-> r3 boards have a documented shared-VBUS hazard and an unresolved connected-
-> board failure on the PD/COMM receptacle. Do not connect a powered USB-A COM
-> cable and a separate PD source simultaneously. See the
+> [!NOTE]
+> r3 boards have an unresolved connected-board failure on the PD/COMM
+> receptacle (receptacle A), and the COMM-side receptacle is USB-A-data-only
+> by design (no CC termination, VBUS unconnected). Using a PD source on the
+> PD receptacle together with a USB-A COM cable on the COMM receptacle is
+> supported. See the
 > [r3 USB-C routing erratum](Docs/r3-usb-c-routing-erratum.md).
 
 #### Controls

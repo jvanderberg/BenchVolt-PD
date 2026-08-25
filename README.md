@@ -137,6 +137,26 @@ cargo build --release
 
 This produces an image linked at `0x08008000` for the existing C bootloader. See the [firmware README](Firmware/Rust/benchvolt-poc/README.md) for image generation and the USB flashing runbook (`tools/flash_latest.sh`).
 
+### Installing firmware
+
+Every push to `main` publishes a prebuilt image to the
+[latest release](https://github.com/jvanderberg/BenchVolt-PD/releases/tag/latest)
+(`benchvolt-poc.bin`, linked at `0x08008000` for the stock bootloader). No
+programming hardware is needed - the bootloader accepts uploads over the same
+USB port:
+
+- **Desktop GUI**: open the firmware update tab in
+  [`GUI/BenchVolt-PD.py`](GUI), pick the device's COM port and the `.bin`,
+  and start the upload. The GUI reboots the device into the bootloader,
+  streams the image with CRC verification, and restarts it.
+- **Command line**: `python3 Firmware/Rust/benchvolt-poc/tools/flash_poc.py <port> benchvolt-poc.bin`
+  (needs `pyserial`; `tools/flash_latest.sh` wraps this for locally built
+  images).
+
+A failed or interrupted upload is safe: the bootloader only ever rewrites the
+application partition, so the device falls back to the bootloader and the
+upload can simply be retried.
+
 ### Desktop GUI
 
 The original desktop GUI ([`GUI/BenchVolt-PD.py`](GUI), Python/customtkinter) works with the Rust firmware, including firmware update over USB.

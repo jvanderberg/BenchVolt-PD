@@ -21,6 +21,12 @@ const fn line_count(text: &str) -> u8 {
 }
 
 pub const HELP_LINE_COUNT: u8 = line_count(HELP_TEXT);
+
+/// Section headings are the all-uppercase lines of `HELP_TEXT`. Deriving
+/// this from the content keeps view styling in sync with content edits.
+pub fn is_help_heading(line: &str) -> bool {
+    !line.is_empty() && !line.bytes().any(|byte| byte.is_ascii_lowercase())
+}
 pub const HELP_MAX_SCROLL: u8 = HELP_LINE_COUNT - HELP_VISIBLE_LINES;
 
 pub fn help_footer(scroll: u8) -> String<40> {
@@ -38,6 +44,8 @@ pub fn help_footer(scroll: u8) -> String<40> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
 
     #[test]
@@ -46,6 +54,18 @@ mod tests {
         assert_eq!(HELP_TEXT.lines().count(), usize::from(HELP_LINE_COUNT));
         assert_eq!(HELP_MAX_SCROLL, 17);
         assert_eq!(HELP_MAX_SCROLL + HELP_VISIBLE_LINES, HELP_LINE_COUNT);
+    }
+
+    #[test]
+    fn help_headings_are_exactly_the_five_section_titles() {
+        let headings: std::vec::Vec<&str> = HELP_TEXT
+            .lines()
+            .filter(|line| is_help_heading(line))
+            .collect();
+        assert_eq!(
+            headings,
+            ["MAIN MENU", "NAVIGATION", "POWER", "CV / CC", "AWG"]
+        );
     }
 
     #[test]

@@ -37,7 +37,6 @@ impl ServiceCadence {
     pub const fn healthy_for(&self, milliseconds: u32) -> bool {
         self.health_ms >= milliseconds
     }
-
 }
 
 #[inline(always)]

@@ -5,6 +5,21 @@
 pub const CH5_MIN_VOLTAGE_MV: u16 = 800;
 pub const CH5_MAX_VOLTAGE_MV: u16 = 22_000;
 
+/// CH4 (VLow) adjustable output range.
+pub const CH4_MIN_VOLTAGE_MV: u16 = 500;
+pub const CH4_MAX_VOLTAGE_MV: u16 = 5_000;
+
+/// Minimum drive voltage for the adjustable channels (CH4 = index 3,
+/// CH5 = index 4). Single source of truth for the AWG editor and the
+/// CC regulation floor.
+pub const fn adjustable_min_mv(channel: u8) -> u16 {
+    if channel == 3 {
+        CH4_MIN_VOLTAGE_MV
+    } else {
+        CH5_MIN_VOLTAGE_MV
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

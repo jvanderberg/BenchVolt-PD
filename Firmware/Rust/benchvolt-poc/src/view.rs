@@ -14,15 +14,15 @@ use heapless::String;
 use reducto::View;
 
 use benchvolt_poc::app::{
-    AppState, AwgStatus, AwgWaveform, ChannelSnapshot, ControlFocus, Fault, OutputTransition,
-    ProfileStatus, RegulationMode, Screen, TemperatureUnit,
+    AppState, AwgStatus, AwgWaveform, ChannelSnapshot, ControlFocus, Fault, ProfileStatus,
+    RegulationMode, Screen, TemperatureUnit,
 };
-use benchvolt_poc::ui_content::{
-    help_footer, HELP_TEXT, HELP_VISIBLE_LINES, MAIN_MENU_ITEMS,
-};
+use benchvolt_poc::ui_content::{help_footer, HELP_TEXT, HELP_VISIBLE_LINES, MAIN_MENU_ITEMS};
 use benchvolt_poc::view_projection::{
-    awg_damage, centered_origin, framed_value_damage, pd_contract_label, seven_segment_mask,
-    sink_projection, FramedValueDamage, SinkPdStatus, SinkProjection,
+    awg_damage, centered_origin, channel_projection, detail_projection, framed_value_damage,
+    pd_contract_label, seven_segment_mask, sink_projection, temperature_projection,
+    ChannelProjection, DetailProjection, FramedValueDamage, SinkPdStatus, SinkProjection,
+    StatusProjection, TemperatureProjection,
 };
 
 const TABLE_TOP: i32 = 24;
@@ -31,104 +31,6 @@ const ROW_HEIGHT: i32 = 24;
 const TABLE_BOTTOM: i32 = HEADER_BOTTOM + 5 * ROW_HEIGHT;
 const COLUMN_EDGES: [i32; 7] = [0, 25, 78, 131, 184, 237, 319];
 const COLUMN_TEXT_X: [i32; 6] = [9, 32, 85, 138, 191, 246];
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum TemperatureProjection {
-    Invalid,
-    Tenths(i32, TemperatureUnit),
-}
-
-fn temperature_projection(state: &AppState) -> TemperatureProjection {
-    if !state.temp_valid {
-        return TemperatureProjection::Invalid;
-    }
-    let tenths_c = i32::from(state.temp_sixteenths_c) * 10 / 16;
-    match state.temperature_unit {
-        TemperatureUnit::Celsius => {
-            TemperatureProjection::Tenths(tenths_c, TemperatureUnit::Celsius)
-        }
-        TemperatureUnit::Fahrenheit => {
-            TemperatureProjection::Tenths(tenths_c * 9 / 5 + 320, TemperatureUnit::Fahrenheit)
-        }
-    }
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum StatusProjection {
-    Fault,
-    On,
-    Wait,
-    Off,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-struct ChannelProjection {
-    setpoint_centivolts: u16,
-    limit_centiamps: u16,
-    measured_centivolts: Option<u16>,
-    measured_centiamps: Option<u16>,
-    status: StatusProjection,
-    regulation_mode: RegulationMode,
-    regulating_current: bool,
-}
-
-fn channel_projection(channel: &ChannelSnapshot) -> ChannelProjection {
-    let status = match channel.fault {
-        Fault::None if channel.transition != OutputTransition::Stable => StatusProjection::Wait,
-        Fault::None if channel.physical_enabled => StatusProjection::On,
-        Fault::None if channel.requested_enabled => StatusProjection::Wait,
-        Fault::None => StatusProjection::Off,
-        _ => StatusProjection::Fault,
-    };
-    ChannelProjection {
-        setpoint_centivolts: channel.setpoint_mv / 10,
-        limit_centiamps: channel.current_limit_ma / 10,
-        measured_centivolts: channel
-            .measurement
-            .valid
-            .then_some(channel.measurement.millivolts / 10),
-        measured_centiamps: channel
-            .measurement
-            .valid
-            .then_some(channel.measurement.milliamps / 10),
-        status,
-        regulation_mode: channel.regulation_mode,
-        regulating_current: channel.regulation_mode == RegulationMode::Cc
-            && channel.physical_enabled
-            && channel.drive_mv < channel.setpoint_mv,
-    }
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-struct DetailProjection {
-    voltage_centivolts: Option<u16>,
-    current_centiamps: Option<u16>,
-    power_centiwatts: Option<u32>,
-    setpoint_centivolts: u16,
-    limit_centiamps: u16,
-    status: StatusProjection,
-    focus: ControlFocus,
-    regulation_mode: RegulationMode,
-    regulating_current: bool,
-}
-
-fn detail_projection(channel: &ChannelSnapshot, focus: ControlFocus) -> DetailProjection {
-    let row = channel_projection(channel);
-    DetailProjection {
-        voltage_centivolts: row.measured_centivolts,
-        current_centiamps: row.measured_centiamps,
-        power_centiwatts: channel.measurement.valid.then_some(
-            u32::from(channel.measurement.millivolts) * u32::from(channel.measurement.milliamps)
-                / 10_000,
-        ),
-        setpoint_centivolts: row.setpoint_centivolts,
-        limit_centiamps: row.limit_centiamps,
-        status: row.status,
-        focus,
-        regulation_mode: channel.regulation_mode,
-        regulating_current: row.regulating_current,
-    }
-}
 
 pub struct BenchVoltView<D> {
     display: D,
@@ -321,13 +223,13 @@ where
             ),
             KNOB_DIAMETER as u32,
         )
-            .into_styled(PrimitiveStyle::with_fill(if focused {
-                Rgb565::CYAN
-            } else {
-                Rgb565::WHITE
-            }))
-            .draw(&mut self.display)
-            .ok();
+        .into_styled(PrimitiveStyle::with_fill(if focused {
+            Rgb565::CYAN
+        } else {
+            Rgb565::WHITE
+        }))
+        .draw(&mut self.display)
+        .ok();
         if projection.regulation_mode == RegulationMode::Cc {
             Text::with_baseline(
                 "CC",
@@ -596,7 +498,8 @@ where
         let track_color = match status {
             StatusProjection::On => Rgb565::new(4, 42, 10),
             StatusProjection::Wait => Rgb565::new(24, 38, 4),
-            StatusProjection::Off | StatusProjection::Fault => Rgb565::new(24, 5, 5),
+            StatusProjection::Fault => Rgb565::RED,
+            StatusProjection::Off => Rgb565::new(24, 5, 5),
         };
         const TRACK_Y: i32 = 130;
         const TRACK_HEIGHT: u32 = 28;
@@ -614,13 +517,13 @@ where
             ),
             KNOB_DIAMETER,
         )
-            .into_styled(PrimitiveStyle::with_fill(if focused {
-                Rgb565::CYAN
-            } else {
-                Rgb565::WHITE
-            }))
-            .draw(&mut self.display)
-            .ok();
+        .into_styled(PrimitiveStyle::with_fill(if focused {
+            Rgb565::CYAN
+        } else {
+            Rgb565::WHITE
+        }))
+        .draw(&mut self.display)
+        .ok();
     }
 
     fn draw_detail_mode(&mut self, projection: DetailProjection) {
@@ -973,10 +876,7 @@ where
             .take(usize::from(HELP_VISIBLE_LINES))
             .enumerate()
         {
-            let heading = matches!(
-                text,
-                "MAIN MENU" | "NAVIGATION" | "POWER SCREENS" | "CV / CC" | "AWG"
-            );
+            let heading = benchvolt_poc::ui_content::is_help_heading(text);
             Text::with_baseline(
                 text,
                 Point::new(12, 32 + row as i32 * 16),
@@ -1285,11 +1185,7 @@ where
                 Rgb565::BLACK,
             )
             .ok();
-        let channel = if state.awg_status == AwgStatus::Running {
-            state.active_awg_channel() + 1
-        } else {
-            state.awg.channel + 1
-        };
+        let channel = benchvolt_poc::view_projection::load_channel_number(state);
         let mut heading: String<32> = String::new();
         write!(&mut heading, "CH{} LOAD", channel).ok();
         Text::with_baseline(

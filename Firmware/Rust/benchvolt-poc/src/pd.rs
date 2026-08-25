@@ -152,8 +152,7 @@ pub fn request_legacy_boot_contract(bus: &mut impl PdBus) -> Result<(), PdError>
         bus.write(SINK_PDO1 + offset as u8, &[value])
             .map_err(|_| PdError::Bus)?;
     }
-    bus.write(TX_HEADER, &[0x0d])
-        .map_err(|_| PdError::Bus)?;
+    bus.write(TX_HEADER, &[0x0d]).map_err(|_| PdError::Bus)?;
     bus.write(COMMAND_CTRL, &[SEND_COMMAND])
         .map_err(|_| PdError::Bus)
 }
@@ -211,7 +210,8 @@ fn read_nvm_sector4(bus: &mut impl PdBus) -> Result<[u8; 8], PdError> {
     bus.write(FTP_CTRL0, &[0xd4]).map_err(|_| PdError::Bus)?;
     ftp_wait(bus)?;
     let mut sector = [0; 8];
-    bus.read(FTP_BUFFER, &mut sector).map_err(|_| PdError::Bus)?;
+    bus.read(FTP_BUFFER, &mut sector)
+        .map_err(|_| PdError::Bus)?;
     bus.write(FTP_CTRL0, &[0]).map_err(|_| PdError::Bus)?;
     ftp_exit(bus)?;
     Ok(sector)
@@ -929,8 +929,14 @@ mod tests {
 
     #[test]
     fn boot_pd_gate_keeps_recovery_open_until_contract_or_bounded_settle() {
-        assert_eq!(boot_contract_action(Some(20_000), None, 100), BootContractAction::Seal);
-        assert_eq!(boot_contract_action(Some(5_000), None, 100), BootContractAction::Request);
+        assert_eq!(
+            boot_contract_action(Some(20_000), None, 100),
+            BootContractAction::Seal
+        );
+        assert_eq!(
+            boot_contract_action(Some(5_000), None, 100),
+            BootContractAction::Request
+        );
         assert_eq!(
             boot_contract_action(Some(5_000), Some(u16::MAX - 99), 100),
             BootContractAction::Wait

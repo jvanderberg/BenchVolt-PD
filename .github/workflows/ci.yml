@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: Firmware/Rust/benchvolt-poc
+
+jobs:
+  firmware:
+    name: Firmware build (thumbv6m)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust with ARM target and llvm-tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add thumbv6m-none-eabi
+          rustup component add llvm-tools
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            Firmware/Rust/benchvolt-poc/target
+          key: firmware-${{ runner.os }}-${{ hashFiles('Firmware/Rust/benchvolt-poc/Cargo.lock') }}
+      - name: Build release firmware
+        run: cargo build --release
+      - name: Produce raw binary and check partition fit
+        run: |
+          OBJCOPY=$(find "$(rustc --print sysroot)" -name llvm-objcopy | head -1)
+          "$OBJCOPY" -O binary \
+            target/thumbv6m-none-eabi/release/benchvolt-poc \
+            target/thumbv6m-none-eabi/release/benchvolt-poc.bin
+          SIZE=$(stat -c%s target/thumbv6m-none-eabi/release/benchvolt-poc.bin)
+          LIMIT=$((92 * 1024))
+          echo "Firmware image: ${SIZE} bytes (partition limit ${LIMIT})"
+          if [ "$SIZE" -gt "$LIMIT" ]; then
+            echo "::error::Firmware exceeds the 92 KiB application partition"
+            exit 1
+          fi
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchvolt-firmware
+          path: |
+            Firmware/Rust/benchvolt-poc/target/thumbv6m-none-eabi/release/benchvolt-poc
+            Firmware/Rust/benchvolt-poc/target/thumbv6m-none-eabi/release/benchvolt-poc.bin
+          if-no-files-found: error
+
+  tests:
+    name: Host tests (lib + integration + fuzz)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            Firmware/Rust/benchvolt-poc/target
+          key: tests-${{ runner.os }}-${{ hashFiles('Firmware/Rust/benchvolt-poc/Cargo.lock') }}
+      - name: Run test suite
+        run: cargo test --target x86_64-unknown-linux-gnu --no-default-features
+
+  lints:
+    name: Formatting and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust with clippy and rustfmt
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup component add clippy rustfmt
+      - name: rustfmt
+        run: cargo fmt --check
+        continue-on-error: true
+      - name: clippy (host, warnings allowed to inform only)
+        run: cargo clippy --target x86_64-unknown-linux-gnu --no-default-features
+        continue-on-error: true

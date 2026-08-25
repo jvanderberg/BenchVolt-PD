@@ -28,9 +28,7 @@ impl BoundedAdc {
             return Err(());
         }
         registers.cfgr1.modify(|_, w| w.dmaen().disabled());
-        registers
-            .cr
-            .modify(|_, w| w.adcal().start_calibration());
+        registers.cr.modify(|_, w| w.adcal().start_calibration());
         if !wait_until(|| registers.cr.read().adcal().is_not_calibrating()) {
             return Err(());
         }
@@ -90,9 +88,7 @@ fn read_raw_channel(_adc: &mut BoundedAdc, channel: u8) -> Option<u16> {
     registers
         .cfgr1
         .modify(|_, w| w.res().twelve_bit().align().right());
-    registers
-        .cr
-        .modify(|_, w| w.adstart().start_conversion());
+    registers.cr.modify(|_, w| w.adstart().start_conversion());
 
     if !wait_until(|| registers.isr.read().eoc().is_complete()) {
         let _ = power_down(registers);

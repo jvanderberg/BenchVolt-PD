@@ -1,9 +1,9 @@
 use super::i2c::SoftI2c;
 use crate::diagnostics::{record_hw_error, record_hw_retries};
 use benchvolt_poc::power::{
-    tps55289_configuration_registers, tps55289_current_code, tps55289_output_acknowledged,
-    tps55289_output_mode, tps55289_voltage_code, DriverOperation, PowerDriver, Rail,
-    SHARED_RAIL_LIMIT_MA,
+    mcp4725_code_for_millivolts, tps55289_configuration_registers, tps55289_current_code,
+    tps55289_output_acknowledged, tps55289_output_mode, tps55289_voltage_code, DriverOperation,
+    PowerDriver, Rail, SHARED_RAIL_LIMIT_MA,
 };
 use embedded_hal::{
     blocking::delay::{DelayMs, DelayUs},
@@ -93,11 +93,15 @@ where
     }
 
     fn gpio_is_set(port: char, pin: u8) -> bool {
+        // Read IDR, not ODR: the output latch always mirrors the last BSRR
+        // write, so an ODR read can never observe a stuck or shorted pin.
+        // These EN pins are push-pull outputs, so IDR reflects the real
+        // electrical level being driven.
         unsafe {
             let bits = match port {
-                'A' => (*pac::GPIOA::ptr()).odr.read().bits(),
-                'B' => (*pac::GPIOB::ptr()).odr.read().bits(),
-                _ => (*pac::GPIOC::ptr()).odr.read().bits(),
+                'A' => (*pac::GPIOA::ptr()).idr.read().bits(),
+                'B' => (*pac::GPIOB::ptr()).idr.read().bits(),
+                _ => (*pac::GPIOC::ptr()).idr.read().bits(),
             };
             bits & (1u32 << pin) != 0
         }
@@ -354,10 +358,7 @@ where
                 },
             ),
             DriverOperation::SetAdjustableDac { millivolts } => {
-                let millivolts = millivolts.clamp(500, 5_000);
-                let code = 3_975u32
-                    .saturating_sub((u32::from(millivolts - 500) * 3_635 + 2_250) / 4_500)
-                    as u16;
+                let code = mcp4725_code_for_millivolts(millivolts);
                 let bytes = [((code >> 8) & 0x0f) as u8, code as u8];
                 let mut result = Err(HardwareError::Bus);
                 for attempt in 0..3 {

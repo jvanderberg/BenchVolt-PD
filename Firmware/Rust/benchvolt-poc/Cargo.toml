@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+heapless = "0.8.0"
 reducto = "0.1.0"
 
 [target.'cfg(target_arch = "arm")'.dependencies]
@@ -13,7 +14,6 @@ cortex-m-rt = "0.7.5"
 display-interface-spi = "0.4.1"
 embedded-graphics = "0.8.2"
 embedded-hal = "0.2.7"
-heapless = "0.8.0"
 mipidsi = "0.7.1"
 stm32f0xx-hal = { version = "0.18.0", features = ["rt", "stm32f070xb"] }
 stm32-usbd = "0.8.0"

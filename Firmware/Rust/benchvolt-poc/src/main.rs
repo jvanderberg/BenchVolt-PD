@@ -5,6 +5,7 @@ mod arb_runtime;
 mod board;
 mod boot;
 mod diagnostics;
+mod display_dma;
 mod input;
 mod reset_marker;
 mod runtime;
@@ -212,10 +213,11 @@ fn main() -> ! {
         }
     }
 
-    // USB has the highest urgency. Encoder capture is deliberately lowest and
-    // performs only a pending-bit clear, GPIO read, and bounded queue push.
+    // USB has the highest urgency. Display DMA only advances a bounded transfer
+    // phase and stays below USB; encoder capture is deliberately lowest.
     unsafe {
         cp.NVIC.set_priority(pac::Interrupt::USB, 0);
+        cp.NVIC.set_priority(pac::Interrupt::DMA1_CH2_3, 128);
         cp.NVIC.set_priority(pac::Interrupt::EXTI4_15, 192);
     }
 
@@ -389,6 +391,10 @@ fn main() -> ! {
         .with_invert_colors(ColorInversion::Inverted)
         .init(&mut delay, Some(rst))
         .unwrap();
+    let (interface, model, reset) = display.release();
+    let (spi, dc, cs) = interface.release();
+    let (spi, pins) = spi.release();
+    display_dma::install((dp.DMA1, spi, pins, dc, cs, model, reset));
     feed_watchdog();
     let mut sensor = SoftI2c::new(scl, sda);
     let initial_temperature = sensor.read_tmp1075(&mut delay);
@@ -406,10 +412,9 @@ fn main() -> ! {
         core::array::from_fn(|index| settings_store.profiles[index].is_some());
     let mut power_driver = PowerExecutor::new(power_driver, monotonic_ms());
     let mut app = EffectApp::<AppReducer, _, FirmwareEffectPlanner, 8>::new(
-        BenchVoltView::new(display),
+        BenchVoltView::new(display_dma::QueuedDisplay::new()),
         initial_state,
     );
-    app.render_full();
 
     // USB transport is interrupt-owned so display and I2C work cannot starve it.
     usb_transport::install(dp.USB, gpioa.pa11, gpioa.pa12);
@@ -420,6 +425,9 @@ fn main() -> ! {
     // Re-enable the core only after the complete USB runtime is installed.
     unsafe { cortex_m::interrupt::enable() };
     cortex_m::peripheral::NVIC::pend(pac::Interrupt::USB);
+    if !display_dma::begin_self_test() {
+        unsafe { raw_emergency_shutdown() };
+    }
 
     let mut cadence = ServiceCadence::default();
     let mut measurement_windows = MeasurementWindows::new();
@@ -437,6 +445,7 @@ fn main() -> ! {
     let mut last_encoder_direction = 0i8;
     let mut encoder_velocity = 0u8;
     let mut usb_output = OutputTransaction::new();
+    let mut display_failure_handled = false;
 
     loop {
         'usb_command: {
@@ -483,6 +492,10 @@ fn main() -> ! {
                     queue_usb_response(b"OK:REBOOTING\r\n");
                 }
                 UsbIntent::SetOutput { channel, enabled } => {
+                    if enabled && display_dma::has_failed() {
+                        queue_usb_response(b"ERR:DISPLAY\r\n");
+                        break 'usb_command;
+                    }
                     match usb_output.begin_request(
                         channel,
                         enabled,
@@ -697,6 +710,23 @@ fn main() -> ! {
             }
         }
 
+        // The one-command panel smoke test drains before the first complete UI
+        // paint. This keeps boot fail-closed without requiring a serial cable.
+        if display_dma::begin_full_render() {
+            app.render_full();
+            display_dma::finish_full_render();
+        }
+        if display_dma::has_failed() && !display_failure_handled {
+            display_failure_handled = true;
+            let _ = execute_global_shutdown(&mut power_driver);
+            unsafe { raw_emergency_shutdown() };
+            dispatch_app(
+                &mut app,
+                &mut power_driver,
+                Action::BootRecoveryStatus(false),
+            );
+        }
+
         if app.state().awg_status != AwgStatus::Running {
             power_driver.delay_ms(1u8);
         }
@@ -746,13 +776,17 @@ fn main() -> ! {
             &mut last_encoder_direction,
             &mut encoder_velocity,
         );
-        if let Some(action) = encoder_action(app.state(), direction, accelerated) {
-            dispatch_app(&mut app, &mut power_driver, action);
+        if !display_dma::has_failed() {
+            if let Some(action) = encoder_action(app.state(), direction, accelerated) {
+                dispatch_app(&mut app, &mut power_driver, action);
+            }
         }
 
         let next_sw_high = encoder_sw.is_high().unwrap_or(button.is_high());
         if let Some(action) = button.sample(input_ticks, next_sw_high) {
-            dispatch_app(&mut app, &mut power_driver, action);
+            if !display_dma::has_failed() {
+                dispatch_app(&mut app, &mut power_driver, action);
+            }
         }
 
         service_profile_request(&mut app, &mut power_driver, &mut settings_store);
@@ -997,6 +1031,8 @@ fn main() -> ! {
             && cadence.healthy_for(3_000)
             && app.state().temp_valid
             && outputs_physically_off
+            && recovery_armed
+            && display_dma::ready_for_seal()
         {
             match benchvolt_poc::pd::boot_contract_action(
                 app.state().pd_contract.map(|contract| contract.millivolts),
@@ -1032,6 +1068,7 @@ fn main() -> ! {
             cortex_m::asm::delay(480_000);
             emergency_reset(ResetReason::UserReboot);
         }
+        display_dma::service();
         feed_watchdog();
     }
 }

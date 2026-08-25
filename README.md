@@ -32,7 +32,7 @@ Throughout operation, the MCU **continuously monitors** system all parameters to
 An **additional safety layer** can be used by setting a power limit through the **USB PD interface**, ensuring the system never exceeds the predefined power threshold. This limit can be configured either from the device’s on-screen menu / rotary encoder or through the Python control interface.
 
 
-**Each DC-DC converter** is monitored to ensure no more than 5 A is drawn from its output. The **1.8 V** and **2.5 V LDO** regulators share the same **4 V / 5 A** pre-regulator rail, while the **3.3 V** and **Adjustable (0.5 V – 5.5 V)** LDOs share the **5.5 V / 5 A** rail. Therefore, when both LDOs on the same rail are heavily loaded, their combined output current should not exceed 5 A total (typically below 3 A per channel). 
+**Each DC-DC converter** is monitored to ensure no more than 5 A is drawn from its output. The **1.8 V** and **2.5 V LDO** regulators share the same **3 V / 5 A** pre-regulator rail, while the **3.3 V** and **Adjustable (0.5 V – 5.5 V)** LDOs share the **5.5 V / 5 A** rail. Therefore, when both LDOs on the same rail are heavily loaded, their combined output current should not exceed 5 A total (typically below 3 A per channel). Both the original C firmware and the Rust firmware program the first pre-regulator to 3.0 V; older documentation calling it a 4 V rail was stale.
 
 **The third buck-boost output (0.8 V – 22 V)** operates independently and is capable of delivering up to **3A**. Since this channel’s output comes directly from the DC-DC converter, its ripple and noise levels are relatively higher; however, overall stability and performance remain excellent for most applications.
 

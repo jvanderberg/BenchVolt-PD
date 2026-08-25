@@ -2,7 +2,7 @@ use core::fmt::Write as _;
 
 use embedded_graphics::{
     mono_font::{
-        ascii::{FONT_10X20, FONT_6X10, FONT_8X13_BOLD},
+        ascii::{FONT_10X20, FONT_8X13_BOLD},
         MonoTextStyle,
     },
     pixelcolor::Rgb565,
@@ -18,11 +18,11 @@ use benchvolt_poc::app::{
     ProfileStatus, RegulationMode, Screen, TemperatureUnit,
 };
 use benchvolt_poc::ui_content::{
-    HELP_MAX_SCROLL, HELP_TEXT, HELP_VISIBLE_LINES, MAIN_MENU_ITEMS,
+    help_footer, HELP_TEXT, HELP_VISIBLE_LINES, MAIN_MENU_ITEMS,
 };
 use benchvolt_poc::view_projection::{
-    awg_damage, centered_origin, framed_value_damage, seven_segment_mask, sink_projection,
-    FramedValueDamage, SinkPdStatus, SinkProjection,
+    awg_damage, centered_origin, framed_value_damage, pd_contract_label, seven_segment_mask,
+    sink_projection, FramedValueDamage, SinkPdStatus, SinkProjection,
 };
 
 const TABLE_TOP: i32 = 24;
@@ -736,24 +736,15 @@ where
                 Rgb565::YELLOW
             }
             SinkPdStatus::Negotiating => {
-                text.push_str("PD NEGOTIATING").ok();
+                text.push_str("PD NEGOTIATE").ok();
                 Rgb565::YELLOW
             }
             SinkPdStatus::Ready(contract) => {
-                write!(
-                    &mut text,
-                    "PD{} {}.{}V {}.{}A",
-                    contract.source_position,
-                    contract.millivolts / 1_000,
-                    contract.millivolts % 1_000 / 100,
-                    contract.operating_milliamps / 1_000,
-                    contract.operating_milliamps % 1_000 / 100,
-                )
-                .ok();
+                text.push_str(pd_contract_label(contract).as_str()).ok();
                 Rgb565::GREEN
             }
             SinkPdStatus::Error(error) => {
-                text.push_str("PD ERR:").ok();
+                text.push_str("ERR ").ok();
                 text.push_str(match error {
                     benchvolt_poc::pd::PdError::Bus => "BUS",
                     benchvolt_poc::pd::PdError::WrongDevice => "DEVICE",
@@ -767,10 +758,10 @@ where
                 Rgb565::RED
             }
             SinkPdStatus::Fault(fault) => {
-                text.push_str("INPUT:").ok();
+                text.push_str("IN ").ok();
                 text.push_str(match fault {
                     Fault::None => "OK",
-                    Fault::OverCurrent => "OVERCURRENT",
+                    Fault::OverCurrent => "OVERCURR",
                     Fault::OverTemperature => "OVERTEMP",
                     Fault::Sensor => "SENSOR",
                     Fault::Hardware => "HARDWARE",
@@ -782,7 +773,7 @@ where
         Text::with_baseline(
             text.as_str(),
             Point::new(216, 139),
-            MonoTextStyle::new(&FONT_6X10, color),
+            MonoTextStyle::new(&FONT_8X13_BOLD, color),
             Baseline::Top,
         )
         .draw(&mut self.display)
@@ -823,7 +814,7 @@ where
             },
             Point::new(112, 6),
             MonoTextStyle::new(
-                &FONT_6X10,
+                &FONT_8X13_BOLD,
                 if state.recovery_armed {
                     Rgb565::GREEN
                 } else {
@@ -998,19 +989,11 @@ where
             .draw(&mut self.display)
             .ok();
         }
-        let mut footer: String<32> = String::new();
-        write!(
-            &mut footer,
-            "TURN scroll  CLICK back  {}-{}/{}",
-            state.help_scroll + 1,
-            (state.help_scroll + HELP_VISIBLE_LINES).min(HELP_MAX_SCROLL + HELP_VISIBLE_LINES),
-            HELP_MAX_SCROLL + HELP_VISIBLE_LINES,
-        )
-        .ok();
+        let footer = help_footer(state.help_scroll);
         Text::with_baseline(
             footer.as_str(),
             Point::new(48, 151),
-            MonoTextStyle::new(&FONT_6X10, Rgb565::GREEN),
+            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::GREEN),
             Baseline::Top,
         )
         .draw(&mut self.display)
@@ -1042,7 +1025,7 @@ where
             .ok();
         let status = match state.profile_status {
             ProfileStatus::ConfirmDefaults => Some(("CLICK TO CONFIRM", Rgb565::YELLOW)),
-            ProfileStatus::DefaultsLoaded => Some(("DEFAULTS LOADED - OUTPUTS OFF", Rgb565::GREEN)),
+            ProfileStatus::DefaultsLoaded => Some(("DEFAULTS LOADED / OUT OFF", Rgb565::GREEN)),
             ProfileStatus::Failed => Some(("FAILED", Rgb565::RED)),
             _ => None,
         };
@@ -1050,7 +1033,7 @@ where
             Text::with_baseline(
                 status,
                 Point::new(112, 8),
-                MonoTextStyle::new(&FONT_6X10, color),
+                MonoTextStyle::new(&FONT_8X13_BOLD, color),
                 Baseline::Top,
             )
             .draw(&mut self.display)
@@ -1278,7 +1261,7 @@ where
         Text::with_baseline(
             "CURRENT RMS",
             Point::new(205, 52),
-            MonoTextStyle::new(&FONT_6X10, Rgb565::new(18, 36, 24)),
+            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::new(18, 36, 24)),
             Baseline::Top,
         )
         .draw(&mut self.display)
@@ -1286,7 +1269,7 @@ where
         Text::with_baseline(
             "POWER AVG",
             Point::new(205, 101),
-            MonoTextStyle::new(&FONT_6X10, Rgb565::new(18, 36, 24)),
+            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::new(18, 36, 24)),
             Baseline::Top,
         )
         .draw(&mut self.display)

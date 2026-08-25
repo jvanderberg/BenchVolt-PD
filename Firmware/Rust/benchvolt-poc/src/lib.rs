@@ -10,6 +10,7 @@ pub mod limits;
 pub mod load;
 pub mod measurement;
 pub mod monitoring;
+pub mod paint_queue;
 pub mod pd;
 pub mod power;
 pub mod protocol;

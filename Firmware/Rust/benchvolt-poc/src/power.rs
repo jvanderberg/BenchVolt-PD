@@ -9,9 +9,9 @@ const FAULT_CONFIRM_SAMPLES: u8 = 3;
 const SINK_RECOVERY_SAMPLES: u8 = 10;
 const VOLTAGE_SETTING_SETTLE_SAMPLES: u8 = 25;
 const HARD_OVERCURRENT_CEILING_MA: u16 = 3_300;
-/// Each shared converter feeds two independently limited 3 A channels. This
-/// matches the 6 A TPS55289 configuration used by the reference C firmware.
-pub const SHARED_RAIL_LIMIT_MA: u16 = 6_000;
+/// Each shared converter feeds two independently limited 3 A channels, but
+/// the r3 hardware specification caps their combined load at 5 A.
+pub const SHARED_RAIL_LIMIT_MA: u16 = 5_000;
 // Board tests show IOUT_LIMIT is not a usable CH5 regulation loop. Keep this
 // fixed; user CC is implemented only by ADC feedback and voltage side effects.
 const CH5_TPS_CONFIGURATION_LIMIT_MA: u16 = 3_000;
@@ -1261,7 +1261,7 @@ mod tests {
         assert_eq!(tps55289_current_code(0), 0);
         assert_eq!(tps55289_current_code(50), 0x81);
         assert_eq!(tps55289_current_code(3_000), 0xbc);
-        assert_eq!(tps55289_current_code(SHARED_RAIL_LIMIT_MA), 0xf8);
+        assert_eq!(tps55289_current_code(SHARED_RAIL_LIMIT_MA), 0xe4);
         assert_eq!(tps55289_current_code(u16::MAX), 0xff);
     }
 
@@ -2707,14 +2707,14 @@ mod tests {
             milliamps: 0,
             valid: true,
         }; 5];
-        measurements[0].milliamps = 3_000;
-        measurements[1].milliamps = 3_000;
+        measurements[0].milliamps = 2_500;
+        measurements[1].milliamps = 2_500;
 
         let mut monitor = SharedRailProtectionMonitor::default();
         for _ in 0..3 {
             assert!(monitor.observe(&state, &measurements, Rail::Dc1).is_none());
         }
-        measurements[1].milliamps = 3_010;
+        measurements[1].milliamps = 2_510;
         assert!(monitor.observe(&state, &measurements, Rail::Dc1).is_none());
         assert!(monitor.observe(&state, &measurements, Rail::Dc1).is_none());
         assert_eq!(

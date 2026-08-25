@@ -16,8 +16,9 @@ because `main.rs` has been reduced from 2,663 to 1,012 lines.
   mutations are deferred until outputs are physically off.
 - Power settling is deadline-driven rather than a blocking 50 ms delay, so
   input, PD, and protection services continue to run.
-- Protection timing preserves scheduler phase and fails closed after repeated
-  late measurement windows (`6e434c0`).
+- Protection timing preserves scheduler phase and emits at most one sample per
+  foreground pass, avoiding stale catch-up bursts. Invalid live measurements
+  still fail closed immediately.
 - STUSB4500 support models and supervises the active PD contract. Startup
   discovery is read-only; after three healthy seconds with outputs physically
   off, a sub-20 V contract receives the exact RAM-PDO plus PD Soft Reset
@@ -44,8 +45,9 @@ because `main.rs` has been reduced from 2,663 to 1,012 lines.
   current. Input protection uses the lower of the user limit and negotiated
   operating current (`066a3be`, `b8e4325`).
 - TPS55289 conversions match the reference C equations; invalid register
-  readback fails closed; the two shared rails use the reference hardware's 6 A
-  limit; CH5 status read failure is an immediate hardware fault.
+  readback fails closed; the two shared rails enforce the r3 hardware
+  specification's 5 A combined-channel limit; CH5 status read failure is an
+  immediate hardware fault.
 - The 32 V claim in the review is not valid for the r3 measurement divider.
   With 6.8 kΩ / 1 kΩ scaling, 32 V would present about 4.10 V to a 3.3 V MCU
   ADC. The enforced 22 V maximum presents about 2.82 V and is regression-tested.
@@ -101,6 +103,12 @@ executor.
   voltage is inferred by matching independently measured VBUS to an enabled
   local fixed sink profile. This is deliberately fail-closed but remains an
   inference rather than exact source metadata.
+- A connected CH5 load test on 2026-08-24 held a PDO5 20 V / 5 A contract and
+  measured 19.71 V / 3.209 A at VBUS (63.25 W input) and 21.22 V / 2.828 A at
+  CH5 (60.01 W output), with the TMP1075 reading 28.7 C. The user observed no
+  temperature rise during the test. This validates the demonstrated 60 W
+  operating point; it is not a continuous 100 W qualification or a measurement
+  of converter, inductor, and connector hotspot temperatures.
 - Connected-hardware coverage is still required for detach under load,
   watchdog reset with energized outputs, and injected I2C
   faults. The headless gate does not claim to replace those tests.

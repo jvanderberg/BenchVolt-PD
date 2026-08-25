@@ -163,9 +163,10 @@ use a resistor or an electronic load in constant-resistance mode for CC tests.
 The final screen is `USB PD Input`. It shows the measured sink voltage,
 current, and power in the same tabular format as the overview. A short press
 focuses the sink current protection limit; rotation adjusts it from 0 to 5 A in
-10 mA steps. The firmware boots directly to this screen for cable-only hardware
-diagnosis. Passive discovery errors such as `DETACHED` or `BUS` remain visible
-there, while an imported contract displays its PDO number, voltage, and current.
+10 mA steps. The firmware boots to the main menu; this diagnostics screen is
+last in the DC-screen rotation. Passive discovery errors such as `DETACHED` or
+`BUS` remain visible there, while an imported contract displays its PDO number,
+voltage, and current.
 Startup first imports the STUSB4500's autonomous contract without transmitting.
 After three seconds of healthy execution with every output physically off, a
 contract below 20 V triggers the archived original firmware's RAM-PDO sequence:
@@ -244,6 +245,11 @@ The gate rejects an otherwise valid release image if less than 1 KiB remains in
 the application partition, preserving room for safe maintenance changes.
 Whole-tree formatting is not part of this gate yet because committed legacy
 modules still carry pre-existing rustfmt differences.
+
+During hardware iteration, `tools/build_image.sh` is the canonical fast path.
+It performs the Thumb release build, always regenerates the raw `.bin` from the
+new ELF, and validates the partition bounds. Do not upload a `.bin` after a bare
+`cargo build`: Cargo does not refresh that derived file.
 
 For a connected upload, use `tools/flash_latest.sh`. It runs the complete gate,
 builds a fresh binary, validates its partition bounds, then invokes the checked-

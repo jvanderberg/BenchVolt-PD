@@ -23,6 +23,19 @@ const fn line_count(text: &str) -> u8 {
 pub const HELP_LINE_COUNT: u8 = line_count(HELP_TEXT);
 pub const HELP_MAX_SCROLL: u8 = HELP_LINE_COUNT - HELP_VISIBLE_LINES;
 
+pub fn help_footer(scroll: u8) -> String<40> {
+    let mut footer = String::new();
+    write!(
+        &mut footer,
+        "TURN scroll  CLICK back  {}-{}/{}",
+        scroll + 1,
+        (scroll + HELP_VISIBLE_LINES).min(HELP_MAX_SCROLL + HELP_VISIBLE_LINES),
+        HELP_MAX_SCROLL + HELP_VISIBLE_LINES,
+    )
+    .ok();
+    footer
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -34,4 +47,14 @@ mod tests {
         assert_eq!(HELP_MAX_SCROLL, 17);
         assert_eq!(HELP_MAX_SCROLL + HELP_VISIBLE_LINES, HELP_LINE_COUNT);
     }
+
+    #[test]
+    fn maximum_help_footer_is_complete_and_fits_the_screen() {
+        let footer = help_footer(HELP_MAX_SCROLL);
+        assert_eq!(footer.as_str(), "TURN scroll  CLICK back  18-24/24");
+        assert!(footer.len() * 8 <= 272);
+    }
 }
+use core::fmt::Write as _;
+
+use heapless::String;

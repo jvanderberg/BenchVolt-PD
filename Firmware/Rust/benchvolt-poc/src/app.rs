@@ -296,7 +296,7 @@ impl AppState {
             None => (0, false),
         };
         Self {
-            screen: Screen::UsbPdInput,
+            screen: Screen::MainMenu,
             focus: ControlFocus::None,
             channels: [
                 ChannelSnapshot::disabled(1_800),
@@ -1524,10 +1524,28 @@ mod tests {
     }
 
     #[test]
-    fn boot_opens_pd_diagnostics_without_enabling_hardware() {
+    fn boot_opens_main_menu_without_enabling_hardware() {
         let state = AppState::new(true, Some(25 * 16));
-        assert!(state.screen == Screen::UsbPdInput);
+        assert!(state.screen == Screen::MainMenu);
         assert!(state.outputs_inactive());
+    }
+
+    #[test]
+    fn dc_screen_cycle_keeps_pd_diagnostics_last() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        state.screen = Screen::Overview;
+        for expected in [
+            Screen::Channel(0),
+            Screen::Channel(1),
+            Screen::Channel(2),
+            Screen::Channel(3),
+            Screen::Channel(4),
+            Screen::UsbPdInput,
+            Screen::Overview,
+        ] {
+            state = AppReducer::reduce(&state, Action::NextScreen);
+            assert!(state.screen == expected);
+        }
     }
 
     #[test]

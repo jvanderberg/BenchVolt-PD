@@ -1,6 +1,6 @@
 use crate::input::{encoder_counts, monotonic_ms};
 use crate::usb_transport::queue_usb_response;
-use crate::{arb_runtime, diagnostics};
+use crate::{arb_runtime, diagnostics, display_dma};
 use benchvolt_poc::{
     app::{AppState, AwgSource, AwgStatus, RegulationMode},
     arb::{
@@ -43,11 +43,7 @@ pub(crate) fn handle_usb_command(
             write!(
                 &mut response,
                 "{},INDEX:{},CYCLES:{},LATE:{},SKIP:{}\r\n",
-                status,
-                index,
-                cycles,
-                late_updates,
-                skipped_cycles,
+                status, index, cycles, late_updates, skipped_cycles,
             )
             .ok();
             queue_usb_response(response.as_bytes());
@@ -208,6 +204,23 @@ pub(crate) fn handle_usb_command(
             .ok();
             queue_usb_response(response.as_bytes());
         }
+        b"SYST:DISPLAY?" => {
+            let (queued, high_water, active, overflowed, failed) = display_dma::diagnostics();
+            let mut response: String<96> = String::new();
+            write!(
+                &mut response,
+                "{} Q{} H{} A{} O{} F{} SEAL{}\r\n",
+                display_dma::lifecycle_label(),
+                queued,
+                high_water,
+                u8::from(active),
+                u8::from(overflowed),
+                u8::from(failed),
+                u8::from(display_dma::ready_for_seal()),
+            )
+            .ok();
+            queue_usb_response(response.as_bytes());
+        }
         b"SYST:RESET?" => {
             let causes = diagnostics::reset_causes();
             let mut response: String<96> = String::new();
@@ -236,12 +249,7 @@ pub(crate) fn handle_usb_command(
         }
         b"SYST:TPS:CH5?" => {
             let mut response: String<32> = String::new();
-            write!(
-                &mut response,
-                "0x{:02X}\r\n",
-                diagnostics::ch5_tps_status()
-            )
-            .ok();
+            write!(&mut response, "0x{:02X}\r\n", diagnostics::ch5_tps_status()).ok();
             queue_usb_response(response.as_bytes());
         }
         b"SYST:PD?" => {

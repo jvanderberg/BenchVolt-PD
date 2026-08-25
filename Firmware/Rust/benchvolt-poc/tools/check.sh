@@ -6,8 +6,6 @@ project_dir=$(CDPATH= cd -- "$tool_dir/.." && pwd -P)
 repo_dir=$(CDPATH= cd -- "$project_dir/../../.." && pwd -P)
 host_target=$(rustc -vV | sed -n 's/^host: //p')
 thumb_target=thumbv6m-none-eabi
-elf="$project_dir/target/$thumb_target/release/benchvolt-poc"
-image="$elf.bin"
 
 if [[ -z "$host_target" ]]; then
     echo "could not determine the Rust host target" >&2
@@ -34,27 +32,7 @@ PYTHONPATH="$tool_dir" python3 -m unittest discover -s tools -p 'test_*.py'
 
 echo "Thumb release lints and build"
 cargo clippy --locked --release --target "$thumb_target" -- -D warnings
-cargo build --locked --release --target "$thumb_target"
-arm-none-eabi-objcopy -O binary "$elf" "$image"
-
-PYTHONPATH="$tool_dir" python3 -c '
-import sys
-from pathlib import Path
-import flash_poc
-
-path = Path(sys.argv[1])
-firmware = path.read_bytes()
-flash_poc.validate_image(firmware)
-capacity = flash_poc.SETTINGS_ORIGIN - flash_poc.APP_ORIGIN
-end = flash_poc.APP_ORIGIN + len(firmware)
-free = capacity - len(firmware)
-minimum_free = 1024
-print(f"image: {len(firmware)} bytes; end=0x{end:08x}; free={free} bytes")
-if free < minimum_free:
-    raise SystemExit(
-        f"release image leaves {free} bytes; require at least {minimum_free} bytes free"
-    )
-' "$image"
+"$tool_dir/build_image.sh"
 
 common_c_flags=(
     -std=gnu11

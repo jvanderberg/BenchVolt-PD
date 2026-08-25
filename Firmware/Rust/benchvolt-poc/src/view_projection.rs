@@ -1,3 +1,7 @@
+use core::fmt::Write as _;
+
+use heapless::String;
+
 use crate::app::AppState;
 
 pub const fn centered_origin(container_origin: i32, container_size: u32, item_size: u32) -> i32 {
@@ -53,6 +57,20 @@ pub enum SinkPdStatus {
     Ready(crate::pd::Contract),
     Error(crate::pd::PdError),
     Fault(crate::app::Fault),
+}
+
+pub fn pd_contract_label(contract: crate::pd::Contract) -> String<16> {
+    let mut label = String::new();
+    write!(
+        &mut label,
+        "P{} {}V {}.{}A",
+        contract.source_position,
+        contract.millivolts / 1_000,
+        contract.operating_milliamps / 1_000,
+        contract.operating_milliamps % 1_000 / 100,
+    )
+    .ok();
+    label
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -230,6 +248,26 @@ mod tests {
             sink_projection(&state).pd_status,
             SinkPdStatus::Ready(contract)
         );
+    }
+
+    #[test]
+    fn compact_pd_label_preserves_fractional_contract_current() {
+        let contract = crate::pd::Contract {
+            source_position: 3,
+            millivolts: 20_000,
+            operating_milliamps: 1_500,
+            maximum_milliamps: 3_000,
+        };
+        assert_eq!(pd_contract_label(contract).as_str(), "P3 20V 1.5A");
+
+        let low_current = crate::pd::Contract {
+            source_position: 2,
+            millivolts: 9_000,
+            operating_milliamps: 500,
+            maximum_milliamps: 500,
+        };
+        assert_eq!(pd_contract_label(low_current).as_str(), "P2 9V 0.5A");
+        assert!(pd_contract_label(contract).len() * 8 <= 104);
     }
 
     #[test]

@@ -92,11 +92,8 @@ executor.
   then sends PD Soft Reset. Replaying that exact sequence produced source PDO5,
   a 20 V / 5 A contract, and 20.03 V measured VBUS without a reset. A fresh
   application boot subsequently reached the same contract automatically without
-  any CDC command. All outputs remained off throughout. The r3 schematic still
-  shows that both receptacles share the upstream `VBUS` net; simultaneous powered
-  COM and PD-source connections are therefore not electrically isolated. The
-  separate receptacle-A CC/data-routing and enumeration limitation remains
-  documented in `Docs/r3-usb-c-routing-erratum.md`.
+  any CDC command. All outputs remained off throughout. A receptacle-A
+  CC/data-routing and enumeration limitation was observed on the tested board.
 
 - Passive startup can recover RDO current exactly, but the RDO contains no
   nominal voltage. If the transient Source Capabilities message was missed,

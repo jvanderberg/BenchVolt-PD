@@ -110,14 +110,6 @@ Notes:
 - USB-C input supporting **PD sink mode**
 - Up to **100 W** USB-PD power input
 
-> [!NOTE]
-> r3 boards have an unresolved connected-board failure on the PD/COMM
-> receptacle (receptacle A), and the COMM-side receptacle is USB-A-data-only
-> by design (no CC termination, VBUS unconnected). Using a PD source on the
-> PD receptacle together with a USB-A COM cable on the COMM receptacle is
-> supported. See the
-> [r3 USB-C routing erratum](Docs/r3-usb-c-routing-erratum.md).
-
 #### Controls
 - **1.9″ TFT display (170 × 320)** for real-time voltage, current, and PD status
 - **Rotary encoder** for menu navigation and fine adjustments

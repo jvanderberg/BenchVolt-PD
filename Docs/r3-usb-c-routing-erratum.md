@@ -1,8 +1,8 @@
-# r3 USB-C routing and shared-VBUS erratum
+# r3 USB-C routing erratum
 
 This note applies to the r3 schematic and boards assembled from it. It records
-the definitive wiring of the stacked `XUBF-0336-24B02` connector, the shared
-VBUS hazard, and connected-board failures observed on the PD/COMM receptacle.
+the definitive wiring of the stacked `XUBF-0336-24B02` connector and
+connected-board failures observed on the PD/COMM receptacle.
 
 ## Definitive schematic connections
 
@@ -19,18 +19,31 @@ Receptacle A is labelled `USB PD/COMM SIDE`:
 
 Receptacle B is labelled `USB COMM SIDE`:
 
-- `2A5 / CC1` and `2B5 / CC2` are both unconnected. This receptacle has no
-  USB-C sink termination and is not expected to work from a USB-C-to-USB-C
-  host connection.
+- `2A5 / CC1` and `2B5 / CC2` are both unconnected (explicit no-connect marks).
+  This receptacle has no USB-C sink termination and is not expected to work
+  from a USB-C-to-USB-C host connection.
+- **All four receptacle-B VBUS contacts (`2A4`, `2A9`, `2B4`, `2B9`) are also
+  explicit no-connects.** Receptacle B is data-and-ground only; its VBUS is
+  electrically isolated from the board.
 - Both plug orientations' D+/D- contacts connect to `USB_B_P` and `USB_B_N`.
 - S2 can connect `USB_B_P` and `USB_B_N` to the MCU USB data pair.
-- A USB-A-to-USB-C cable can carry data because a legacy USB-A source supplies
-  VBUS without relying on USB-C CC attachment.
+- A USB-A-to-USB-C cable can carry data because the MCU's USB device pull-up
+  is driven from board power, so enumeration does not depend on host VBUS
+  reaching the board.
 
-All VBUS contacts of both receptacles connect to the same `VBUS` net. There is
-no power isolation between receptacles A and B. Q1 separates the shared
-connector-side VBUS from downstream `VBUS_SINK`; it does not isolate the two
-receptacles. S2 switches only D+ and D-.
+Only receptacle A's VBUS contacts (`1A4`, `1A9`, `1B4`, `1B9`) connect to the
+`VBUS` net. Q1 separates that connector-side VBUS from downstream
+`VBUS_SINK`. S2 switches only D+ and D-.
+
+> Correction (2026-08-25): an earlier revision of this note claimed all VBUS
+> contacts of both receptacles shared one net, creating a supply-paralleling
+> hazard when a powered COM cable and a PD source were connected
+> simultaneously. Re-examination of the r3 schematic shows receptacle B's
+> VBUS pins carry no-connect marks, so no such shared-VBUS path exists in the
+> schematic and simultaneous use of a PD source on receptacle A with a
+> USB-A COM cable on receptacle B is a supported arrangement. This matches
+> operating experience. (Caveat: this is a schematic-level conclusion; it has
+> not been continuity-verified on an assembled board.)
 
 ## Connected-board evidence
 
@@ -71,11 +84,10 @@ determined by the host or dock.
 
 ### Separate PPS source and COM connection
 
-Do not connect an ordinary powered USB-A-to-USB-C COM cable to receptacle B
-while a separate PD source powers receptacle A. Both sources would connect to
-the same VBUS net. The COM path needs a purpose-built VBUS blocker/data-only
-adapter that retains D+, D-, and ground. Without one, disconnect the USB-A COM
-cable before connecting the PPS source.
+A powered USB-A-to-USB-C COM cable on receptacle B together with a separate PD
+source on receptacle A is supported by the r3 schematic: receptacle B's VBUS
+contacts are no-connects, so the two supplies never meet. This is the standard
+bench arrangement for connected PD diagnostics.
 
 ## Required hardware checks and correction
 
@@ -107,9 +119,9 @@ The result separates the accessible fault boundary:
   directly over the same cable.
 
 No firmware change can make a USB-C host enable its port when the host cannot
-see the physical Rd/CC attachment. Until the one-cable mode enumerates or a
-VBUS-blocking COM adapter is available, connected PPS diagnostics cannot be
-performed safely over USB CDC on this board revision.
+see the physical Rd/CC attachment. Connected PPS diagnostics over USB CDC use
+the receptacle-B COM path, which is safe alongside the PD source per the
+corrected receptacle-B wiring above.
 
 ### Probe/rework procedure when the board becomes accessible
 
@@ -122,8 +134,7 @@ With all cables and power removed:
    connects that pair to MCU USB D+/D- in exactly one position.
 3. Inspect the stacked connector footprint, solder joints, D3, and S2 against
    the populated part numbers.
-4. Correct any assembly/footprint fault found. A later board revision must also
-   isolate or intentionally omit receptacle-B VBUS so a COM cable cannot place
-   a second external source on the PD VBUS net.
+4. Correct any assembly/footprint fault found. (Receptacle-B VBUS is already
+   omitted in the r3 schematic; a later revision only needs to preserve that.)
 
 Source: [`Schematics/USB_PowerSupply_r3.pdf`](../Schematics/USB_PowerSupply_r3.pdf).

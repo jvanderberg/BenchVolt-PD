@@ -3,9 +3,7 @@
 //! (cadence, protection, regulation, staged executor) over simulated time.
 #![allow(dead_code)]
 
-use benchvolt_poc::app::{
-    Action, AppReducer, AppState, AwgStatus, Fault, Measurement, Screen,
-};
+use benchvolt_poc::app::{Action, AppReducer, AppState, AwgStatus, Fault, Measurement, Screen};
 use benchvolt_poc::cadence::ServiceCadence;
 use benchvolt_poc::dispatch::dispatch_app;
 use benchvolt_poc::input_policy::{encoder_action, ButtonTracker};
@@ -33,7 +31,9 @@ pub enum FailureMode {
     /// Fail every operation the predicate matches.
     FailMatching(fn(&DriverOperation) -> bool),
     /// Fail every `period`-th operation (1-based within each period).
-    Intermittent { period: usize },
+    Intermittent {
+        period: usize,
+    },
 }
 
 /// Models rails, gates, and the CH5 converter like the reference mock inside
@@ -394,8 +394,7 @@ impl Harness {
             if due.temperature {
                 self.dispatch(Action::Temperature(self.temp));
                 if let Some(fault) = ProtectionService::temperature_fault(self.temp) {
-                    let actions =
-                        ProtectionService::temperature_trip_actions(self.state(), fault);
+                    let actions = ProtectionService::temperature_trip_actions(self.state(), fault);
                     for action in actions.into_iter().flatten() {
                         self.dispatch(action);
                     }
@@ -427,7 +426,9 @@ impl Harness {
                 for channel in 0..5u8 {
                     let measurement = measurements[usize::from(channel)];
                     let state = *self.app.state();
-                    let action = self.protection.observe_channel(&state, channel, measurement);
+                    let action = self
+                        .protection
+                        .observe_channel(&state, channel, measurement);
                     if let Some(action) = action {
                         self.dispatch(action);
                     }

@@ -3,9 +3,7 @@
 //! `PowerDriver` trait so it is host-testable.
 
 use crate::app::{Action, AppReducer, AppState};
-use crate::power::{
-    execute_global_shutdown, FirmwareEffectPlanner, PowerDriver, PowerExecutor,
-};
+use crate::power::{execute_global_shutdown, FirmwareEffectPlanner, PowerDriver, PowerExecutor};
 use reducto::EffectApp;
 
 pub fn dispatch_app<V, D, const Q: usize>(

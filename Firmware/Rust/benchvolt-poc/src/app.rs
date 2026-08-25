@@ -819,7 +819,8 @@ impl Reducer for AppReducer {
                             }
                         }
                         4 => {
-                            let minimum = i32::from(crate::limits::adjustable_min_mv(state.awg.channel));
+                            let minimum =
+                                i32::from(crate::limits::adjustable_min_mv(state.awg.channel));
                             let adjusted = i32::from(state.awg.low_mv) + i32::from(direction) * 10;
                             let adjusted =
                                 adjusted.clamp(minimum, i32::from(state.awg.high_mv)) as u16;
@@ -995,10 +996,7 @@ impl Reducer for AppReducer {
                                 let (minimum, maximum) = if channel == 3 {
                                     (500, 5_000)
                                 } else {
-                                    (
-                                        i32::from(CH5_MIN_VOLTAGE_MV),
-                                        i32::from(CH5_MAX_VOLTAGE_MV),
-                                    )
+                                    (i32::from(CH5_MIN_VOLTAGE_MV), i32::from(CH5_MAX_VOLTAGE_MV))
                                 };
                                 // Preserve 10 mV single-step precision, but give
                                 // the wide CH4/CH5 ranges a useful fast-spin rate.
@@ -1724,10 +1722,8 @@ mod tests {
         assert!(negotiating.pd_contract.is_none());
         assert!(negotiating.pd_error.is_none());
 
-        let failed = AppReducer::reduce(
-            &negotiating,
-            Action::PdFailed(crate::pd::PdError::Detached),
-        );
+        let failed =
+            AppReducer::reduce(&negotiating, Action::PdFailed(crate::pd::PdError::Detached));
         assert!(!failed.pd_negotiating);
         assert_eq!(failed.pd_error, Some(crate::pd::PdError::Detached));
 

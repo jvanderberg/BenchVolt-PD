@@ -207,13 +207,17 @@ where
         delay: &mut impl DelayUs<u32>,
     ) -> Result<(), ()> {
         self.start(delay);
-        let mut acknowledged = self.write_byte(address << 1, delay)
-            && self.write_byte(register, delay);
+        let mut acknowledged =
+            self.write_byte(address << 1, delay) && self.write_byte(register, delay);
         for value in values {
             acknowledged &= self.write_byte(*value, delay);
         }
         self.stop(delay);
-        if acknowledged { Ok(()) } else { Err(()) }
+        if acknowledged {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
 }
 

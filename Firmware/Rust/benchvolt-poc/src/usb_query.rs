@@ -296,9 +296,7 @@ pub fn dispatch_command(
             write!(&mut response, "{}\r\n", diagnostics.tick_ms).ok();
             finish(out, &response)
         }
-        b"MEAS:TEMP?" => {
-            finish(out, &temperature_response(state))
-        }
+        b"MEAS:TEMP?" => finish(out, &temperature_response(state)),
         b"MEAS:CH1?" | b"MEAS:CH2?" | b"MEAS:CH3?" | b"MEAS:CH4?" | b"MEAS:CH5?" => {
             let channel = usize::from(command[7] - b'1');
             let measurement = state.channels[channel].measurement;

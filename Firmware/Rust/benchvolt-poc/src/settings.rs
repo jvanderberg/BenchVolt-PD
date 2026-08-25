@@ -35,9 +35,10 @@ impl PersistentSettings {
         for (channel, limit) in state.channels.iter_mut().zip(self.current_limits_ma) {
             channel.current_limit_ma = limit.min(3_000);
         }
-        state.channels[3].setpoint_mv = self
-            .ch4_voltage_mv
-            .clamp(crate::limits::CH4_MIN_VOLTAGE_MV, crate::limits::CH4_MAX_VOLTAGE_MV);
+        state.channels[3].setpoint_mv = self.ch4_voltage_mv.clamp(
+            crate::limits::CH4_MIN_VOLTAGE_MV,
+            crate::limits::CH4_MAX_VOLTAGE_MV,
+        );
         state.channels[4].setpoint_mv = self
             .ch5_voltage_mv
             .clamp(CH5_MIN_VOLTAGE_MV, CH5_MAX_VOLTAGE_MV);
@@ -60,7 +61,10 @@ fn sanitize_awg(mut awg: AwgConfig) -> AwgConfig {
         return AwgConfig::default();
     }
     let (min_mv, max_mv) = if awg.channel == 3 {
-        (crate::limits::CH4_MIN_VOLTAGE_MV, crate::limits::CH4_MAX_VOLTAGE_MV)
+        (
+            crate::limits::CH4_MIN_VOLTAGE_MV,
+            crate::limits::CH4_MAX_VOLTAGE_MV,
+        )
     } else {
         (CH5_MIN_VOLTAGE_MV, CH5_MAX_VOLTAGE_MV)
     };

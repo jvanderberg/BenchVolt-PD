@@ -1,3 +1,4 @@
+pub(crate) use benchvolt_poc::dispatch::dispatch_app;
 use benchvolt_poc::{
     app::{
         Action, AppReducer, AppState, AwgStatus, Fault, ProfileRequest, ProfileStatus,
@@ -6,7 +7,6 @@ use benchvolt_poc::{
     power::{execute_global_shutdown, FirmwareEffectPlanner, PowerDriver, PowerExecutor},
     settings::{PersistentSettings, RecordKind},
 };
-pub(crate) use benchvolt_poc::dispatch::dispatch_app;
 use reducto::EffectApp;
 
 use crate::boot::{persist_settings_record, SettingsStore};
@@ -98,7 +98,10 @@ where
         return b"ERR:BUSY\r\n";
     }
     if channel == app.state().active_awg_channel()
-        && !matches!(app.state().awg_status, AwgStatus::Stopped | AwgStatus::Fault)
+        && !matches!(
+            app.state().awg_status,
+            AwgStatus::Stopped | AwgStatus::Fault
+        )
     {
         return b"ERR:BUSY\r\n";
     }

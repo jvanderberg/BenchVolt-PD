@@ -13,16 +13,8 @@ pub const fn centered_origin(container_origin: i32, container_size: u32, item_si
 
 pub const fn seven_segment_mask(character: char) -> Option<u8> {
     const DIGITS: [u8; 10] = [
-        0b111_0111,
-        0b010_0100,
-        0b101_1101,
-        0b110_1101,
-        0b010_1110,
-        0b110_1011,
-        0b111_1011,
-        0b010_0101,
-        0b111_1111,
-        0b110_1111,
+        0b111_0111, 0b010_0100, 0b101_1101, 0b110_1101, 0b010_1110, 0b110_1011, 0b111_1011,
+        0b010_0101, 0b111_1111, 0b110_1111,
     ];
     match character {
         '0'..='9' => Some(DIGITS[character as usize - '0' as usize]),
@@ -277,7 +269,6 @@ pub fn detail_projection(channel: &ChannelSnapshot, focus: ControlFocus) -> Deta
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,10 +453,7 @@ mod tests {
         let mut state = AppState::new(false, Some(400));
         assert_eq!(sink_projection(&state).pd_status, SinkPdStatus::Idle);
         state.pd_negotiating = true;
-        assert_eq!(
-            sink_projection(&state).pd_status,
-            SinkPdStatus::Negotiating
-        );
+        assert_eq!(sink_projection(&state).pd_status, SinkPdStatus::Negotiating);
     }
 
     #[test]

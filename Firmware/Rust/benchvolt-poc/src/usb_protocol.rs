@@ -8,8 +8,8 @@ use crate::{arb_runtime, diagnostics, display_dma};
 use benchvolt_poc::{
     app::AppState,
     power::ProtectionMonitor,
-    usb_command::UsbIntent,
     usb_command::Response,
+    usb_command::UsbIntent,
     usb_query::{dispatch_command, DiagnosticsSnapshot},
 };
 

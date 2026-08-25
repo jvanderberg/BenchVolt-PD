@@ -14,12 +14,10 @@ use heapless::String;
 use reducto::View;
 
 use benchvolt_poc::app::{
-    AppState, AwgStatus, AwgWaveform, ChannelSnapshot, ControlFocus, Fault,
-    ProfileStatus, RegulationMode, Screen, TemperatureUnit,
+    AppState, AwgStatus, AwgWaveform, ChannelSnapshot, ControlFocus, Fault, ProfileStatus,
+    RegulationMode, Screen, TemperatureUnit,
 };
-use benchvolt_poc::ui_content::{
-    help_footer, HELP_TEXT, HELP_VISIBLE_LINES, MAIN_MENU_ITEMS,
-};
+use benchvolt_poc::ui_content::{help_footer, HELP_TEXT, HELP_VISIBLE_LINES, MAIN_MENU_ITEMS};
 use benchvolt_poc::view_projection::{
     awg_damage, centered_origin, channel_projection, detail_projection, framed_value_damage,
     pd_contract_label, seven_segment_mask, sink_projection, temperature_projection,
@@ -225,13 +223,13 @@ where
             ),
             KNOB_DIAMETER as u32,
         )
-            .into_styled(PrimitiveStyle::with_fill(if focused {
-                Rgb565::CYAN
-            } else {
-                Rgb565::WHITE
-            }))
-            .draw(&mut self.display)
-            .ok();
+        .into_styled(PrimitiveStyle::with_fill(if focused {
+            Rgb565::CYAN
+        } else {
+            Rgb565::WHITE
+        }))
+        .draw(&mut self.display)
+        .ok();
         if projection.regulation_mode == RegulationMode::Cc {
             Text::with_baseline(
                 "CC",
@@ -519,13 +517,13 @@ where
             ),
             KNOB_DIAMETER,
         )
-            .into_styled(PrimitiveStyle::with_fill(if focused {
-                Rgb565::CYAN
-            } else {
-                Rgb565::WHITE
-            }))
-            .draw(&mut self.display)
-            .ok();
+        .into_styled(PrimitiveStyle::with_fill(if focused {
+            Rgb565::CYAN
+        } else {
+            Rgb565::WHITE
+        }))
+        .draw(&mut self.display)
+        .ok();
     }
 
     fn draw_detail_mode(&mut self, projection: DetailProjection) {

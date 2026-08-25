@@ -7,7 +7,9 @@ use benchvolt_poc::app::{
     Action, AppState, AwgConfig, AwgStatus, AwgWaveform, ControlFocus, Fault, RegulationMode,
     Screen, TemperatureUnit,
 };
-use benchvolt_poc::limits::{CH4_MAX_VOLTAGE_MV, CH4_MIN_VOLTAGE_MV, CH5_MAX_VOLTAGE_MV, CH5_MIN_VOLTAGE_MV};
+use benchvolt_poc::limits::{
+    CH4_MAX_VOLTAGE_MV, CH4_MIN_VOLTAGE_MV, CH5_MAX_VOLTAGE_MV, CH5_MIN_VOLTAGE_MV,
+};
 use benchvolt_poc::power::DriverOperation;
 use benchvolt_poc::settings::PersistentSettings;
 use common::{assert_invariants, FailureMode, Harness};
@@ -77,7 +79,10 @@ fn voltage_edit_while_enabled_slews_in_bounded_steps() {
     assert_eq!(harness.state().channels[3].drive_mv, 4_200);
 
     let writes = harness.driver().dac_writes();
-    assert!(writes.len() > 15, "expected many slew steps, got {writes:?}");
+    assert!(
+        writes.len() > 15,
+        "expected many slew steps, got {writes:?}"
+    );
     for pair in writes.windows(2) {
         let step = pair[1].abs_diff(pair[0]);
         assert!(

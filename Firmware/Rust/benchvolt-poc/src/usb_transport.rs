@@ -7,14 +7,13 @@ use cortex_m::interrupt::Mutex;
 use heapless::Deque;
 use stm32_usbd::{MemoryAccess, UsbBus, UsbPeripheral};
 use stm32f0xx_hal::{
-    gpio::{gpioa::{PA11, PA12}, Floating, Input},
+    gpio::{
+        gpioa::{PA11, PA12},
+        Floating, Input,
+    },
     pac::{self, interrupt},
 };
-use usb_device::{
-    bus::UsbBusAllocator,
-    device::StringDescriptors,
-    prelude::*,
-};
+use usb_device::{bus::UsbBusAllocator, device::StringDescriptors, prelude::*};
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 const USB_VID: u16 = 0x0483;
@@ -165,7 +164,6 @@ fn USB() {
     with_runtime(UsbRuntime::poll);
 }
 
-
 pub(crate) fn take_usb_command() -> Option<UsbMessage> {
     with_runtime(|runtime| runtime.commands.pop_front()).flatten()
 }
@@ -217,13 +215,12 @@ unsafe impl UsbPeripheral for BenchUsb {
     }
 }
 
-
-
-
-
-
 pub(crate) fn install(usb: pac::USB, dm: PA11<Input<Floating>>, dp: PA12<Input<Floating>>) {
-    let peripheral = BenchUsb { _usb: usb, _dm: dm, _dp: dp };
+    let peripheral = BenchUsb {
+        _usb: usb,
+        _dm: dm,
+        _dp: dp,
+    };
     let usb_bus: &'static UsbBusAllocator<UsbBus<BenchUsb>> =
         cortex_m::singleton!(: UsbBusAllocator<UsbBus<BenchUsb>> = UsbBus::new(peripheral))
             .unwrap();

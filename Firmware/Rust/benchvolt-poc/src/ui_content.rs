@@ -58,8 +58,10 @@ mod tests {
 
     #[test]
     fn help_headings_are_exactly_the_five_section_titles() {
-        let headings: std::vec::Vec<&str> =
-            HELP_TEXT.lines().filter(|line| is_help_heading(line)).collect();
+        let headings: std::vec::Vec<&str> = HELP_TEXT
+            .lines()
+            .filter(|line| is_help_heading(line))
+            .collect();
         assert_eq!(
             headings,
             ["MAIN MENU", "NAVIGATION", "POWER", "CV / CC", "AWG"]

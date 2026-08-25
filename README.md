@@ -41,7 +41,6 @@ Highlights:
 - **Persistence.** Versioned, CRC-checked append-only settings journal in a reserved flash page (current limits, setpoints, modes, PD limit, units), three profile slots, and safe deferred compaction. Torn or corrupt records are ignored.
 - **UI.** Rotary-encoder-driven menu system with overview, per-channel detail, AWG, settings, system, help, and USB-PD input screens; encoder acceleration; coalesced detent handling so display work never drops a quick spin.
 - **Bootloader compatibility.** Links at `0x08008000` within the 92 KiB application partition; the update path cannot touch the bootloader, settings page, or boot-metadata page. A boot seal mechanism returns to the bootloader if the application crashes early.
-- **Tested.** 216 host-run tests, including integration and fuzz tests, exercised on every build via the canonical `tools/check.sh` gate.
 
 ### Firmware screenshots
 
@@ -144,18 +143,7 @@ cd Firmware/Rust/benchvolt-poc
 cargo build --release
 ```
 
-This produces an image linked at `0x08008000` for the existing C bootloader. See the [firmware README](Firmware/Rust/benchvolt-poc/README.md) for the canonical `tools/check.sh` gate, image generation, and the USB flashing runbook (`tools/flash_latest.sh`).
-
-### Host tests
-
-The 216 host-run tests (unit, integration, and fuzz) run on your development machine:
-
-```sh
-cd Firmware/Rust/benchvolt-poc
-cargo test --target <host-triple> --no-default-features
-```
-
-(for example `--target aarch64-apple-darwin` or `--target x86_64-unknown-linux-gnu`; the explicit target is needed because the crate defaults Cargo to the Thumb target).
+This produces an image linked at `0x08008000` for the existing C bootloader. See the [firmware README](Firmware/Rust/benchvolt-poc/README.md) for image generation and the USB flashing runbook (`tools/flash_latest.sh`).
 
 ### Desktop GUI
 

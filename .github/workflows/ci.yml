@@ -55,10 +55,55 @@ jobs:
             Firmware/Rust/benchvolt-poc/target/thumbv6m-none-eabi/release/benchvolt-poc.bin
           if-no-files-found: error
 
+  c-firmware:
+    name: C firmware build (bootloader + legacy app)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM GCC toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+      - name: Build bootloader
+        run: make -C Firmware/Bootloader -j"$(nproc)"
+      - name: Build legacy C application
+        run: make -C Firmware/USB_Power_Source -j"$(nproc)"
+      - name: Check partition fit
+        run: |
+          BOOT=Firmware/Bootloader/build/bootloader.bin
+          APP=Firmware/USB_Power_Source/build/usb_power_source.bin
+          BOOT_SIZE=$(stat -c%s "$BOOT")
+          APP_SIZE=$(stat -c%s "$APP")
+          echo "Bootloader: ${BOOT_SIZE} bytes (limit 32768)"
+          echo "Application: ${APP_SIZE} bytes (limit 98304)"
+          if [ "$BOOT_SIZE" -gt 32768 ]; then
+            echo "::error::Bootloader exceeds the 32 KiB bootloader partition"
+            exit 1
+          fi
+          if [ "$APP_SIZE" -gt 98304 ]; then
+            echo "::error::C application exceeds the 96 KiB application partition"
+            exit 1
+          fi
+      - name: Upload bootloader artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchvolt-c-bootloader
+          path: Firmware/Bootloader/build/bootloader.bin
+          if-no-files-found: error
+      - name: Upload C application artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchvolt-c-firmware
+          path: Firmware/USB_Power_Source/build/usb_power_source.bin
+          if-no-files-found: error
+
   release:
     name: Publish latest firmware
     runs-on: ubuntu-latest
-    needs: [firmware, tests]
+    needs: [firmware, c-firmware, tests]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
@@ -71,6 +116,14 @@ jobs:
         with:
           name: benchvolt-firmware
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: benchvolt-c-bootloader
+          path: dist/c
+      - uses: actions/download-artifact@v4
+        with:
+          name: benchvolt-c-firmware
+          path: dist/c
       - name: Update rolling latest release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -80,6 +133,8 @@ jobs:
           NOTES="Rolling build of main at ${GITHUB_SHA}. Image size: ${SIZE} bytes (92 KiB partition). Flash from the desktop GUI's firmware update tab, or with Firmware/Rust/benchvolt-poc/tools/flash_poc.py."
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest "$BIN#benchvolt-poc.bin (application image, flash via GUI or flash_poc.py)" \
+            "dist/c/bootloader.bin#bootloader.bin (flash once via ST-Link/DFU at 0x08000000)" \
+            "dist/c/usb_power_source.bin#usb_power_source.bin (legacy C application, alternative to the Rust image; flash via bootloader at 0x08008000)" \
             --title "Latest firmware (main)" \
             --notes "$NOTES" \
             --latest \

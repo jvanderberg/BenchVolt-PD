@@ -1,451 +1,64 @@
+//! Thin I/O shim over the pure dispatcher in `benchvolt_poc::usb_query`:
+//! gathers the hardware diagnostic snapshot, dispatches, and queues the
+//! reply. All protocol logic lives (and is tested) in the lib crate.
+
 use crate::input::{encoder_counts, monotonic_ms};
 use crate::usb_transport::queue_usb_response;
 use crate::{arb_runtime, diagnostics, display_dma};
 use benchvolt_poc::{
-    app::{AppState, AwgSource, AwgStatus, RegulationMode},
-    arb::{
-        parse_data as parse_arb_data, parse_start as parse_arb_start, ParseError as ArbParseError,
-    },
+    app::AppState,
     power::ProtectionMonitor,
-    protocol::parse_milliunits,
-    usb_command::{
-        parse_compat_mutation, project_compat_query, temperature_response, CommandError, UsbIntent,
-    },
+    usb_command::UsbIntent,
+    usb_command::Response,
+    usb_query::{dispatch_command, DiagnosticsSnapshot},
 };
-use core::fmt::Write as _;
-use heapless::String;
+
+fn diagnostics_snapshot() -> DiagnosticsSnapshot {
+    let (arb_index, arb_cycles, arb_late_updates, arb_skipped_cycles) = arb_runtime::status();
+    let (display_queued, display_high_water, display_active, display_overflowed, display_failed) =
+        display_dma::diagnostics();
+    let (encoder_edges, encoder_drops) = encoder_counts();
+    DiagnosticsSnapshot {
+        arb_index,
+        arb_cycles,
+        arb_late_updates,
+        arb_skipped_cycles,
+        hw_last_operation: diagnostics::last_hw_operation(),
+        hw_last_error: diagnostics::last_hw_error(),
+        hw_retry_count: diagnostics::hw_retry_count(),
+        display_label: display_dma::lifecycle_label(),
+        display_queued,
+        display_high_water,
+        display_active,
+        display_overflowed,
+        display_failed,
+        display_ready_for_seal: display_dma::ready_for_seal(),
+        reset_causes: diagnostics::reset_causes(),
+        reset_reason: diagnostics::reset_reason(),
+        tps_ch5_status: diagnostics::ch5_tps_status(),
+        tick_ms: monotonic_ms(),
+        encoder_edges,
+        encoder_drops,
+    }
+}
 
 pub(crate) fn handle_usb_command(
     command: &[u8],
     state: &AppState,
     protection_monitors: &[ProtectionMonitor; 5],
 ) -> UsbIntent {
-    let command = command.strip_suffix(b"\r").unwrap_or(command);
-    for channel in 4..=5u8 {
-        let mut status_command: String<64> = String::new();
-        write!(&mut status_command, "SOUR:WAVE:CH{channel}:ARB:STAT?").ok();
-        if command == status_command.as_bytes() {
-            let owner = state.awg_source == AwgSource::Arbitrary
-                && state.active_awg_channel() + 1 == channel;
-            let status = if owner {
-                match state.awg_status {
-                    AwgStatus::Running => "RUNNING",
-                    AwgStatus::StartRequested | AwgStatus::Starting => "STARTING",
-                    AwgStatus::StopRequested => "STOPPING",
-                    AwgStatus::Fault => "FAULT",
-                    AwgStatus::Stopped => "STOPPED",
-                }
-            } else {
-                "STOPPED"
-            };
-            let (index, cycles, late_updates, skipped_cycles) = arb_runtime::status();
-            let mut response: String<96> = String::new();
-            write!(
-                &mut response,
-                "{},INDEX:{},CYCLES:{},LATE:{},SKIP:{}\r\n",
-                status, index, cycles, late_updates, skipped_cycles,
-            )
-            .ok();
+    let mut response = Response::new_empty();
+    match dispatch_command(
+        command,
+        state,
+        protection_monitors,
+        &diagnostics_snapshot(),
+        &mut response,
+    ) {
+        Some(intent) => intent,
+        None => {
             queue_usb_response(response.as_bytes());
-            return UsbIntent::None;
-        }
-        let mut stop_command: String<64> = String::new();
-        write!(&mut stop_command, "SOUR:WAVE:CH{channel}:ARB:STOP").ok();
-        if command == stop_command.as_bytes() {
-            return UsbIntent::ArbStop(channel - 1);
+            UsbIntent::None
         }
     }
-    match parse_arb_data(command) {
-        Ok(Some(chunk)) => return UsbIntent::ArbData(chunk),
-        Err(ArbParseError::Syntax) => {
-            queue_usb_response(b"ERR:SYNTAX\r\n");
-            return UsbIntent::None;
-        }
-        Err(ArbParseError::Range) => {
-            queue_usb_response(b"ERR:RANGE\r\n");
-            return UsbIntent::None;
-        }
-        Ok(None) => {}
-    }
-    match parse_arb_start(command) {
-        Ok(Some(start)) => return UsbIntent::ArbStart(start),
-        Err(ArbParseError::Syntax) => {
-            queue_usb_response(b"ERR:SYNTAX\r\n");
-            return UsbIntent::None;
-        }
-        Err(ArbParseError::Range) => {
-            queue_usb_response(b"ERR:RANGE\r\n");
-            return UsbIntent::None;
-        }
-        Ok(None) => {}
-    }
-    if let Some(rest) = command.strip_prefix(b"SYST:PROT:CH") {
-        let Some(channel) = rest
-            .first()
-            .and_then(|byte| byte.checked_sub(b'1'))
-            .filter(|channel| *channel < 5 && rest.get(1..) == Some(b"?"))
-        else {
-            queue_usb_response(b"ERR:RANGE\r\n");
-            return UsbIntent::None;
-        };
-        let snapshot = protection_monitors[usize::from(channel)].snapshot();
-        let mut response: String<64> = String::new();
-        write!(
-            &mut response,
-            "A{} R{},{} P{} G{} O{} V{} T{},{} N{}\r\n",
-            u8::from(snapshot.active),
-            snapshot.last.millivolts,
-            snapshot.last.milliamps,
-            snapshot.peak_milliamps,
-            snapshot.grace_remaining,
-            snapshot.overcurrent_samples,
-            snapshot.voltage_samples,
-            snapshot.trip.millivolts,
-            snapshot.trip.milliamps,
-            snapshot.samples_since_enable,
-        )
-        .ok();
-        queue_usb_response(response.as_bytes());
-        return UsbIntent::None;
-    }
-    if let Some(rest) = command.strip_prefix(b"OUTP:CH") {
-        if rest.len() == 2 && rest[1] == b'?' {
-            let Some(channel) = rest[0].checked_sub(b'1').filter(|channel| *channel < 5) else {
-                queue_usb_response(b"ERR:RANGE\r\n");
-                return UsbIntent::None;
-            };
-            let output = &state.channels[usize::from(channel)];
-            let status = match output.fault {
-                benchvolt_poc::app::Fault::OverCurrent => "FAULT:OVERCURRENT",
-                benchvolt_poc::app::Fault::OverTemperature => "FAULT:OVERTEMP",
-                benchvolt_poc::app::Fault::Sensor => "FAULT:SENSOR",
-                benchvolt_poc::app::Fault::Hardware => "FAULT:HARDWARE",
-                benchvolt_poc::app::Fault::None if output.physical_enabled => "ON",
-                benchvolt_poc::app::Fault::None => "OFF",
-            };
-            let mut response: String<32> = String::new();
-            write!(&mut response, "{}\r\n", status).ok();
-            queue_usb_response(response.as_bytes());
-            return UsbIntent::None;
-        }
-    }
-    match project_compat_query(command, state) {
-        Ok(Some(response)) => {
-            queue_usb_response(response.as_bytes());
-            return UsbIntent::None;
-        }
-        Err(CommandError::Syntax) => {
-            queue_usb_response(b"ERR:SYNTAX\r\n");
-            return UsbIntent::None;
-        }
-        Err(CommandError::Range) => {
-            queue_usb_response(b"ERR:RANGE\r\n");
-            return UsbIntent::None;
-        }
-        Ok(None) => {}
-    }
-    match parse_compat_mutation(command) {
-        Ok(Some(intent)) => return intent,
-        Err(CommandError::Syntax) => {
-            queue_usb_response(b"ERR:SYNTAX\r\n");
-            return UsbIntent::None;
-        }
-        Err(CommandError::Range) => {
-            queue_usb_response(b"ERR:RANGE\r\n");
-            return UsbIntent::None;
-        }
-        Ok(None) => {}
-    }
-    if let Some(rest) = command.strip_prefix(b"SOUR:CURR:CH") {
-        let Some(channel) = rest.first().and_then(|byte| byte.checked_sub(b'1')) else {
-            queue_usb_response(b"ERR:RANGE\r\n");
-            return UsbIntent::None;
-        };
-        if channel >= 5 {
-            queue_usb_response(b"ERR:RANGE\r\n");
-            return UsbIntent::None;
-        }
-        if rest.get(1..) == Some(b"?") {
-            let limit = state.channels[usize::from(channel)].current_limit_ma;
-            let mut response: String<32> = String::new();
-            write!(&mut response, "{}.{:03}A\r\n", limit / 1_000, limit % 1_000).ok();
-            queue_usb_response(response.as_bytes());
-            return UsbIntent::None;
-        }
-        let Some(value) = rest.get(2..).filter(|_| rest.get(1) == Some(&b' ')) else {
-            queue_usb_response(b"ERR:SYNTAX\r\n");
-            return UsbIntent::None;
-        };
-        let Some(milliamps) = parse_milliunits(value).filter(|value| *value <= 3_000) else {
-            queue_usb_response(b"ERR:RANGE\r\n");
-            return UsbIntent::None;
-        };
-        return UsbIntent::SetCurrentLimit { channel, milliamps };
-    }
-    if let Some(value) = command.strip_prefix(b"SINK:LIMIT ") {
-        let Some(milliamps) = parse_milliunits(value).filter(|value| *value <= 5_000) else {
-            queue_usb_response(b"ERR:RANGE\r\n");
-            return UsbIntent::None;
-        };
-        return UsbIntent::SetSinkCurrentLimit(milliamps);
-    }
-    match command {
-        b"*IDN?" => queue_usb_response(b"BenchVolt-PD,RUST-POC,S/N:2026-01\r\n"),
-        b"SYST:BUILD?" => queue_usb_response(b"Rust POC 0.1.0\r\n"),
-        b"SYST:HWERR?" => {
-            let mut response: String<64> = String::new();
-            write!(
-                &mut response,
-                "OP{} ERR{} RETRIES{}\r\n",
-                diagnostics::last_hw_operation(),
-                diagnostics::last_hw_error(),
-                diagnostics::hw_retry_count(),
-            )
-            .ok();
-            queue_usb_response(response.as_bytes());
-        }
-        b"SYST:DISPLAY?" => {
-            let (queued, high_water, active, overflowed, failed) = display_dma::diagnostics();
-            let mut response: String<96> = String::new();
-            write!(
-                &mut response,
-                "{} Q{} H{} A{} O{} F{} SEAL{}\r\n",
-                display_dma::lifecycle_label(),
-                queued,
-                high_water,
-                u8::from(active),
-                u8::from(overflowed),
-                u8::from(failed),
-                u8::from(display_dma::ready_for_seal()),
-            )
-            .ok();
-            queue_usb_response(response.as_bytes());
-        }
-        b"SYST:RESET?" => {
-            let causes = diagnostics::reset_causes();
-            let mut response: String<96> = String::new();
-            write!(&mut response, "0x{causes:02X}").ok();
-            for (mask, label) in [
-                (benchvolt_poc::reset_cause::OPTION_BYTE, "OPTION"),
-                (benchvolt_poc::reset_cause::PIN, "PIN"),
-                (benchvolt_poc::reset_cause::POWER_ON, "POR"),
-                (benchvolt_poc::reset_cause::SOFTWARE, "SOFTWARE"),
-                (benchvolt_poc::reset_cause::INDEPENDENT_WATCHDOG, "IWDG"),
-                (benchvolt_poc::reset_cause::WINDOW_WATCHDOG, "WWDG"),
-                (benchvolt_poc::reset_cause::LOW_POWER, "LOWPOWER"),
-                (benchvolt_poc::reset_cause::V18_DOMAIN, "V18"),
-            ] {
-                if causes & mask != 0 {
-                    write!(&mut response, ",{label}").ok();
-                }
-            }
-            if let Some(reason) = benchvolt_poc::reset_cause::ResetReason::from_raw(u32::from(
-                diagnostics::reset_reason(),
-            )) {
-                write!(&mut response, ",CAUSE:{}", reason.label()).ok();
-            }
-            response.push_str("\r\n").ok();
-            queue_usb_response(response.as_bytes());
-        }
-        b"SYST:TPS:CH5?" => {
-            let mut response: String<32> = String::new();
-            write!(&mut response, "0x{:02X}\r\n", diagnostics::ch5_tps_status()).ok();
-            queue_usb_response(response.as_bytes());
-        }
-        b"SYST:PD?" => {
-            let mut response: String<64> = String::new();
-            if let Some(contract) = state.pd_contract {
-                write!(
-                    &mut response,
-                    "READY,PDO{},{}mV,{}mA,MAX{}mA\r\n",
-                    contract.source_position,
-                    contract.millivolts,
-                    contract.operating_milliamps,
-                    contract.maximum_milliamps,
-                )
-                .ok();
-            } else if let Some(error) = state.pd_error {
-                let code = match error {
-                    benchvolt_poc::pd::PdError::Bus => "BUS",
-                    benchvolt_poc::pd::PdError::WrongDevice => "DEVICE",
-                    benchvolt_poc::pd::PdError::Detached => "DETACHED",
-                    benchvolt_poc::pd::PdError::Timeout => "TIMEOUT",
-                    benchvolt_poc::pd::PdError::MalformedCapabilities => "CAPS",
-                    benchvolt_poc::pd::PdError::NoSuitablePdo => "NO_PDO",
-                    benchvolt_poc::pd::PdError::ContractMismatch => "CONTRACT",
-                };
-                write!(&mut response, "ERROR,{code}\r\n").ok();
-            } else if state.pd_negotiating {
-                response.push_str("NEGOTIATING\r\n").ok();
-            } else {
-                response.push_str("IDLE\r\n").ok();
-            }
-            queue_usb_response(response.as_bytes());
-        }
-        b"SYST:TICK?" => {
-            let mut response: String<32> = String::new();
-            write!(&mut response, "{}\r\n", monotonic_ms()).ok();
-            queue_usb_response(response.as_bytes());
-        }
-        b"MEAS:TEMP?" => {
-            let response = temperature_response(state);
-            queue_usb_response(response.as_bytes());
-        }
-        b"MEAS:CH1?" | b"MEAS:CH2?" | b"MEAS:CH3?" | b"MEAS:CH4?" | b"MEAS:CH5?" => {
-            let channel = usize::from(command[7] - b'1');
-            let measurement = state.channels[channel].measurement;
-            let mut response: String<64> = String::new();
-            if measurement.valid {
-                write!(
-                    &mut response,
-                    "{}.{:03}V,{}.{:03}A\r\n",
-                    measurement.millivolts / 1_000,
-                    measurement.millivolts % 1_000,
-                    measurement.milliamps / 1_000,
-                    measurement.milliamps % 1_000
-                )
-                .ok();
-            } else {
-                response.push_str("ERR:SENSOR\r\n").ok();
-            }
-            queue_usb_response(response.as_bytes());
-        }
-        b"MEAS:SINK?" => {
-            let measurement = state.sink;
-            let mut response: String<64> = String::new();
-            if measurement.valid {
-                let milliwatts = u32::from(measurement.millivolts)
-                    .saturating_mul(u32::from(measurement.milliamps))
-                    / 1_000;
-                write!(
-                    &mut response,
-                    "{}.{:03}V,{}.{:03}A,{}.{:03}W\r\n",
-                    measurement.millivolts / 1_000,
-                    measurement.millivolts % 1_000,
-                    measurement.milliamps / 1_000,
-                    measurement.milliamps % 1_000,
-                    milliwatts / 1_000,
-                    milliwatts % 1_000
-                )
-                .ok();
-            } else {
-                response.push_str("ERR:SENSOR\r\n").ok();
-            }
-            queue_usb_response(response.as_bytes());
-        }
-        b"SINK:LIMIT?" => {
-            let mut response: String<32> = String::new();
-            write!(
-                &mut response,
-                "{}.{:03}A\r\n",
-                state.sink_current_limit_ma / 1_000,
-                state.sink_current_limit_ma % 1_000
-            )
-            .ok();
-            queue_usb_response(response.as_bytes());
-        }
-        b"SOUR:MODE:CH4?" => {
-            queue_usb_response(if state.channels[3].regulation_mode == RegulationMode::Cc {
-                b"CC\r\n"
-            } else {
-                b"CV\r\n"
-            })
-        }
-        b"SOUR:MODE:CH5?" => {
-            queue_usb_response(if state.channels[4].regulation_mode == RegulationMode::Cc {
-                b"CC\r\n"
-            } else {
-                b"CV\r\n"
-            })
-        }
-        b"SOUR:MODE:CH4 CV" => {
-            return UsbIntent::SetRegulationMode {
-                channel: 3,
-                mode: RegulationMode::Cv,
-            }
-        }
-        b"SOUR:MODE:CH4 CC" => {
-            return UsbIntent::SetRegulationMode {
-                channel: 3,
-                mode: RegulationMode::Cc,
-            }
-        }
-        b"SOUR:MODE:CH5 CV" => {
-            return UsbIntent::SetRegulationMode {
-                channel: 4,
-                mode: RegulationMode::Cv,
-            }
-        }
-        b"SOUR:MODE:CH5 CC" => {
-            return UsbIntent::SetRegulationMode {
-                channel: 4,
-                mode: RegulationMode::Cc,
-            }
-        }
-        b"SYST:UI?" => {
-            let (edges, drops) = encoder_counts();
-            let mut response: String<64> = String::new();
-            let focus = match state.focus {
-                benchvolt_poc::app::ControlFocus::None => "NONE",
-                benchvolt_poc::app::ControlFocus::OverviewOutput(_) => "OVOUT",
-                benchvolt_poc::app::ControlFocus::Output => "OUT",
-                benchvolt_poc::app::ControlFocus::Voltage => "VOLT",
-                benchvolt_poc::app::ControlFocus::CurrentLimit => "CURR",
-                benchvolt_poc::app::ControlFocus::RegulationMode => "MODE",
-            };
-            match state.screen {
-                benchvolt_poc::app::Screen::Channel(channel) => {
-                    let output = &state.channels[usize::from(channel)];
-                    write!(
-                        &mut response,
-                        "CH{},{} V:{} I:{} E:{} D:{}\r\n",
-                        channel + 1,
-                        focus,
-                        output.setpoint_mv,
-                        output.current_limit_ma,
-                        edges,
-                        drops
-                    )
-                    .ok();
-                }
-                benchvolt_poc::app::Screen::Overview => {
-                    write!(&mut response, "OVERVIEW E:{} D:{}\r\n", edges, drops).ok();
-                }
-                benchvolt_poc::app::Screen::UsbPdInput => {
-                    write!(
-                        &mut response,
-                        "USBPD,{} I:{} E:{} D:{}\r\n",
-                        focus, state.sink_current_limit_ma, edges, drops
-                    )
-                    .ok();
-                }
-                benchvolt_poc::app::Screen::MainMenu => {
-                    response.push_str("MENU\r\n").ok();
-                }
-                benchvolt_poc::app::Screen::Awg => {
-                    response.push_str("AWG\r\n").ok();
-                }
-                benchvolt_poc::app::Screen::Settings => {
-                    response.push_str("SETTINGS\r\n").ok();
-                }
-                benchvolt_poc::app::Screen::ProfileSave => {
-                    response.push_str("PROFILE:SAVE\r\n").ok();
-                }
-                benchvolt_poc::app::Screen::ProfileLoad => {
-                    response.push_str("PROFILE:LOAD\r\n").ok();
-                }
-                benchvolt_poc::app::Screen::System => {
-                    response.push_str("SYSTEM\r\n").ok();
-                }
-                benchvolt_poc::app::Screen::Help => {
-                    response.push_str("HELP\r\n").ok();
-                }
-            }
-            queue_usb_response(response.as_bytes());
-        }
-        b"JUMP:BOOTLOADER" => return UsbIntent::JumpToBootloader,
-        b"SYST:REBOOT" => return UsbIntent::Reboot,
-        _ => queue_usb_response(b"ERR:UNKNOWN_COMMAND\r\n"),
-    }
-    UsbIntent::None
 }

@@ -4,6 +4,18 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# The firmware binary is ARM-only. Host test runs use
+# `cargo test --target <host> --no-default-features` so the lib and the
+# tests/ crates build without the stm32-coupled bin.
+[features]
+default = ["firmware"]
+firmware = []
+
+[[bin]]
+name = "benchvolt-poc"
+path = "src/main.rs"
+required-features = ["firmware"]
+
 [dependencies]
 heapless = "0.8.0"
 reducto = "0.1.0"

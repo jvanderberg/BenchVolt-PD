@@ -747,7 +747,10 @@ impl Reducer for AppReducer {
                 for channel in &mut next.channels {
                     channel.operation = channel.operation.wrapping_add(1);
                     channel.requested_enabled = false;
-                    channel.physical_enabled = false;
+                    // A failed shutdown must not claim the hardware is off:
+                    // `physical_enabled` is left untouched so
+                    // `outputs_physically_off()` stays truthful for flash
+                    // compaction and boot-seal gating.
                     channel.transition = OutputTransition::Stable;
                     channel.fault = Fault::Hardware;
                 }
@@ -816,7 +819,7 @@ impl Reducer for AppReducer {
                             }
                         }
                         4 => {
-                            let minimum = if state.awg.channel == 3 { 500 } else { 800 };
+                            let minimum = i32::from(crate::limits::adjustable_min_mv(state.awg.channel));
                             let adjusted = i32::from(state.awg.low_mv) + i32::from(direction) * 10;
                             let adjusted =
                                 adjusted.clamp(minimum, i32::from(state.awg.high_mv)) as u16;
@@ -1035,7 +1038,13 @@ impl Reducer for AppReducer {
                                     RegulationMode::Cv => RegulationMode::Cc,
                                     RegulationMode::Cc => RegulationMode::Cv,
                                 };
-                                output.drive_mv = output.setpoint_mv;
+                                // While physically enabled the drive keeps
+                                // slewing toward the setpoint in bounded
+                                // steps; snapping it here would emit one
+                                // full-swing voltage write.
+                                if !output.physical_enabled {
+                                    output.drive_mv = output.setpoint_mv;
+                                }
                                 true
                             }
                             _ => false,
@@ -1098,7 +1107,8 @@ impl Reducer for AppReducer {
                     return Self::enforce_invariants(next);
                 };
                 let in_range = match channel {
-                    3 => (500..=5_000).contains(&millivolts),
+                    3 => (crate::limits::CH4_MIN_VOLTAGE_MV..=crate::limits::CH4_MAX_VOLTAGE_MV)
+                        .contains(&millivolts),
                     4 => (CH5_MIN_VOLTAGE_MV..=CH5_MAX_VOLTAGE_MV).contains(&millivolts),
                     _ => false,
                 };
@@ -1170,7 +1180,7 @@ impl Reducer for AppReducer {
                         false
                     } else {
                         let step_mv = (error_ma.unsigned_abs() * 2).clamp(10, 200) as u16;
-                        let minimum_mv = if channel == 3 { 500 } else { 800 };
+                        let minimum_mv = crate::limits::adjustable_min_mv(channel);
                         let drive_mv = if error_ma < 0 {
                             output.drive_mv.saturating_sub(step_mv).max(minimum_mv)
                         } else {
@@ -1454,6 +1464,48 @@ impl Reducer for AppReducer {
 mod tests {
     use super::*;
     use crate::settings::PersistentSettings;
+
+    #[test]
+    fn failed_global_shutdown_does_not_claim_outputs_are_physically_off() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        state.channels[2].requested_enabled = true;
+        state.channels[2].physical_enabled = true;
+
+        let next = AppReducer::reduce(&state, Action::GlobalShutdownFailed);
+
+        assert!(next.channels[2].physical_enabled);
+        assert!(!next.channels[2].requested_enabled);
+        assert!(next.channels[2].fault == Fault::Hardware);
+        assert!(!next.outputs_physically_off());
+        assert!(next.awg_status == AwgStatus::Fault);
+    }
+
+    #[test]
+    fn ui_regulation_mode_toggle_keeps_the_live_drive_slewing() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        state.screen = Screen::Channel(4);
+        state.focus = ControlFocus::RegulationMode;
+        state.channels[4].physical_enabled = true;
+        state.channels[4].setpoint_mv = 12_000;
+        state.channels[4].drive_mv = 1_000;
+
+        let toggled = AppReducer::reduce(&state, Action::AdjustFocused(1));
+
+        assert!(toggled.channels[4].regulation_mode == RegulationMode::Cc);
+        assert_eq!(toggled.channels[4].drive_mv, 1_000);
+
+        // While off there is no physical drive to protect; snap to setpoint
+        // like the USB SetRegulationMode path.
+        state.channels[4].physical_enabled = false;
+        let toggled = AppReducer::reduce(&state, Action::AdjustFocused(1));
+        assert_eq!(toggled.channels[4].drive_mv, 12_000);
+    }
+
+    #[test]
+    fn cc_regulation_floor_uses_the_shared_channel_minimum_constants() {
+        assert_eq!(crate::limits::adjustable_min_mv(3), 500);
+        assert_eq!(crate::limits::adjustable_min_mv(4), 800);
+    }
 
     #[test]
     fn failed_boot_seal_restore_revokes_the_safe_recovery_status() {

@@ -58,6 +58,10 @@ struct UsbRuntime {
     commands: Deque<UsbMessage, 4>,
     responses: Deque<UsbMessage, 4>,
     response_offset: usize,
+    /// Set when a response (or ERR:BUSY marker) had to be dropped because
+    /// the response queue was full; drained as one ERR:OVERFLOW line so the
+    /// host learns replies were lost instead of hanging on a silent drop.
+    responses_dropped: bool,
 }
 
 impl UsbRuntime {
@@ -71,9 +75,13 @@ impl UsbRuntime {
                 for byte in &packet[..count] {
                     if *byte == b'\n' {
                         if self.rx_overflow {
-                            self.responses
+                            if self
+                                .responses
                                 .push_back(UsbMessage::from_slice(b"ERR:LINE_TOO_LONG\r\n"))
-                                .ok();
+                                .is_err()
+                            {
+                                self.responses_dropped = true;
+                            }
                             self.rx_len = 0;
                             self.rx_overflow = false;
                             continue;
@@ -81,10 +89,13 @@ impl UsbRuntime {
                         let mut message = UsbMessage::empty();
                         message.bytes[..self.rx_len].copy_from_slice(&self.rx_line[..self.rx_len]);
                         message.len = self.rx_len as u16;
-                        if self.commands.push_back(message).is_err() {
-                            self.responses
+                        if self.commands.push_back(message).is_err()
+                            && self
+                                .responses
                                 .push_back(UsbMessage::from_slice(b"ERR:BUSY\r\n"))
-                                .ok();
+                                .is_err()
+                        {
+                            self.responses_dropped = true;
                         }
                         self.rx_len = 0;
                     } else if self.rx_overflow {
@@ -100,7 +111,20 @@ impl UsbRuntime {
             }
         }
 
+        if self.responses_dropped && !self.responses.is_full() {
+            self.responses
+                .push_back(UsbMessage::from_slice(b"ERR:OVERFLOW\r\n"))
+                .ok();
+            self.responses_dropped = false;
+        }
         if let Some(response) = self.responses.front().copied() {
+            if response.len == 0 {
+                // A zero-length message would never satisfy the count > 0
+                // arm below and would stall the queue forever.
+                self.responses.pop_front();
+                self.response_offset = 0;
+                return;
+            }
             match self
                 .serial
                 .write(&response.as_slice()[self.response_offset..])
@@ -148,7 +172,11 @@ pub(crate) fn take_usb_command() -> Option<UsbMessage> {
 
 pub(crate) fn queue_usb_response(bytes: &[u8]) {
     let message = UsbMessage::from_slice(bytes);
-    with_runtime(|runtime| runtime.responses.push_back(message).ok());
+    with_runtime(|runtime| {
+        if runtime.responses.push_back(message).is_err() {
+            runtime.responses_dropped = true;
+        }
+    });
     cortex_m::peripheral::NVIC::pend(pac::Interrupt::USB);
 }
 
@@ -220,6 +248,7 @@ pub(crate) fn install(usb: pac::USB, dm: PA11<Input<Floating>>, dp: PA12<Input<F
             commands: Deque::new(),
             responses: Deque::new(),
             response_offset: 0,
+            responses_dropped: false,
         });
         USB_RUNTIME_INSTALLED.store(true, Ordering::Relaxed);
     });

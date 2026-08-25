@@ -4,9 +4,7 @@ use cortex_m::interrupt::Mutex;
 use heapless::Deque;
 use stm32f0xx_hal::pac::{self, interrupt};
 
-use benchvolt_poc::input_policy::encoder_direction;
-
-const ENCODER_ACCELERATION_IDLE_MS: u16 = 80;
+use benchvolt_poc::input_policy::{clamp_adjustment, encoder_direction, EncoderAccumulator};
 
 #[derive(Clone, Copy)]
 struct EncoderEvent {
@@ -54,38 +52,17 @@ pub(crate) fn encoder_counts() -> (u32, u32) {
     })
 }
 
-pub(crate) fn take_encoder_adjustment(
-    last_tick: &mut u16,
-    last_direction: &mut i8,
-    velocity: &mut u8,
-) -> (i8, i8) {
+pub(crate) fn take_encoder_adjustment(accumulator: &mut EncoderAccumulator) -> (i8, i8) {
     cortex_m::interrupt::free(|cs| {
         let mut queue = ENCODER_EVENTS.borrow(cs).borrow_mut();
         let mut raw = 0i16;
         let mut accelerated = 0i16;
         while let Some(event) = queue.pop_front() {
-            let elapsed = event.tick.wrapping_sub(*last_tick);
-            if event.direction != *last_direction || elapsed > ENCODER_ACCELERATION_IDLE_MS {
-                *velocity = 1;
-            } else {
-                *velocity = velocity.saturating_add(1).min(16);
-            }
-            *last_tick = event.tick;
-            *last_direction = event.direction;
-            let multiplier: i16 = match *velocity {
-                0 | 1 => 1,
-                2..=3 => 2,
-                4..=5 => 4,
-                6..=8 => 8,
-                _ => 16,
-            };
-            raw = raw.saturating_add(i16::from(event.direction));
-            accelerated = accelerated.saturating_add(i16::from(event.direction) * multiplier);
+            let (event_raw, event_accelerated) = accumulator.step(event.direction, event.tick);
+            raw = raw.saturating_add(event_raw);
+            accelerated = accelerated.saturating_add(event_accelerated);
         }
-        (
-            raw.clamp(i16::from(i8::MIN), i16::from(i8::MAX)) as i8,
-            accelerated.clamp(i16::from(i8::MIN), i16::from(i8::MAX)) as i8,
-        )
+        clamp_adjustment(raw, accelerated)
     })
 }
 

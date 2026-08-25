@@ -10,17 +10,23 @@ from the encoder or USB. The reducer changes requested state only. A transition
 observer derives a power effect from `(old_state, new_state)`, the power service
 executes dependency-aware hardware operations, and a typed completion or fault
 action updates physical state. Reducers and views never access GPIO, ADC, I2C,
-converter registers, or delays.
+converter registers, or delays. A failed global shutdown latches a hardware
+fault on every channel but leaves `physical_enabled` untouched, so flash
+compaction and boot-seal restore keep waiting for a verified off state; the
+firmware additionally escalates to a raw register-level emergency shutdown.
 
 The driver fails closed on I2C NACK, register mismatch, converter fault status,
-or GPIO latch mismatch. CH1/CH2 require DC1; CH3/CH4 require DC2; CH4 programs
+or GPIO readback mismatch (EN pins are verified through IDR, the electrical
+pin level, not the output latch). CH1/CH2 require DC1; CH3/CH4 require DC2; CH4 programs
 its inverted MCP4725 setpoint before raising its gate; CH5 always performs a
 full hardware-EN cold start before programming and enabling its TPS55289.
 Protection samples voltage/current every 20 ms and temperature every 100 ms.
 Newly enabled outputs get a bounded 200 ms startup qualification interval while
 their hardware current limiting remains active. After that, three consecutive
 20 ms current or voltage-window violations are required to latch a fault;
-invalid measurements still fail immediately. Live CH4/CH5 voltage edits update
+invalid measurements still fail immediately. Latched TPS STATUS-register
+faults use a two-read confirmation instead, because STATUS is
+read-to-clear. Live CH4/CH5 voltage edits update
 the requested setpoint immediately but slew the physical drive in bounded
 200 mV control steps. Each verified drive step starts a bounded 500 ms
 voltage-settling interval. Current protection and hardware-I/O failure handling
@@ -35,8 +41,11 @@ transition and one selective repaint.
 USB transport is owned by the STM32 USB interrupt. The ISR performs only USB
 polling and moves bytes through bounded command and response queues. Command
 parsing, application state access, ADC/I2C work, and display drawing remain in
-the main loop. Queue overload fails boundedly with `ERR:BUSY`; display or sensor
-latency cannot prevent USB reset, enumeration, or endpoint servicing.
+the main loop. Queue overload fails boundedly with `ERR:BUSY`; if even the error reply
+cannot be queued, one `ERR:OVERFLOW` line is emitted as soon as the
+response queue drains so the host never waits on a silently dropped
+reply. Display or sensor latency cannot prevent USB reset, enumeration,
+or endpoint servicing.
 
 The companion C bootloader and this crate share a hardened partition contract.
 This application links at `0x08008000` and is limited to the 92 KiB application
@@ -47,7 +56,8 @@ CH1–CH5 current limits, CH4/CH5 voltage setpoints, the CH4/CH5 CV/CC modes,
 USB-PD input protection limit, and temperature unit are persisted as versioned,
 CRC-checked append-only records in the
 reserved `0x0801f000..0x0801f7ff` settings page after an edit has remained
-quiet. Torn or corrupt records are ignored. Runtime saves only program a blank
+quiet. Torn or corrupt records are ignored, and persisted AWG configuration is
+range-validated before the reducer may index channels with it. Runtime saves only program a blank
 slot. If the journal fills, page erase/compaction is deferred until every power
 output is physically off. Three explicit profile slots store validated snapshots
 of those settings. Loading a profile or Factory Defaults first performs a global

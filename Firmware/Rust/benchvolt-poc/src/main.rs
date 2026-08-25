@@ -441,9 +441,11 @@ fn main() -> ! {
     let mut seal_attempted = false;
     let mut legacy_pd_requested_at = None;
     let mut button = ButtonTracker::new(encoder_sw.is_high().unwrap_or(true));
-    let mut last_encoder_tick = input_ticks;
-    let mut last_encoder_direction = 0i8;
-    let mut encoder_velocity = 0u8;
+    let mut encoder_accumulator = benchvolt_poc::input_policy::EncoderAccumulator {
+        last_tick: input_ticks,
+        last_direction: 0,
+        velocity: 0,
+    };
     let mut usb_output = OutputTransaction::new();
     let mut display_failure_handled = false;
 
@@ -522,6 +524,21 @@ fn main() -> ! {
                     }
                     if !enabled
                         && channel == app.state().active_awg_channel()
+                        && matches!(
+                            app.state().awg_status,
+                            AwgStatus::StartRequested
+                                | AwgStatus::Starting
+                                | AwgStatus::StopRequested
+                        )
+                    {
+                        // The AWG start/stop sequence owns the channel for a
+                        // bounded window; report busy instead of letting the
+                        // reducer's guard surface a bogus ERR:HARDWARE.
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        break 'usb_command;
+                    }
+                    if !enabled
+                        && channel == app.state().active_awg_channel()
                         && app.state().awg_status == AwgStatus::Running
                     {
                         if app.state().awg_source == AwgSource::Arbitrary {
@@ -536,6 +553,7 @@ fn main() -> ! {
                             dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
                             queue_usb_response(b"OK\r\n");
                         } else {
+                            unsafe { raw_emergency_shutdown() };
                             dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                             queue_usb_response(b"ERR:HARDWARE\r\n");
                         }
@@ -679,6 +697,9 @@ fn main() -> ! {
                         && app.state().awg_source == AwgSource::Arbitrary
                     {
                         arb_runtime::reset_status();
+                        // The buffer now belongs to this run; require a fresh
+                        // contiguous upload before it can be started again.
+                        arb_upload.invalidate();
                         waveform_service.arm_arbitrary(start);
                     } else {
                         queue_usb_response(b"ERR:BUSY\r\n");
@@ -700,6 +721,7 @@ fn main() -> ! {
                             waveform_service.stop_arbitrary();
                             queue_usb_response(b"OK\r\n");
                         } else {
+                            unsafe { raw_emergency_shutdown() };
                             dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                             queue_usb_response(b"ERR:HARDWARE\r\n");
                         }
@@ -771,11 +793,7 @@ fn main() -> ! {
             }
         }
 
-        let (direction, accelerated) = take_encoder_adjustment(
-            &mut last_encoder_tick,
-            &mut last_encoder_direction,
-            &mut encoder_velocity,
-        );
+        let (direction, accelerated) = take_encoder_adjustment(&mut encoder_accumulator);
         if !display_dma::has_failed() {
             if let Some(action) = encoder_action(app.state(), direction, accelerated) {
                 dispatch_app(&mut app, &mut power_driver, action);
@@ -828,6 +846,7 @@ fn main() -> ! {
                     dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
                     dispatch_app(&mut app, &mut power_driver, Action::AwgStartPrepared);
                 } else {
+                    unsafe { raw_emergency_shutdown() };
                     dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                 }
             }
@@ -835,6 +854,7 @@ fn main() -> ! {
                 if execute_global_shutdown(&mut power_driver).is_ok() {
                     dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
                 } else {
+                    unsafe { raw_emergency_shutdown() };
                     dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                 }
             }
@@ -843,11 +863,14 @@ fn main() -> ! {
                     dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
                     dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
                 } else {
+                    unsafe { raw_emergency_shutdown() };
                     dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
                 }
             }
             WaveformDirective::FaultShutdown => {
-                let _ = execute_global_shutdown(&mut power_driver);
+                if execute_global_shutdown(&mut power_driver).is_err() {
+                    unsafe { raw_emergency_shutdown() };
+                }
             }
         }
 

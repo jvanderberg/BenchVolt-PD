@@ -6,39 +6,20 @@ use benchvolt_poc::{
     power::{execute_global_shutdown, FirmwareEffectPlanner, PowerDriver, PowerExecutor},
     settings::{PersistentSettings, RecordKind},
 };
+pub(crate) use benchvolt_poc::dispatch::dispatch_app;
 use reducto::EffectApp;
 
 use crate::boot::{persist_settings_record, SettingsStore};
 
-pub(crate) fn dispatch_app<V, D, const Q: usize>(
-    app: &mut EffectApp<AppReducer, V, FirmwareEffectPlanner, Q>,
-    power_driver: &mut PowerExecutor<D>,
-    action: Action,
-) -> bool
-where
-    V: reducto::View<State = AppState>,
-    D: PowerDriver,
-{
-    let mut pending_action = Some(action);
-    let mut changed = false;
-    while let Some(action) = pending_action.take() {
-        let outcome = app.dispatch(action);
-        changed |= outcome.changed();
-        pending_action = match outcome.effect() {
-            Some(effect) if effect.global_shutdown => {
-                Some(if execute_global_shutdown(power_driver).is_ok() {
-                    Action::GlobalShutdownApplied
-                } else {
-                    Action::GlobalShutdownFailed
-                })
-            }
-            Some(effect) => effect
-                .power
-                .and_then(|power| power_driver.submit(app.state(), power)),
-            None => None,
-        };
-    }
-    changed
+/// A request the reducer rejected because the channel is mid-transition or
+/// AWG is active failed for a transient reason, not a hardware fault.
+fn transiently_busy(state: &AppState, channel: u8) -> bool {
+    use benchvolt_poc::app::OutputTransition;
+    !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault)
+        || state
+            .channels
+            .get(usize::from(channel))
+            .is_some_and(|output| output.transition != OutputTransition::Stable)
 }
 
 #[inline(always)]
@@ -63,6 +44,8 @@ where
     let output = &app.state().channels[usize::from(channel)];
     if output.current_limit_ma == milliamps && output.fault != Fault::Hardware {
         b"OK\r\n"
+    } else if transiently_busy(app.state(), channel) {
+        b"ERR:BUSY\r\n"
     } else {
         b"ERR:HARDWARE\r\n"
     }
@@ -93,7 +76,7 @@ where
     let output = &app.state().channels[usize::from(channel)];
     if output.setpoint_mv == millivolts && output.fault != Fault::Hardware {
         b"OK\r\n"
-    } else if !matches!(app.state().awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
+    } else if transiently_busy(app.state(), channel) {
         b"ERR:BUSY\r\n"
     } else {
         b"ERR:HARDWARE\r\n"
@@ -127,6 +110,8 @@ where
     let output = &app.state().channels[usize::from(channel)];
     if output.regulation_mode == mode && output.fault != Fault::Hardware {
         b"OK\r\n"
+    } else if transiently_busy(app.state(), channel) {
+        b"ERR:BUSY\r\n"
     } else {
         b"ERR:HARDWARE\r\n"
     }

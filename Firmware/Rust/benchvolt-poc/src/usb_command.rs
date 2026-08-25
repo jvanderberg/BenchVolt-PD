@@ -25,7 +25,12 @@ impl Response {
         &self.bytes[..usize::from(self.len)]
     }
 
-    fn push_bytes(&mut self, value: &[u8]) -> Result<(), CommandError> {
+    pub const fn new_empty() -> Self {
+        Self::new()
+    }
+
+
+    pub(crate) fn push_bytes(&mut self, value: &[u8]) -> Result<(), CommandError> {
         let start = usize::from(self.len);
         let end = start.checked_add(value.len()).ok_or(CommandError::Range)?;
         let target = self.bytes.get_mut(start..end).ok_or(CommandError::Range)?;
@@ -85,6 +90,12 @@ pub enum UsbIntent {
     ArbData(ArbDataChunk),
     ArbStart(ArbStart),
     ArbStop(u8),
+}
+
+impl core::fmt::Write for Response {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        self.push_bytes(text.as_bytes()).map_err(|_| core::fmt::Error)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

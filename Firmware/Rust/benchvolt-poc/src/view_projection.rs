@@ -2,7 +2,10 @@ use core::fmt::Write as _;
 
 use heapless::String;
 
-use crate::app::AppState;
+use crate::app::{
+    AppState, ChannelSnapshot, ControlFocus, Fault, OutputTransition, RegulationMode,
+    TemperatureUnit,
+};
 
 pub const fn centered_origin(container_origin: i32, container_size: u32, item_size: u32) -> i32 {
     container_origin + ((container_size - item_size) / 2) as i32
@@ -119,6 +122,12 @@ pub struct AwgDamage {
     pub load_power: bool,
 }
 
+/// One-based channel number shown in the AWG "CHn LOAD" heading. Shared by
+/// the damage computation and the painter so they cannot drift.
+pub fn load_channel_number(state: &AppState) -> u8 {
+    load_channel_projection(state) + 1
+}
+
 fn load_channel_projection(state: &AppState) -> u8 {
     if state.awg_status == crate::app::AwgStatus::Running {
         state.active_awg_channel()
@@ -170,9 +179,187 @@ pub fn awg_damage(old: &AppState, new: &AppState) -> AwgDamage {
     damage
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum TemperatureProjection {
+    Invalid,
+    Tenths(i32, TemperatureUnit),
+}
+
+pub fn temperature_projection(state: &AppState) -> TemperatureProjection {
+    if !state.temp_valid {
+        return TemperatureProjection::Invalid;
+    }
+    let tenths_c = i32::from(state.temp_sixteenths_c) * 10 / 16;
+    match state.temperature_unit {
+        TemperatureUnit::Celsius => {
+            TemperatureProjection::Tenths(tenths_c, TemperatureUnit::Celsius)
+        }
+        TemperatureUnit::Fahrenheit => {
+            TemperatureProjection::Tenths(tenths_c * 9 / 5 + 320, TemperatureUnit::Fahrenheit)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum StatusProjection {
+    Fault,
+    On,
+    Wait,
+    Off,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ChannelProjection {
+    pub setpoint_centivolts: u16,
+    pub limit_centiamps: u16,
+    pub measured_centivolts: Option<u16>,
+    pub measured_centiamps: Option<u16>,
+    pub status: StatusProjection,
+    pub regulation_mode: RegulationMode,
+    pub regulating_current: bool,
+}
+
+pub fn channel_projection(channel: &ChannelSnapshot) -> ChannelProjection {
+    let status = match channel.fault {
+        Fault::None if channel.transition != OutputTransition::Stable => StatusProjection::Wait,
+        Fault::None if channel.physical_enabled => StatusProjection::On,
+        Fault::None if channel.requested_enabled => StatusProjection::Wait,
+        Fault::None => StatusProjection::Off,
+        _ => StatusProjection::Fault,
+    };
+    ChannelProjection {
+        setpoint_centivolts: channel.setpoint_mv / 10,
+        limit_centiamps: channel.current_limit_ma / 10,
+        measured_centivolts: channel
+            .measurement
+            .valid
+            .then_some(channel.measurement.millivolts / 10),
+        measured_centiamps: channel
+            .measurement
+            .valid
+            .then_some(channel.measurement.milliamps / 10),
+        status,
+        regulation_mode: channel.regulation_mode,
+        regulating_current: channel.regulation_mode == RegulationMode::Cc
+            && channel.physical_enabled
+            && channel.drive_mv < channel.setpoint_mv,
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct DetailProjection {
+    pub voltage_centivolts: Option<u16>,
+    pub current_centiamps: Option<u16>,
+    pub power_centiwatts: Option<u32>,
+    pub setpoint_centivolts: u16,
+    pub limit_centiamps: u16,
+    pub status: StatusProjection,
+    pub focus: ControlFocus,
+    pub regulation_mode: RegulationMode,
+    pub regulating_current: bool,
+}
+
+pub fn detail_projection(channel: &ChannelSnapshot, focus: ControlFocus) -> DetailProjection {
+    let row = channel_projection(channel);
+    DetailProjection {
+        voltage_centivolts: row.measured_centivolts,
+        current_centiamps: row.measured_centiamps,
+        power_centiwatts: channel.measurement.valid.then_some(
+            u32::from(channel.measurement.millivolts) * u32::from(channel.measurement.milliamps)
+                / 10_000,
+        ),
+        setpoint_centivolts: row.setpoint_centivolts,
+        limit_centiamps: row.limit_centiamps,
+        status: row.status,
+        focus,
+        regulation_mode: channel.regulation_mode,
+        regulating_current: row.regulating_current,
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_status_precedence_is_fault_then_wait_then_on_then_off() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        let output = &mut state.channels[0];
+
+        assert!(channel_projection(output).status == StatusProjection::Off);
+
+        output.requested_enabled = true;
+        assert!(channel_projection(output).status == StatusProjection::Wait);
+
+        output.physical_enabled = true;
+        output.transition = OutputTransition::Enabling(1);
+        assert!(channel_projection(output).status == StatusProjection::Wait);
+
+        output.transition = OutputTransition::Stable;
+        assert!(channel_projection(output).status == StatusProjection::On);
+
+        // Any latched fault dominates every other status.
+        output.fault = Fault::OverCurrent;
+        assert!(channel_projection(output).status == StatusProjection::Fault);
+    }
+
+    #[test]
+    fn cc_indicator_asserts_only_while_the_drive_is_backed_off() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        let output = &mut state.channels[4];
+        output.regulation_mode = RegulationMode::Cc;
+        output.physical_enabled = true;
+        output.setpoint_mv = 12_000;
+        output.drive_mv = 12_000;
+        assert!(!channel_projection(output).regulating_current);
+
+        output.drive_mv = 9_000;
+        assert!(channel_projection(output).regulating_current);
+
+        output.physical_enabled = false;
+        assert!(!channel_projection(output).regulating_current);
+    }
+
+    #[test]
+    fn temperature_projects_tenths_in_both_units_and_flags_invalid() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        state.temp_valid = true;
+        state.temp_sixteenths_c = 25 * 16;
+        assert!(
+            temperature_projection(&state)
+                == TemperatureProjection::Tenths(250, TemperatureUnit::Celsius)
+        );
+
+        state.temperature_unit = TemperatureUnit::Fahrenheit;
+        assert!(
+            temperature_projection(&state)
+                == TemperatureProjection::Tenths(770, TemperatureUnit::Fahrenheit)
+        );
+
+        state.temp_valid = false;
+        assert!(temperature_projection(&state) == TemperatureProjection::Invalid);
+    }
+
+    #[test]
+    fn detail_projection_derives_power_from_the_shared_row_projection() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        let output = &mut state.channels[3];
+        output.measurement = crate::app::Measurement {
+            millivolts: 5_000,
+            milliamps: 2_000,
+            valid: true,
+        };
+        let detail = detail_projection(output, ControlFocus::Voltage);
+        assert_eq!(detail.power_centiwatts, Some(1_000));
+        assert_eq!(detail.voltage_centivolts, Some(500));
+        assert_eq!(detail.current_centiamps, Some(200));
+
+        output.measurement.valid = false;
+        let detail = detail_projection(output, ControlFocus::Voltage);
+        assert_eq!(detail.power_centiwatts, None);
+        assert_eq!(detail.voltage_centivolts, None);
+    }
 
     #[test]
     fn toggle_knobs_share_the_track_center_at_both_sizes() {

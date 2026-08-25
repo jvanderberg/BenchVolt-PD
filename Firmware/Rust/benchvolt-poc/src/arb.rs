@@ -124,6 +124,15 @@ impl UploadSession {
     pub fn is_complete_for(&self, start: Start) -> bool {
         self.channel == Some(start.channel) && self.next_index >= start.count
     }
+
+    /// Invalidate the session so a new `START` requires a fresh, contiguous
+    /// upload from index 0. Called when a run consumes the buffer; without
+    /// this, a partial re-upload that errors mid-sequence could still leave
+    /// a startable mixture of old and new points.
+    pub fn invalidate(&mut self) {
+        self.channel = None;
+        self.next_index = 0;
+    }
 }
 
 fn unsigned(text: &[u8]) -> Option<u16> {
@@ -488,6 +497,45 @@ mod tests {
         assert_eq!(scheduler.tick(0, start, &buffer), None);
         assert_eq!(scheduler.tick(2, start, &buffer), Some(Tick::Sample(1_500)));
         assert_eq!(scheduler.tick(3, start, &buffer), Some(Tick::Finished));
+    }
+
+    #[test]
+    fn consumed_session_requires_a_fresh_upload_before_the_next_start() {
+        let start = Start {
+            channel: 3,
+            count: 4,
+            multiplier_ticks: 2,
+            repetitions: 1,
+        };
+        let chunk = DataChunk {
+            channel: 3,
+            start: 0,
+            len: 4,
+            points: [Point {
+                centivolts: 100,
+                dwell: 1,
+            }; MAX_CHUNK_POINTS],
+        };
+        let mut session = UploadSession::new();
+        assert!(session.accept(chunk).is_ok());
+        assert!(session.is_complete_for(start));
+
+        session.invalidate();
+        assert!(!session.is_complete_for(start));
+
+        // A partial re-upload that does not restart at index 0 must not
+        // resurrect completeness from the stale buffer.
+        let tail = DataChunk {
+            channel: 3,
+            start: 2,
+            len: 2,
+            points: chunk.points,
+        };
+        assert!(session.accept(tail).is_err());
+        assert!(!session.is_complete_for(start));
+
+        assert!(session.accept(chunk).is_ok());
+        assert!(session.is_complete_for(start));
     }
 
     #[test]

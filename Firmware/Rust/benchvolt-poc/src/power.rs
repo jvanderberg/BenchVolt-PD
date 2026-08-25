@@ -579,6 +579,7 @@ struct PowerPlan {
     operations: [DriverOperation; POWER_PLAN_CAPACITY],
     len: u8,
     cursor: u8,
+    overflowed: bool,
     channel: u8,
     operation: u16,
     enabled: bool,
@@ -596,6 +597,7 @@ impl PowerPlan {
             operations: [DriverOperation::Ch5Enable(false); POWER_PLAN_CAPACITY],
             len: 0,
             cursor: 0,
+            overflowed: false,
             channel,
             operation,
             enabled,
@@ -604,8 +606,20 @@ impl PowerPlan {
     }
 
     fn push(&mut self, operation: DriverOperation) {
-        self.operations[usize::from(self.len)] = operation;
-        self.len += 1;
+        if usize::from(self.len) < POWER_PLAN_CAPACITY {
+            self.operations[usize::from(self.len)] = operation;
+            self.len += 1;
+        } else {
+            // Overflow means the plan is incomplete; poison it so `next()`
+            // never runs a truncated sequence. `run_ready` treats the
+            // exhausted plan as complete only after every stage ran, so a
+            // poisoned plan aborts to the fail-safe path.
+            self.overflowed = true;
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.overflowed
     }
 
     fn next(&mut self) -> Option<DriverOperation> {
@@ -807,6 +821,11 @@ impl<D: PowerDriver> PowerExecutor<D> {
 
     fn run_ready(&mut self, state: &AppState) -> Option<Action> {
         let mut plan = self.pending.take()?;
+        if !plan.is_valid() {
+            self.deadline_ms = None;
+            self.shutdown_failed_plan(plan);
+            return Some(Self::failure(plan));
+        }
         match Self::plan_matches_state(plan, state) {
             Ok(true) => {}
             Ok(false) => {
@@ -856,12 +875,27 @@ impl<D: PowerDriver> PowerExecutor<D> {
             millivolts,
         } = effect
         {
+            // P4: a voltage write for the channel a staged plan is currently
+            // sequencing would interleave I2C traffic into that sequence.
+            if matches!(self.pending, Some(plan) if plan.channel == channel) {
+                return Some(Action::HardwareSettingFailed {
+                    channel,
+                    fault: Fault::Hardware,
+                });
+            }
             let result = match channel {
                 3 => self
                     .driver
                     .apply(DriverOperation::SetAdjustableDac { millivolts }),
                 4 => self.driver.apply(DriverOperation::Ch5Voltage(millivolts)),
-                _ => return Some(Action::HardwareSettingApplied),
+                // Only CH4/CH5 have voltage hardware; acknowledging anything
+                // else would be a false success.
+                _ => {
+                    return Some(Action::HardwareSettingFailed {
+                        channel,
+                        fault: Fault::Hardware,
+                    })
+                }
             };
             return Some(if result.is_ok() {
                 Action::HardwareSettingApplied
@@ -1032,6 +1066,11 @@ fn best_effort_shutdown<D: PowerDriver>(driver: &mut D, state: &AppState, channe
     }
 }
 
+/// Synchronous enable used ONLY by the host test-suite as a reference
+/// sequence. Production enables run through `PowerExecutor::submit`'s staged
+/// `plan_output` path, which inserts hardware settle intervals between
+/// stages; this function does not and must never be called from firmware.
+#[cfg(test)]
 fn run_enable<D: PowerDriver>(driver: &mut D, state: &AppState, channel: u8) -> Result<(), Fault> {
     enable_is_eligible(state, channel)?;
     let output = &state.channels[usize::from(channel)];
@@ -1137,6 +1176,8 @@ fn run_disable<D: PowerDriver>(driver: &mut D, state: &AppState, channel: u8) ->
     }
 }
 
+/// Synchronous effect execution for the host test-suite; see `run_enable`.
+#[cfg(test)]
 pub fn execute_effect<D: PowerDriver>(
     driver: &mut D,
     state: &AppState,
@@ -1193,6 +1234,21 @@ pub fn execute_effect<D: PowerDriver>(
 
 /// Immediate, best-effort physical shutdown used by global safety interlocks.
 /// Every independent off control is attempted even if an earlier driver call fails.
+/// MCP4725 code for the CH4 (VLow) inverting drive stage, calibrated from
+/// the original C firmware: 0.50 V -> code 3975, 5.00 V -> code 340.
+/// Pure so the inverse mapping is host-testable.
+pub const fn mcp4725_code_for_millivolts(millivolts: u16) -> u16 {
+    let millivolts = if millivolts < 500 {
+        500
+    } else if millivolts > 5_000 {
+        5_000
+    } else {
+        millivolts
+    };
+    let scaled = ((millivolts - 500) as u32 * 3_635 + 2_250) / 4_500;
+    (3_975u32.saturating_sub(scaled)) as u16
+}
+
 pub fn execute_global_shutdown<D: PowerDriver>(driver: &mut D) -> Result<(), Fault> {
     driver.cancel_pending();
     let mut failed = false;
@@ -1427,6 +1483,101 @@ mod tests {
             operation,
             enabled: true,
         }
+    }
+
+    #[test]
+    fn mcp4725_codes_match_the_original_c_calibration_points() {
+        // 0.50 V -> 3975 and 5.00 V -> 340 are the measured calibration
+        // anchors from the C firmware's SetVadjLVoltage().
+        assert_eq!(mcp4725_code_for_millivolts(500), 3_975);
+        assert_eq!(mcp4725_code_for_millivolts(5_000), 340);
+        // Monotonically decreasing (inverting stage) and clamped.
+        assert!(mcp4725_code_for_millivolts(1_000) < mcp4725_code_for_millivolts(900));
+        assert_eq!(
+            mcp4725_code_for_millivolts(0),
+            mcp4725_code_for_millivolts(500)
+        );
+        assert_eq!(
+            mcp4725_code_for_millivolts(u16::MAX),
+            mcp4725_code_for_millivolts(5_000)
+        );
+        // Always a valid 12-bit code.
+        for millivolts in (500..=5_000).step_by(10) {
+            assert!(mcp4725_code_for_millivolts(millivolts) <= 4_095);
+        }
+    }
+
+    #[test]
+    fn overflowed_power_plan_fails_safe_instead_of_running_truncated() {
+        let mut plan = PowerPlan::new(0, 1, true, Some(Rail::Dc1));
+        for _ in 0..POWER_PLAN_CAPACITY {
+            plan.push(DriverOperation::ChannelGate {
+                channel: 0,
+                enabled: false,
+            });
+        }
+        assert!(plan.is_valid());
+        plan.push(DriverOperation::ChannelGate {
+            channel: 0,
+            enabled: true,
+        });
+        assert!(!plan.is_valid());
+
+        let state = enabling_state(0, 1);
+        let mut executor = PowerExecutor::new(MockDriver::default(), 0);
+        executor.pending = Some(plan);
+        let action = executor.service(1, &state);
+        assert!(matches!(
+            action,
+            Some(Action::OutputFailed {
+                channel: 0,
+                operation: 1,
+                ..
+            })
+        ));
+        assert!(executor.driver.safe());
+        assert!(!executor.is_busy());
+    }
+
+    #[test]
+    fn voltage_effects_for_fixed_channels_report_failure_not_false_success() {
+        let state = eligible_state();
+        let mut executor = PowerExecutor::new(MockDriver::default(), 0);
+        let action = executor.submit(
+            &state,
+            PowerEffect::Voltage {
+                channel: 1,
+                millivolts: 2_500,
+            },
+        );
+        assert!(matches!(
+            action,
+            Some(Action::HardwareSettingFailed { channel: 1, .. })
+        ));
+        // No hardware operation may be attempted for a channel with no
+        // voltage hardware.
+        assert!(executor.calls.is_empty());
+    }
+
+    #[test]
+    fn voltage_write_for_a_channel_mid_plan_is_rejected() {
+        let state = enabling_state(4, 3);
+        let mut executor = PowerExecutor::new(MockDriver::default(), 0);
+        assert!(executor.submit(&state, enable_effect(4, 3)).is_none());
+        assert!(executor.is_busy());
+        let calls_before = executor.calls.len();
+        let action = executor.submit(
+            &state,
+            PowerEffect::Voltage {
+                channel: 4,
+                millivolts: 12_000,
+            },
+        );
+        assert!(matches!(
+            action,
+            Some(Action::HardwareSettingFailed { channel: 4, .. })
+        ));
+        assert_eq!(executor.calls.len(), calls_before);
     }
 
     #[test]

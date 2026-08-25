@@ -35,7 +35,9 @@ impl PersistentSettings {
         for (channel, limit) in state.channels.iter_mut().zip(self.current_limits_ma) {
             channel.current_limit_ma = limit.min(3_000);
         }
-        state.channels[3].setpoint_mv = self.ch4_voltage_mv.clamp(500, 5_000);
+        state.channels[3].setpoint_mv = self
+            .ch4_voltage_mv
+            .clamp(crate::limits::CH4_MIN_VOLTAGE_MV, crate::limits::CH4_MAX_VOLTAGE_MV);
         state.channels[4].setpoint_mv = self
             .ch5_voltage_mv
             .clamp(CH5_MIN_VOLTAGE_MV, CH5_MAX_VOLTAGE_MV);
@@ -45,9 +47,30 @@ impl PersistentSettings {
         state.channels[4].regulation_mode = self.ch5_regulation_mode;
         state.sink_current_limit_ma = self.sink_current_limit_ma.min(5_000);
         state.temperature_unit = self.temperature_unit;
-        state.awg = self.awg;
+        state.awg = sanitize_awg(self.awg);
         state.awg_source = AwgSource::Builtin;
     }
+}
+
+/// Flash records are CRC-checked but may still have been written by a
+/// different firmware revision; `awg.channel` is later used as a channel
+/// index by the reducer, so every field is clamped to a valid value here.
+fn sanitize_awg(mut awg: AwgConfig) -> AwgConfig {
+    if !matches!(awg.channel, 3 | 4) {
+        return AwgConfig::default();
+    }
+    let (min_mv, max_mv) = if awg.channel == 3 {
+        (crate::limits::CH4_MIN_VOLTAGE_MV, crate::limits::CH4_MAX_VOLTAGE_MV)
+    } else {
+        (CH5_MIN_VOLTAGE_MV, CH5_MAX_VOLTAGE_MV)
+    };
+    awg.low_mv = awg.low_mv.clamp(min_mv, max_mv);
+    awg.high_mv = awg.high_mv.clamp(awg.low_mv, max_mv);
+    awg.duty_percent = awg.duty_percent.clamp(1, 99);
+    awg.frequency_millihz = awg
+        .frequency_millihz
+        .clamp(1, awg.waveform.max_frequency_millihz());
+    awg
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -255,6 +278,40 @@ pub fn decode(bytes: &[u8; RECORD_SIZE]) -> Option<SettingsRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostile_persisted_awg_config_is_sanitized_before_reaching_the_reducer() {
+        let mut state = AppState::new(true, Some(25 * 16));
+        let mut settings = PersistentSettings::from_state(&state);
+        settings.awg = AwgConfig {
+            channel: 7,
+            waveform: AwgWaveform::Square,
+            frequency_millihz: 0,
+            duty_percent: 0,
+            low_mv: 60_000,
+            high_mv: 0,
+        };
+        settings.apply_to(&mut state);
+        assert!(state.awg == AwgConfig::default());
+
+        let mut settings = PersistentSettings::from_state(&state);
+        settings.awg = AwgConfig {
+            channel: 4,
+            waveform: AwgWaveform::Sine,
+            frequency_millihz: u32::MAX,
+            duty_percent: 100,
+            low_mv: 0,
+            high_mv: 60_000,
+        };
+        settings.apply_to(&mut state);
+        let awg = state.awg;
+        assert_eq!(awg.channel, 4);
+        assert!(awg.low_mv >= crate::limits::CH5_MIN_VOLTAGE_MV);
+        assert!(awg.high_mv <= crate::limits::CH5_MAX_VOLTAGE_MV);
+        assert!(awg.high_mv >= awg.low_mv);
+        assert!((1..=99).contains(&awg.duty_percent));
+        assert!(awg.frequency_millihz <= AwgWaveform::Sine.max_frequency_millihz());
+    }
 
     #[test]
     fn record_round_trips_and_rejects_torn_or_corrupt_data() {

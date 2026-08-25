@@ -45,11 +45,31 @@ Highlights:
 
 ### Firmware screenshots
 
-| Overview | Channel detail (CC mode) | AWG |
-| --- | --- | --- |
-| ![DC power overview](Images/firmware/overview.png) | ![CH5 detail](Images/firmware/channel5_detail.png) | ![AWG screen](Images/firmware/awg.png) |
+All screenshots are rendered by the actual firmware view code via the host-side
+simulator in [`tools/render`](Firmware/Rust/benchvolt-poc/tools/render).
 
-![Menu flow: navigating to CH5, adjusting voltage, enabling output](Images/firmware/menu_flow.gif)
+![DC power overview](Images/firmware/overview.png)
+
+The DC power overview: setpoints, current limits, and live measurements for all
+five channels, with per-channel output toggles. Channel 2 is off, so its
+measurement columns are blanked. The header shows the protection status and
+board temperature.
+
+![Channel 5 detail](Images/firmware/channel5_detail.png)
+
+The channel detail screen for CH5: large live voltage, current, and power
+readouts, with the voltage setpoint focused for editing. The `CC` badge shows
+the channel is in constant-current regulation.
+
+![AWG screen](Images/firmware/awg.png)
+
+The arbitrary waveform generator configured for a 60 Hz sine on CH5, with live
+RMS current and average power measured at the load.
+
+![Menu flow animation](Images/firmware/menu_flow.gif)
+
+Menu flow: from the main menu into DC power, paging to Channel 5, focusing the
+voltage field, dialing the setpoint up, and switching the output on.
 
 ## Hardware overview
 

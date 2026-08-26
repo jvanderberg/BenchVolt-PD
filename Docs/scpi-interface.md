@@ -40,6 +40,7 @@ interface the desktop GUI uses; anything the GUI does can be scripted directly.
 | `*IDN?` | `BenchVolt-PD,RUST,S/N:2026-01` | |
 | `SYST:BUILD?` | `BenchVolt-PD v<version> <git-rev> ...` | Firmware version and build info |
 | `SYST:TICK?` | `1234` | Free-running hardware milliseconds, for timing diagnostics |
+| `SYST:LOOP?` | `3` | Worst gap between main-loop passes since the last command, in 0.5 ms AWG scheduler ticks. The waveform-health canary: 2-3 is a dedicated loop; sustained large values mean something is starving the 2 kHz sampler. Any command resets it. |
 | `SYST:REBOOT` | — | Safe reboot: shuts down all outputs and shared rails first |
 | `JUMP:BOOTLOADER` | — | Shuts down all outputs, erases the boot seal, and enters the C bootloader for a firmware update |
 

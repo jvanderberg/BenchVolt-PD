@@ -37,6 +37,7 @@ fn diagnostics_snapshot() -> DiagnosticsSnapshot {
         reset_reason: diagnostics::reset_reason(),
         tps_ch5_status: diagnostics::ch5_tps_status(),
         tick_ms: monotonic_ms(),
+        loop_gap_ticks: diagnostics::take_loop_gap(),
         encoder_edges,
         encoder_drops,
     }

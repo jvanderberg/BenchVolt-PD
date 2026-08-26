@@ -43,6 +43,7 @@ pub struct DiagnosticsSnapshot {
     pub reset_reason: u8,
     pub tps_ch5_status: u8,
     pub tick_ms: u16,
+    pub loop_gap_ticks: u8,
     pub encoder_edges: u32,
     pub encoder_drops: u32,
 }
@@ -392,6 +393,11 @@ pub fn dispatch_command(
             } else {
                 response.write_str("IDLE\r\n").ok();
             }
+            finish(out, &response)
+        }
+        b"SYST:LOOP?" => {
+            let mut response = Response::new_empty();
+            write!(&mut response, "{}\r\n", diagnostics.loop_gap_ticks).ok();
             finish(out, &response)
         }
         b"SYST:TICK?" => {

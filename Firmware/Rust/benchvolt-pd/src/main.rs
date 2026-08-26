@@ -425,6 +425,7 @@ fn main() -> ! {
     // sampler, so the power row is deferred to the next measurement tick.
     // Elapsed time withheld from the PD service while a waveform is running.
     let mut pd_deferred_elapsed_ms: u16 = 0;
+    let mut last_waveform_tick = monotonic_awg_tick();
     let mut settings_effect = SettingsDebouncer::new(PersistentSettings::from_state(app.state()));
     let mut pd_service = PdService::new(app.state().sink_current_limit_ma);
     let mut input_ticks = monotonic_ms();
@@ -946,6 +947,8 @@ fn main() -> ! {
         let waveform_source = app.state().awg_source;
         let waveform_config = app.state().awg;
         let waveform_tick = monotonic_awg_tick();
+        diagnostics::record_loop_gap(waveform_tick.wrapping_sub(last_waveform_tick));
+        last_waveform_tick = waveform_tick;
         let waveform_directive =
             if waveform_status == AwgStatus::Running && waveform_source == AwgSource::Arbitrary {
                 arb_runtime::with_buffer(|buffer| {

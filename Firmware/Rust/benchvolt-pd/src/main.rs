@@ -455,12 +455,16 @@ fn main() -> ! {
     };
     let mut usb_output = OutputTransaction::new();
     let mut display_failure_handled = false;
-    // The first Get_Source_Cap after entering the PD Source screen races the
-    // renegotiation it triggers and fails intermittently (observed on the
-    // bench charger: first attempt errors, retries succeed). Retry a couple
-    // of times, spaced out, before rendering the error row.
+    // Capability-read pacing. Get_Source_Cap triggers a renegotiation the
+    // bench charger sometimes answers with a VBUS hard reset, and reads
+    // fired close together (or overlapping the entry repaint / a previous
+    // read's still-settling renegotiation) reboot the board far more often
+    // than the identical read issued alone over USB. So: wait after entering
+    // the screen before the first read, and space the single retry well past
+    // any in-flight PD message sequence.
     let mut pd_list_failures: u8 = 0;
-    let mut pd_list_retry_at: u16 = 0;
+    let mut pd_list_not_before: u16 = 0;
+    let mut was_on_pd_source = false;
 
     loop {
         'usb_command: {
@@ -982,24 +986,29 @@ fn main() -> ! {
         // read also waits for every output to be inactive (the banner
         // explains), matching Apply's admission rule. Failures render an
         // error row and are not retried until the next entry.
-        if app.state().screen == Screen::PdSource
+        let on_pd_source = app.state().screen == Screen::PdSource;
+        if on_pd_source && !was_on_pd_source {
+            pd_list_not_before = monotonic_ms().wrapping_add(400);
+            pd_list_failures = 0;
+        }
+        was_on_pd_source = on_pd_source;
+        if on_pd_source
             && app.state().pd_source_stale
             && app.state().outputs_inactive()
             && app.state().awg_status != AwgStatus::Running
             && !pd_service.command_pending()
-            && (pd_list_failures == 0
-                || benchvolt_pd::paint_queue::dma_deadline_reached(
-                    monotonic_ms(),
-                    pd_list_retry_at,
-                ))
+            && benchvolt_pd::paint_queue::dma_deadline_reached(
+                monotonic_ms(),
+                pd_list_not_before,
+            )
         {
             let result = benchvolt_pd::pd::read_source_capabilities(&mut SoftPdBus::new(
                 &mut pd_bus,
                 power_driver.delay_mut(),
             ));
-            if result.is_err() && pd_list_failures < 2 {
+            if result.is_err() && pd_list_failures < 1 {
                 pd_list_failures += 1;
-                pd_list_retry_at = monotonic_ms().wrapping_add(250);
+                pd_list_not_before = monotonic_ms().wrapping_add(1_500);
             } else {
                 pd_list_failures = 0;
                 let mut pdos = [benchvolt_pd::app::NO_PDO; benchvolt_pd::app::PD_SOURCE_MAX_PDOS];

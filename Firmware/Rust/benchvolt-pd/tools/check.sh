@@ -23,8 +23,10 @@ cd "$project_dir"
 
 echo "Rust host tests ($host_target)"
 # --tests matches CI: the integration and fuzz crates (and their shared mock
-# driver) must compile and pass too, not just the lib.
-cargo test --locked --lib --tests --target "$host_target"
+# driver) must compile and pass too, not just the lib. --no-default-features
+# excludes the ARM-only firmware bin (and its test harness) from the host
+# build, exactly as CI does.
+cargo test --locked --lib --tests --no-default-features --target "$host_target"
 
 echo "Rust host lints"
 cargo clippy --locked --lib --target "$host_target" -- -D warnings

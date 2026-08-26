@@ -557,6 +557,8 @@ pub enum DriverOperation {
     ClearCh5Status,
     Ch5OutputEnable(bool),
     Ch5Voltage(u16),
+    /// Waveform-sample fast path: one write, no verify read-back, no retries.
+    Ch5VoltageUnverified(u16),
     VerifyOutput {
         channel: u8,
         millivolts: u16,
@@ -887,6 +889,15 @@ impl<D: PowerDriver> PowerExecutor<D> {
                 3 => self
                     .driver
                     .apply(DriverOperation::SetAdjustableDac { millivolts }),
+                // While the AWG streams samples every 500 us, the verified
+                // write-and-read-back transaction (~90 I2C bits plus retries)
+                // exceeds the sample period and turns the waveform into
+                // timing jitter. Samples are self-correcting — the next one
+                // overwrites 500 us later — so they use a single unverified
+                // write; ordinary setpoint changes keep the verified path.
+                4 if state.awg_status == AwgStatus::Running => self
+                    .driver
+                    .apply(DriverOperation::Ch5VoltageUnverified(millivolts)),
                 4 => self.driver.apply(DriverOperation::Ch5Voltage(millivolts)),
                 // Only CH4/CH5 have voltage hardware; acknowledging anything
                 // else would be a false success.
@@ -1429,7 +1440,7 @@ mod tests {
                     }
                     self.ch5_oe = enabled;
                 }
-                DriverOperation::Ch5Voltage(_) => {
+                DriverOperation::Ch5Voltage(_) | DriverOperation::Ch5VoltageUnverified(_) => {
                     if !self.ch5_enable || !self.ch5_configured {
                         return Err(());
                     }

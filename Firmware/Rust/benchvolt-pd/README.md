@@ -21,6 +21,18 @@ pin level, not the output latch). CH1/CH2 require DC1; CH3/CH4 require DC2; CH4 
 its inverted MCP4725 setpoint before raising its gate; CH5 always performs a
 full hardware-EN cold start before programming and enabling its TPS55289.
 Protection samples voltage/current every 20 ms and temperature every 100 ms.
+While a waveform runs, every periodic software service — the ADC sweep,
+TPS/TMP1075 health reads, the PD contract watchdog, and display measurement
+sync — is suspended so the loop stays dedicated to the 2 kHz sampler: any
+multi-hundred-microsecond pass shows up as visible timing jitter on the
+output, and a 20 ms point sample of a deliberately moving current is poor
+protection anyway (it false-trips on waveform peaks and misses events between
+samples). During a run the converters' cycle-by-cycle hardware OCP/OVP/SCP
+protect the output; all software services re-arm the moment the run stops.
+CH5 waveform samples also use an unverified single-write register update —
+the verified write-and-read-back used for setpoint changes takes longer than
+the 500 us sample period, and a corrupted sample self-corrects on the next
+one.
 Newly enabled outputs get a bounded 200 ms startup qualification interval while
 their hardware current limiting remains active. After that, three consecutive
 20 ms current or voltage-window violations are required to latch a fault;

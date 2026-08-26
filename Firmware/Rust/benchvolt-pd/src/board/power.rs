@@ -317,7 +317,7 @@ where
     fn apply(&mut self, operation: DriverOperation) -> Result<(), Self::Error> {
         let operation_code = match operation {
             DriverOperation::SetAdjustableDac { .. } => 1,
-            DriverOperation::Ch5Voltage(_) => 2,
+            DriverOperation::Ch5Voltage(_) | DriverOperation::Ch5VoltageUnverified(_) => 2,
             DriverOperation::ConfigureCh5 { .. } => 3,
             DriverOperation::ClearCh5Status => 3,
             DriverOperation::Ch5OutputEnable(_) => 4,
@@ -408,6 +408,16 @@ where
                 Self::TPS_CH5,
                 enabled,
             ),
+            DriverOperation::Ch5VoltageUnverified(millivolts) => {
+                let code = tps55289_voltage_code(millivolts);
+                self.adjustable_bus
+                    .write_bytes(
+                        Self::TPS_CH5,
+                        &[0x00, code as u8, ((code >> 8) & 0x07) as u8],
+                        &mut self.delay,
+                    )
+                    .map_err(|_| HardwareError::Bus)
+            }
             DriverOperation::Ch5Voltage(millivolts) => Self::tps_set_voltage(
                 &mut self.adjustable_bus,
                 &mut self.delay,

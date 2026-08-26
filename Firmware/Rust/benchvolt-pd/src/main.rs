@@ -872,21 +872,21 @@ fn main() -> ! {
         // its normal cadence the moment the run ends.
         let awg_hot = app.state().awg_status == AwgStatus::Running;
         if awg_hot {
+            // While the AWG runs, the sampler owns the loop: every periodic
+            // service (oversampled ADC sweep, TPS/TMP1075 health reads, PD
+            // contract watchdog, display measurement sync) is a
+            // multi-hundred-microsecond pass that puts visible timing jitter
+            // into the waveform, so all of them are suspended for the run.
+            // That includes the 20 ms software overcurrent sample: a point
+            // sample of a deliberately moving current against a DC-style
+            // limit both false-trips on waveform peaks and misses events
+            // between samples. During a run, current protection is the
+            // converter's cycle-by-cycle hardware limit (OCP/SCP, ~3 A);
+            // the user-configured software limit re-arms the moment the run
+            // stops, as does every other suspended service.
             due.temperature = false;
             due.display_measurement = false;
-            if due.measurement {
-                due.measurement = false;
-                let channel = app.state().active_awg_channel();
-                let measurement = if channel == 3 {
-                    read_channel_measurement(&mut adc, &mut ch4_voltage, &mut ch4_current, 2, 1)
-                } else {
-                    read_channel_measurement(&mut adc, &mut ch5_voltage, &mut ch5_current, 78, 10)
-                };
-                if let Some(action) = protection.observe_channel(app.state(), channel, measurement)
-                {
-                    dispatch_app(&mut app, &mut power_driver, action);
-                }
-            }
+            due.measurement = false;
         }
 
         let outputs_off = app.state().outputs_inactive();

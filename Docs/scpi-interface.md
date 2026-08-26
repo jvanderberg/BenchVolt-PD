@@ -129,6 +129,12 @@ Behavioral notes:
 - A remote start switches the device display to the AWG screen with the
   Start/Stop row highlighted, so the physical stop control is immediately
   usable at the bench.
+- While a waveform runs, the firmware dedicates its loop to the 2 kHz
+  sampler: display updates and all periodic software monitoring (including
+  the software current-limit check, temperature, and the PD watchdog) are
+  suspended for waveform purity. The converters' cycle-by-cycle hardware
+  OCP/OVP/SCP protect the run; software protection re-arms when it stops.
+  `MEAS:*` values for the driven channel are stale during a run.
 - Only one waveform (built-in or ARB, either channel) can run at a time.
 - Any protection trip, `OUTP:CHn OFF`, or front-panel navigation away from the
   AWG screen safely shuts the waveform down.

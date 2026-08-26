@@ -87,7 +87,7 @@ class BenchVoltUI(ctk.CTk):
         self.tabview.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
 
         self.tab_main = self.tabview.add("Main Control")
-        self.tab_adv = self.tabview.add("Advanced Settings")
+        self.tab_adv = self.tabview.add("Firmware Update")
 
         # Move existing main_scroll into tab_main
         self.main_scroll = ctk.CTkScrollableFrame(self.tab_main, fg_color="transparent")
@@ -120,14 +120,14 @@ class BenchVoltUI(ctk.CTk):
         self.channels.append(
             self.create_adj_waveform_channel(self.adj_container, "CH5: High Range (0.8V - 22V)", 0.8, 22.0, row=1))
 
-        # --- Advanced Tab Content ---
+        # --- Firmware Update Tab Content ---
+        # The raw DC-DC rail cards that used to live here spoke the archived
+        # C firmware's command dialect (GET:DCDC:STAT, SOUR:VOLT:DC,
+        # OUTP:DC); the Rust firmware deliberately has no raw-rail commands
+        # (rails follow channel state through its staged executor), so the
+        # tab is now just the firmware updater.
         adv_scroll = ctk.CTkScrollableFrame(self.tab_adv, fg_color="transparent")
         adv_scroll.pack(fill="both", expand=True)
-
-        # 3 DC-DC Cards
-        self.create_dcdc_adv_card(adv_scroll, "DC-DC 1 (1.8V / 2.5V)", 1, default_v="3.0", default_i="6.0")
-        self.create_dcdc_adv_card(adv_scroll, "DC-DC 2 (3.3V / VAdjL)", 2, default_v="5.5", default_i="6.0")
-        self.create_dcdc_adv_card(adv_scroll, "DC-DC 3 (TPS55289 VAdjH)", 3, default_v="12.0", default_i="6.0")
 
         # --- FIRMWARE UPDATE SECTION (INTEGRATED BOOTLOADER) ---
         fw_frame = ctk.CTkFrame(adv_scroll, fg_color="#1a1a1a", border_width=2, border_color="#c0392b")
@@ -245,7 +245,7 @@ class BenchVoltUI(ctk.CTk):
                     pass
 
             if in_app_mode:
-                self.log_fw_msg("-> Waiting for USB Port to re-enumerate (4 Seconds)...")
+                self.log_fw_msg("-> Waiting for USB Port to re-enumerate (2 seconds)...")
                 time.sleep(2)  # Time for MCU to reset and enter bootloader
                 self.log_fw_msg("-> Device ready in Bootloader mode. Starting upload...")
             else:
@@ -337,87 +337,6 @@ class BenchVoltUI(ctk.CTk):
         """Returns a list of available serial ports."""
         ports = serial.tools.list_ports.comports()
         return [port.device for port in ports] if ports else ["No Port Found"]
-
-    def create_dcdc_adv_card(self, parent, title, ch_idx, default_v="5.0", default_i="3.0"):
-        card = ctk.CTkFrame(parent, border_width=1, border_color="#333333")
-        card.pack(fill="x", padx=10, pady=10)
-
-        # Title
-        lbl = ctk.CTkLabel(card, text=title, font=ctk.CTkFont(size=16, weight="bold"), text_color="#3498db")
-        lbl.grid(row=0, column=0, columnspan=4, pady=10, padx=20, sticky="w")
-
-        # --- Voltage Setting ---
-        ctk.CTkLabel(card, text="Voltage (V):").grid(row=1, column=0, padx=20, pady=5, sticky="e")
-        volt_entry = ctk.CTkEntry(card, width=80)
-        volt_entry.insert(0, default_v)
-        volt_entry.grid(row=1, column=1, padx=5, pady=5)
-
-        set_volt_btn = ctk.CTkButton(card, text="Set Volt", width=60, fg_color="#2980b9",
-                                     command=lambda: self.remote.send_scpi(f"SOUR:VOLT:DC{ch_idx} {volt_entry.get()}"))
-        set_volt_btn.grid(row=1, column=2, padx=10, pady=5)
-
-        # --- Current Limit (OCP) ---
-        ctk.CTkLabel(card, text="OCP Limit (A):").grid(row=2, column=0, padx=20, pady=5, sticky="e")
-        ocp_entry = ctk.CTkEntry(card, width=80)
-        ocp_entry.insert(0, default_i)
-        ocp_entry.grid(row=2, column=1, padx=5, pady=5)
-
-        set_ocp_btn = ctk.CTkButton(card, text="Set OCP", width=60, fg_color="#d35400",
-                                    command=lambda: self.remote.send_scpi(f"SET:DCDC:CURR:{ch_idx} {ocp_entry.get()}"))
-        set_ocp_btn.grid(row=2, column=2, padx=10, pady=5)
-
-        # --- Master Power Switch ---
-        ctk.CTkLabel(card, text="Power:").grid(row=3, column=0, padx=20, pady=5, sticky="e")
-        sw = ctk.CTkSwitch(card, text="OFF",
-                           command=lambda: self.remote.send_scpi(f"OUTP:DC{ch_idx} {1 if sw.get() else 0}"))
-        sw.grid(row=3, column=1, padx=5, pady=5)
-
-        # --- Status Display (Right Side) ---
-        status_box = ctk.CTkFrame(card, fg_color="#111111")
-        status_box.grid(row=1, column=3, rowspan=3, padx=20, pady=10, sticky="nsew")
-
-        stat_lbl = ctk.CTkLabel(status_box, text="STAT: 0x00\n[Press Read]",
-                                font=ctk.CTkFont(family="Consolas", size=11), justify="left")
-        stat_lbl.pack(padx=20, pady=15)
-
-        def read_stat():
-            if self.remote.is_connected:
-                # 1. First clear old data and update UI instantly
-                stat_lbl.configure(text="Reading...\n[Waiting]", text_color="#f39c12")  # Orange color
-                stat_lbl.update()  # <-- CRITICAL: Allows UI to refresh instantly without freezing
-
-                # 2. Fetch data from device
-                resp = self.remote.query(f"GET:DCDC:STAT {ch_idx}")
-
-                # 3. If data received, print new data
-                if resp and "ERR" not in resp:
-                    try:
-                        val = int(resp, 16)  # Hex to integer
-
-                        # Bit Extraction (Based on Register Map)
-                        scp = (val >> 7) & 0x01
-                        ocp = (val >> 6) & 0x01
-                        ovp = (val >> 5) & 0x01
-                        mode = val & 0x03
-
-                        modes = {0: "Boost", 1: "Buck", 2: "B-Boost"}
-                        mode_name = modes.get(mode, "N/A")
-
-                        # Visual Coloring
-                        is_fault = (val & 0xE0) != 0
-                        color = "#e74c3c" if is_fault else "#2ecc71"
-
-                        stat_lbl.configure(
-                            text=f"HEX: 0x{resp}\nMODE: {mode_name}\nSCP:{scp} | OCP:{ocp} | OVP:{ovp}",
-                            text_color=color
-                        )
-                    except:
-                        stat_lbl.configure(text="Parse Error", text_color="#e74c3c")
-                else:
-                    stat_lbl.configure(text="Read Failed", text_color="#e74c3c")
-
-        read_btn = ctk.CTkButton(card, text="Read Status", width=100, fg_color="#27ae60", command=read_stat)
-        read_btn.grid(row=4, column=3, pady=(0, 10))
 
     def setup_sidebar(self):
         self.sidebar = ctk.CTkFrame(self, width=250, corner_radius=0)

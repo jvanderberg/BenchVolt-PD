@@ -325,11 +325,16 @@ binary produced by that run. Never reuse an existing `target/.../benchvolt-pd.bi
 as a recovery shortcut; it may not correspond to the newest source. Record the
 uploader's image size and CRC with the connected test result.
 
-Use the checked-in uploader rather than importing the desktop GUI. It uses the
-hardened protocol's 60-byte payloads (one 64-byte CDC packet including the
-header), validates every ACK, and computes the bootloader-compatible STM32
-CRC. Both endpoints enforce the 92 KiB partition. It never writes the
-bootloader, option bytes, or protection settings.
+Both the checked-in uploader and the desktop GUI's Firmware Update page speak
+the same hardened protocol (verified against the bootloader source and on
+hardware): 60-byte payloads (one 64-byte CDC packet including the header),
+an ACK validated after every stage, and the bootloader-compatible STM32 CRC.
+Both endpoints enforce the 92 KiB partition, and neither writes the
+bootloader, option bytes, or protection settings. The checked-in uploader
+remains the canonical scripted path because it adds host-side image
+validation (vector table, stack pointer, partition fit) and, via
+`flash_latest.sh`, the outputs-off admission check before the bootloader
+jump.
 
 `tools/check.sh` is the single canonical test/build/image command. Do not run a
 bare `cargo test` here: `.cargo/config.toml` intentionally defaults Cargo to the

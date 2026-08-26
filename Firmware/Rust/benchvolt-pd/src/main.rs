@@ -15,7 +15,7 @@ mod view;
 
 use core::fmt::Write as _;
 
-use benchvolt_pd::app::{Action, AppReducer, AppState, AwgSource, AwgStatus};
+use benchvolt_pd::app::{Action, AppReducer, AppState, AwgSource, AwgStatus, Screen};
 use benchvolt_pd::arb::UploadSession as ArbUploadSession;
 use benchvolt_pd::cadence::ServiceCadence;
 use benchvolt_pd::input_policy::{encoder_action, ButtonTracker};
@@ -393,6 +393,22 @@ fn main() -> ! {
     let mut initial_state = AppState::new(true, initial_temperature);
     if let Some(record) = settings_store.latest {
         record.settings.apply_to(&mut initial_state);
+        let pending_mv = record.settings.pdo_apply_pending_mv;
+        if pending_mv != 0 {
+            // A PDO apply hard-reset VBUS mid-interaction. Route straight to
+            // the PD Source screen with the requested-vs-actual banner. This
+            // path is display-only: it never re-attempts the apply or writes
+            // the STUSB, and the flag clears after this single boot, so a
+            // pathological charger converges to a normal boot instead of a
+            // boot loop. If the clearing write fails the banner merely
+            // sticks for another boot.
+            initial_state.screen = Screen::PdSource;
+            initial_state.pd_source_stale = true;
+            initial_state.pd_banner_mv = Some(pending_mv);
+            let mut cleared = record.settings;
+            cleared.pdo_apply_pending_mv = 0;
+            let _ = persist_settings(&mut settings_store, cleared, true);
+        }
     }
     initial_state.profile_present =
         core::array::from_fn(|index| settings_store.profiles[index].is_some());
@@ -439,6 +455,12 @@ fn main() -> ! {
     };
     let mut usb_output = OutputTransaction::new();
     let mut display_failure_handled = false;
+    // The first Get_Source_Cap after entering the PD Source screen races the
+    // renegotiation it triggers and fails intermittently (observed on the
+    // bench charger: first attempt errors, retries succeed). Retry a couple
+    // of times, spaced out, before rendering the error row.
+    let mut pd_list_failures: u8 = 0;
+    let mut pd_list_retry_at: u16 = 0;
 
     loop {
         'usb_command: {
@@ -951,6 +973,89 @@ fn main() -> ! {
                 &mut pd_bus,
                 power_driver.delay_mut(),
             ));
+        }
+
+        // PD Source screen: one bounded capability read per entry. The read
+        // transmits Get_Source_Cap, and a Source_Capabilities message
+        // restarts negotiation — a brief SINK_READY exit the PD watchdog can
+        // see as contract loss, which is a global-shutdown trigger. So the
+        // read also waits for every output to be inactive (the banner
+        // explains), matching Apply's admission rule. Failures render an
+        // error row and are not retried until the next entry.
+        if app.state().screen == Screen::PdSource
+            && app.state().pd_source_stale
+            && app.state().outputs_inactive()
+            && app.state().awg_status != AwgStatus::Running
+            && !pd_service.command_pending()
+            && (pd_list_failures == 0
+                || benchvolt_pd::paint_queue::dma_deadline_reached(
+                    monotonic_ms(),
+                    pd_list_retry_at,
+                ))
+        {
+            let result = benchvolt_pd::pd::read_source_capabilities(&mut SoftPdBus::new(
+                &mut pd_bus,
+                power_driver.delay_mut(),
+            ));
+            if result.is_err() && pd_list_failures < 2 {
+                pd_list_failures += 1;
+                pd_list_retry_at = monotonic_ms().wrapping_add(250);
+            } else {
+                pd_list_failures = 0;
+                let mut pdos = [benchvolt_pd::app::NO_PDO; benchvolt_pd::app::PD_SOURCE_MAX_PDOS];
+                let mut count = 0u8;
+                let error = match result {
+                    Ok((raw_pdos, raw_count)) => {
+                        for (index, raw) in raw_pdos[..raw_count].iter().enumerate() {
+                            // Same filtering as the USB PdList path, plus the
+                            // 20 V board input ceiling: never offer a row the
+                            // sink cannot request.
+                            let Some(pdo) =
+                                benchvolt_pd::pd::decode_fixed_pdo(*raw, index as u8 + 1)
+                            else {
+                                continue;
+                            };
+                            if pdo.millivolts <= 20_000 && usize::from(count) < pdos.len() {
+                                pdos[usize::from(count)] = pdo;
+                                count += 1;
+                            }
+                        }
+                        false
+                    }
+                    Err(_) => true,
+                };
+                dispatch_app(
+                    &mut app,
+                    &mut power_driver,
+                    Action::PdSourceListLoaded { pdos, count, error },
+                );
+            }
+        }
+
+        if let Some(request) = app.state().pd_apply_request {
+            // Journal the pending record before touching the STUSB: a
+            // downward contract transition cold-boots this VBUS-powered
+            // board, and that record is what routes the next boot back to
+            // the result banner.
+            let outputs_physically_off = app.state().outputs_physically_off();
+            let mut ok = app.state().outputs_inactive()
+                && !power_driver.is_busy()
+                && !pd_service.command_pending();
+            if ok {
+                let settings = PersistentSettings::from_state(app.state());
+                ok = persist_settings(&mut settings_store, settings, outputs_physically_off);
+                if ok {
+                    settings_effect.mark_saved(settings);
+                    ok = benchvolt_pd::pd::set_sink_pdo(
+                        &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
+                        3,
+                        request.millivolts,
+                        request.milliamps,
+                    )
+                    .is_ok();
+                }
+            }
+            dispatch_app(&mut app, &mut power_driver, Action::PdoApplyFinished(ok));
         }
 
         let waveform_status = app.state().awg_status;

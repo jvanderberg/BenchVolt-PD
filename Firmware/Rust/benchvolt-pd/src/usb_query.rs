@@ -550,6 +550,9 @@ pub fn dispatch_command(
                 Screen::ProfileLoad => {
                     response.write_str("PROFILE:LOAD\r\n").ok();
                 }
+                Screen::PdSource => {
+                    response.write_str("PDSOURCE\r\n").ok();
+                }
                 Screen::System => {
                     response.write_str("SYSTEM\r\n").ok();
                 }

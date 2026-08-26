@@ -20,8 +20,26 @@ pub enum Screen {
     Settings,
     ProfileSave,
     ProfileLoad,
+    PdSource,
     System,
     Help,
+}
+
+/// The STUSB4500 exposes at most seven source PDOs.
+pub const PD_SOURCE_MAX_PDOS: usize = 7;
+
+pub const NO_PDO: crate::pd::FixedPdo = crate::pd::FixedPdo {
+    source_position: 0,
+    millivolts: 0,
+    milliamps: 0,
+};
+
+/// A pending on-device PDO apply; serviced by main.rs (journal write, then
+/// STUSB reprofile) the same loop pass it is armed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PdoApply {
+    pub millivolts: u16,
+    pub milliamps: u16,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -156,6 +174,7 @@ impl Screen {
             | Self::Settings
             | Self::ProfileSave
             | Self::ProfileLoad
+            | Self::PdSource
             | Self::System => self,
             Self::Help => self,
             Self::Overview => Self::Channel(0),
@@ -172,6 +191,7 @@ impl Screen {
             | Self::Settings
             | Self::ProfileSave
             | Self::ProfileLoad
+            | Self::PdSource
             | Self::System => self,
             Self::Help => self,
             Self::Overview => Self::UsbPdInput,
@@ -287,6 +307,21 @@ pub struct AppState {
     pub awg_editing: bool,
     pub awg_load: LoadMeasurement,
     pub help_scroll: u8,
+    /// Cached source-advertised fixed PDOs for the PD Source screen.
+    pub pd_source_pdos: [crate::pd::FixedPdo; PD_SOURCE_MAX_PDOS],
+    pub pd_source_count: u8,
+    /// True when the cached list needs a fresh capability read (screen entry
+    /// or a contract change while on the screen); main.rs performs the read.
+    pub pd_source_stale: bool,
+    pub pd_source_error: bool,
+    /// Armed row index; UI state only, never persisted.
+    pub pd_source_armed: Option<u8>,
+    /// Requested apply voltage shown as the requested-vs-actual banner.
+    pub pd_banner_mv: Option<u16>,
+    /// Non-zero while a PDO apply is in flight; journaled so a VBUS hard
+    /// reset routes the next boot back to the PD Source screen. 0 = none.
+    pub pdo_apply_pending_mv: u16,
+    pub pd_apply_request: Option<PdoApply>,
 }
 
 impl AppState {
@@ -332,6 +367,14 @@ impl AppState {
             awg_editing: false,
             awg_load: LoadMeasurement::INVALID,
             help_scroll: 0,
+            pd_source_pdos: [NO_PDO; PD_SOURCE_MAX_PDOS],
+            pd_source_count: 0,
+            pd_source_stale: false,
+            pd_source_error: false,
+            pd_source_armed: None,
+            pd_banner_mv: None,
+            pdo_apply_pending_mv: 0,
+            pd_apply_request: None,
         }
     }
 
@@ -370,6 +413,21 @@ impl AppState {
         self.channels
             .iter()
             .all(|output| output.transition == OutputTransition::Stable)
+    }
+
+    /// PD Source rows: one per cached PDO, plus Apply and Cancel.
+    pub fn pd_source_rows(&self) -> u8 {
+        self.pd_source_count + 2
+    }
+
+    /// Same admission rule as the USB `SOUR:PDO:SET` path: outputs must be
+    /// inactive, plus no competing apply and an idle AWG.
+    pub fn pd_source_apply_ready(&self) -> bool {
+        self.pd_source_armed.is_some()
+            && !self.pd_source_error
+            && self.outputs_inactive()
+            && self.pd_apply_request.is_none()
+            && matches!(self.awg_status, AwgStatus::Stopped | AwgStatus::Fault)
     }
 }
 
@@ -457,6 +515,12 @@ pub enum Action {
     PdNegotiated(crate::pd::Contract),
     PdNegotiationStarted,
     PdFailed(crate::pd::PdError),
+    PdSourceListLoaded {
+        pdos: [crate::pd::FixedPdo; PD_SOURCE_MAX_PDOS],
+        count: u8,
+        error: bool,
+    },
+    PdoApplyFinished(bool),
 }
 
 pub struct AppReducer;
@@ -511,6 +575,8 @@ impl Reducer for AppReducer {
                 next.focus = ControlFocus::None;
                 next.menu_selection = 0;
                 next.profile_status = ProfileStatus::Idle;
+                next.pd_source_armed = None;
+                next.pd_banner_mv = None;
                 if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
                     next.awg_status = AwgStatus::StopRequested;
                 }
@@ -538,6 +604,7 @@ impl Reducer for AppReducer {
                         Screen::Settings => SETTINGS_ITEM_COUNT,
                         Screen::ProfileSave | Screen::ProfileLoad => PROFILE_ITEM_COUNT,
                         Screen::Awg => AWG_ITEM_COUNT,
+                        Screen::PdSource => state.pd_source_rows(),
                         Screen::System | Screen::Help => 1,
                         _ => 0,
                     };
@@ -567,11 +634,17 @@ impl Reducer for AppReducer {
                         0 => Screen::Overview,
                         1 => Screen::Awg,
                         2 => Screen::Settings,
-                        3 => Screen::System,
+                        3 => Screen::PdSource,
+                        4 => Screen::System,
                         _ => Screen::Help,
                     };
                     next.menu_selection = 0;
                     next.help_scroll = 0;
+                    if next.screen == Screen::PdSource {
+                        next.pd_source_stale = true;
+                        next.pd_source_error = false;
+                        next.pd_source_armed = None;
+                    }
                     if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
                         next.awg_status = AwgStatus::StopRequested;
                     }
@@ -675,7 +748,7 @@ impl Reducer for AppReducer {
                         true
                     }
                     6 => match state.awg_status {
-                        AwgStatus::Stopped => {
+                        AwgStatus::Stopped if state.pd_apply_request.is_none() => {
                             next.awg_source = AwgSource::Builtin;
                             next.awg_status = AwgStatus::StartRequested;
                             true
@@ -703,6 +776,45 @@ impl Reducer for AppReducer {
                     }
                     _ => false,
                 },
+                Screen::PdSource => {
+                    let count = state.pd_source_count;
+                    if state.menu_selection < count {
+                        // Click on a PDO row arms (or disarms) it as the
+                        // pending choice; nothing is applied yet.
+                        next.pd_source_armed = if state.pd_source_armed
+                            == Some(state.menu_selection)
+                        {
+                            None
+                        } else {
+                            Some(state.menu_selection)
+                        };
+                        true
+                    } else if state.menu_selection == count {
+                        // Apply: state only. main.rs journals the pending
+                        // record and reprofiles the STUSB off this request.
+                        // Readiness implies an armed row exists.
+                        if state.pd_source_apply_ready() {
+                            let index = state.pd_source_armed.unwrap_or(0);
+                            let pdo = state.pd_source_pdos[usize::from(index)];
+                            next.pd_apply_request = Some(PdoApply {
+                                millivolts: pdo.millivolts,
+                                milliamps: pdo.milliamps.min(5_000),
+                            });
+                            next.pdo_apply_pending_mv = pdo.millivolts;
+                            next.pd_banner_mv = Some(pdo.millivolts);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        // Cancel discards the armed choice and leaves.
+                        next.screen = Screen::MainMenu;
+                        next.menu_selection = 0;
+                        next.pd_source_armed = None;
+                        next.pd_banner_mv = None;
+                        true
+                    }
+                }
                 Screen::System | Screen::Help => {
                     next.screen = Screen::MainMenu;
                     next.menu_selection = 0;
@@ -883,7 +995,7 @@ impl Reducer for AppReducer {
                 }
             }
             Action::RequestAwgStart => {
-                if state.awg_status != AwgStatus::Stopped {
+                if state.awg_status != AwgStatus::Stopped || state.pd_apply_request.is_some() {
                     false
                 } else {
                     next.awg_source = AwgSource::Builtin;
@@ -907,6 +1019,7 @@ impl Reducer for AppReducer {
                     return Self::enforce_invariants(next);
                 };
                 if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault)
+                    || state.pd_apply_request.is_some()
                     || !(minimum..=maximum).contains(&low_mv)
                     || !(low_mv..=maximum).contains(&high_mv)
                     || !(low_mv..=high_mv).contains(&initial_mv)
@@ -987,6 +1100,7 @@ impl Reducer for AppReducer {
                 | Screen::Settings
                 | Screen::ProfileSave
                 | Screen::ProfileLoad
+                | Screen::PdSource
                 | Screen::System => return Self::reduce(state, Action::ActivateMenu),
                 Screen::Help => return Self::reduce(state, Action::ActivateMenu),
                 Screen::Channel(channel) => {
@@ -1096,7 +1210,11 @@ impl Reducer for AppReducer {
                 }
             }
             Action::ToggleOutputRequested { channel } => {
-                if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
+                if state.pd_apply_request.is_some() {
+                    // A PDO apply is in flight; outputs are inactive by its
+                    // admission rule and must stay that way until it lands.
+                    false
+                } else if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
                     next.awg_status = AwgStatus::StopRequested;
                     true
                 } else if state
@@ -1249,10 +1367,11 @@ impl Reducer for AppReducer {
             }
             Action::SetOutputRequested { channel, enabled } => {
                 if enabled
-                    && state
-                        .channels
-                        .iter()
-                        .any(|output| output.transition != OutputTransition::Stable)
+                    && (state.pd_apply_request.is_some()
+                        || state
+                            .channels
+                            .iter()
+                            .any(|output| output.transition != OutputTransition::Stable))
                 {
                     return Self::enforce_invariants(next);
                 }
@@ -1384,6 +1503,14 @@ impl Reducer for AppReducer {
                 let Some(output) = next.channels.get_mut(usize::from(channel)) else {
                     return Self::enforce_invariants(next);
                 };
+                // Completion fence: every emitter of this action either shut
+                // the channel down first or refused a write without touching
+                // hardware. A channel mid-transition is owned by a staged
+                // plan whose outcome arrives as a token-checked OutputApplied
+                // or OutputFailed; recording "off" here would be a lie.
+                if output.transition != OutputTransition::Stable {
+                    return Self::enforce_invariants(next);
+                }
                 output.operation = output.operation.wrapping_add(1);
                 output.requested_enabled = false;
                 output.physical_enabled = false;
@@ -1449,7 +1576,9 @@ impl Reducer for AppReducer {
                 true
             }
             Action::PdNegotiated(contract)
-                if state.pd_contract == Some(contract) && state.pd_error.is_none() =>
+                if state.pd_contract == Some(contract)
+                    && state.pd_error.is_none()
+                    && state.pdo_apply_pending_mv == 0 =>
             {
                 false
             }
@@ -1457,6 +1586,15 @@ impl Reducer for AppReducer {
                 next.pd_contract = Some(contract);
                 next.pd_error = None;
                 next.pd_negotiating = false;
+                // An in-place renegotiation outcome resolves a pending PDO
+                // apply; the cleared flag reaches flash on the next journal
+                // write. Deliberately do NOT mark the cached PDO list stale
+                // here: the capability read itself transmits Get_Source_Cap,
+                // which restarts negotiation and produces exactly this event
+                // — re-reading on it is a self-sustaining read/renegotiate
+                // loop (observed on hardware). The list refreshes on screen
+                // entry only; the ACTIVE marker tracks pd_contract live.
+                next.pdo_apply_pending_mv = 0;
                 true
             }
             Action::PdNegotiationStarted
@@ -1482,6 +1620,7 @@ impl Reducer for AppReducer {
                 next.pd_contract = None;
                 next.pd_error = Some(error);
                 next.pd_negotiating = false;
+                next.pdo_apply_pending_mv = 0;
                 if contract_lost
                     || state
                         .channels
@@ -1492,6 +1631,36 @@ impl Reducer for AppReducer {
                     if !matches!(state.awg_status, AwgStatus::Stopped) {
                         next.awg_status = AwgStatus::Fault;
                     }
+                }
+                true
+            }
+            Action::PdSourceListLoaded { pdos, count, error } => {
+                next.pd_source_pdos = pdos;
+                next.pd_source_count = count.min(PD_SOURCE_MAX_PDOS as u8);
+                next.pd_source_error = error;
+                next.pd_source_stale = false;
+                if next
+                    .pd_source_armed
+                    .is_some_and(|index| index >= next.pd_source_count)
+                {
+                    next.pd_source_armed = None;
+                }
+                if state.screen == Screen::PdSource
+                    && next.menu_selection >= next.pd_source_rows()
+                {
+                    next.menu_selection = next.pd_source_rows() - 1;
+                }
+                true
+            }
+            Action::PdoApplyFinished(_) if state.pd_apply_request.is_none() => false,
+            Action::PdoApplyFinished(ok) => {
+                next.pd_apply_request = None;
+                if !ok {
+                    // Nothing was applied; the cleared flag reaches flash on
+                    // the next journal write, so no boot banner appears.
+                    next.pdo_apply_pending_mv = 0;
+                    next.pd_banner_mv = None;
+                    next.pd_source_error = true;
                 }
                 true
             }
@@ -2039,6 +2208,93 @@ mod tests {
             let unchanged = AppReducer::reduce(&busy, Action::RequestAwgStart);
             assert!(unchanged.awg_status == status);
         }
+    }
+
+    #[test]
+    fn pd_source_screen_arms_applies_and_cancels_under_the_outputs_off_rule() {
+        let mut state = AppState::new(true, None);
+        state.menu_selection = 3;
+        state = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert!(state.screen == Screen::PdSource);
+        assert!(state.pd_source_stale);
+
+        let mut pdos = [NO_PDO; PD_SOURCE_MAX_PDOS];
+        pdos[0] = crate::pd::FixedPdo {
+            source_position: 1,
+            millivolts: 9_000,
+            milliamps: 3_000,
+        };
+        state = AppReducer::reduce(
+            &state,
+            Action::PdSourceListLoaded {
+                pdos,
+                count: 1,
+                error: false,
+            },
+        );
+        assert!(!state.pd_source_stale);
+        assert_eq!(state.pd_source_rows(), 3);
+
+        // Click on the row arms it; a second click disarms.
+        state = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert_eq!(state.pd_source_armed, Some(0));
+        let disarmed = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert!(disarmed.pd_source_armed.is_none());
+
+        // Apply with a live output is a rejected no-op.
+        state.menu_selection = 1;
+        state.channels[0].physical_enabled = true;
+        let rejected = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert!(rejected == state);
+        state.channels[0].physical_enabled = false;
+
+        let applied = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert_eq!(
+            applied.pd_apply_request,
+            Some(PdoApply {
+                millivolts: 9_000,
+                milliamps: 3_000,
+            })
+        );
+        assert_eq!(applied.pdo_apply_pending_mv, 9_000);
+        assert_eq!(applied.pd_banner_mv, Some(9_000));
+
+        // A failed apply clears the journal flag and banner and shows the
+        // error; a stray completion with nothing pending changes nothing.
+        let failed = AppReducer::reduce(&applied, Action::PdoApplyFinished(false));
+        assert!(failed.pd_apply_request.is_none());
+        assert_eq!(failed.pdo_apply_pending_mv, 0);
+        assert!(failed.pd_banner_mv.is_none());
+        assert!(failed.pd_source_error);
+        assert!(AppReducer::reduce(&failed, Action::PdoApplyFinished(false)) == failed);
+
+        // Cancel discards and leaves.
+        state.menu_selection = 2;
+        let cancelled = AppReducer::reduce(&state, Action::ActivateMenu);
+        assert!(cancelled.screen == Screen::MainMenu);
+        assert!(cancelled.pd_source_armed.is_none());
+    }
+
+    #[test]
+    fn pd_source_list_reload_clamps_the_armed_row_and_cursor() {
+        let mut state = AppState::new(true, None);
+        state.screen = Screen::PdSource;
+        state.pd_source_count = 3;
+        state.pd_source_armed = Some(2);
+        state.menu_selection = 4;
+
+        let reloaded = AppReducer::reduce(
+            &state,
+            Action::PdSourceListLoaded {
+                pdos: [NO_PDO; PD_SOURCE_MAX_PDOS],
+                count: 0,
+                error: true,
+            },
+        );
+        assert!(reloaded.pd_source_armed.is_none());
+        assert_eq!(reloaded.menu_selection, 1);
+        assert!(reloaded.pd_source_error);
+        assert!(!reloaded.pd_source_apply_ready());
     }
 
     #[test]

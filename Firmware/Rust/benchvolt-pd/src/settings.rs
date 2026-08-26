@@ -15,6 +15,11 @@ pub struct PersistentSettings {
     pub sink_current_limit_ma: u16,
     pub temperature_unit: TemperatureUnit,
     pub awg: AwgConfig,
+    /// Non-zero while an on-device PDO apply is in flight, so a VBUS hard
+    /// reset routes the next boot to the PD Source result banner. Boot
+    /// clears it after one showing; `apply_to` deliberately never copies it
+    /// into state (the boot path is display-only and must not re-apply).
+    pub pdo_apply_pending_mv: u16,
 }
 
 impl PersistentSettings {
@@ -28,6 +33,7 @@ impl PersistentSettings {
             sink_current_limit_ma: state.sink_current_limit_ma,
             temperature_unit: state.temperature_unit,
             awg: state.awg,
+            pdo_apply_pending_mv: state.pdo_apply_pending_mv,
         }
     }
 
@@ -191,6 +197,7 @@ pub fn encode(record: SettingsRecord) -> [u8; RECORD_SIZE] {
     bytes[30..32].copy_from_slice(&record.settings.awg.low_mv.to_le_bytes());
     bytes[32..34].copy_from_slice(&record.settings.awg.high_mv.to_le_bytes());
     bytes[34] = record.settings.awg.duty_percent;
+    bytes[36..38].copy_from_slice(&record.settings.pdo_apply_pending_mv.to_le_bytes());
     let crc = crc32(&bytes[..40]);
     bytes[40..44].copy_from_slice(&crc.to_le_bytes());
     bytes[44..48].copy_from_slice(&COMMIT.to_le_bytes());
@@ -248,6 +255,14 @@ pub fn decode(bytes: &[u8; RECORD_SIZE]) -> Option<SettingsRecord> {
                 low_mv: half(30),
                 high_mv: half(32),
                 duty_percent: bytes[34],
+            },
+            // Records written before this field existed carry erased 0xffff
+            // here; both directions stay decodable without a version bump.
+            // Implausible values degrade to "none" rather than discarding the
+            // record's persisted limits.
+            pdo_apply_pending_mv: match half(36) {
+                pending @ 1..=20_000 => pending,
+                _ => 0,
             },
         },
     };
@@ -331,6 +346,7 @@ mod tests {
                 sink_current_limit_ma: 4_250,
                 temperature_unit: TemperatureUnit::Fahrenheit,
                 awg: AwgConfig::default(),
+                pdo_apply_pending_mv: 12_000,
             },
         };
         let encoded = encode(record);
@@ -370,11 +386,40 @@ mod tests {
                         sink_current_limit_ma: 350,
                         temperature_unit,
                         awg: AwgConfig::default(),
+                        pdo_apply_pending_mv: 0,
                     },
                 };
                 assert!(decode(&encode(record)) == Some(record));
             }
         }
+    }
+
+    #[test]
+    fn pdo_apply_flag_round_trips_and_legacy_records_decode_as_none() {
+        let mut record = SettingsRecord {
+            sequence: 7,
+            kind: RecordKind::Autosave,
+            settings: PersistentSettings::from_state(&AppState::new(true, None)),
+        };
+        record.settings.pdo_apply_pending_mv = 9_000;
+        assert!(decode(&encode(record)) == Some(record));
+
+        // A record from firmware that predates the field leaves the erased
+        // 0xffff in its place; it must decode with the flag off, keeping the
+        // rest of the persisted settings.
+        record.settings.pdo_apply_pending_mv = 0;
+        let mut legacy = encode(record);
+        legacy[36..38].fill(0xff);
+        let crc = crc32(&legacy[..40]);
+        legacy[40..44].copy_from_slice(&crc.to_le_bytes());
+        assert!(decode(&legacy) == Some(record));
+
+        // The boot path never copies the flag into live state.
+        let mut state = AppState::new(true, None);
+        let mut flagged = record.settings;
+        flagged.pdo_apply_pending_mv = 9_000;
+        flagged.apply_to(&mut state);
+        assert_eq!(state.pdo_apply_pending_mv, 0);
     }
 
     #[test]

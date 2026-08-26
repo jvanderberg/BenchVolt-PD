@@ -77,6 +77,7 @@ pub fn encoder_action(state: &AppState, direction: i8, accelerated: i8) -> Optio
                     | Screen::Settings
                     | Screen::ProfileSave
                     | Screen::ProfileLoad
+                    | Screen::PdSource
                     | Screen::System
                     | Screen::Help
             ) {

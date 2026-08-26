@@ -1,3 +1,20 @@
+//! Rendering core: the shared drawing primitives and the per-screen routing.
+//! Each screen lives in its own `view/<screen>.rs` module exposing the same
+//! two entry points — `render(view, state)` for a full paint and
+//! `transition(view, old, new)` for damage-tracked updates — mirroring the
+//! `reducto::View` trait one level down.
+
+mod awg;
+mod channel;
+mod help;
+mod main_menu;
+mod overview;
+mod pd_source;
+mod profiles;
+mod settings;
+mod system;
+mod usb_pd;
+
 use core::fmt::Write as _;
 
 use embedded_graphics::{
@@ -13,24 +30,8 @@ use embedded_graphics::{
 use heapless::String;
 use reducto::View;
 
-use benchvolt_pd::app::{
-    AppState, AwgStatus, AwgWaveform, ChannelSnapshot, ControlFocus, Fault, ProfileStatus,
-    RegulationMode, Screen, TemperatureUnit,
-};
-use benchvolt_pd::ui_content::{help_footer, HELP_TEXT, HELP_VISIBLE_LINES, MAIN_MENU_ITEMS};
-use benchvolt_pd::view_projection::{
-    awg_damage, centered_origin, channel_projection, detail_projection, framed_value_damage,
-    pd_contract_label, seven_segment_mask, sink_projection, temperature_projection,
-    ChannelProjection, DetailProjection, FramedValueDamage, SinkPdStatus, SinkProjection,
-    StatusProjection, TemperatureProjection,
-};
-
-const TABLE_TOP: i32 = 24;
-const HEADER_BOTTOM: i32 = 45;
-const ROW_HEIGHT: i32 = 24;
-const TABLE_BOTTOM: i32 = HEADER_BOTTOM + 5 * ROW_HEIGHT;
-const COLUMN_EDGES: [i32; 7] = [0, 25, 78, 131, 184, 237, 319];
-const COLUMN_TEXT_X: [i32; 6] = [9, 32, 85, 138, 191, 246];
+use benchvolt_pd::app::{AppState, Screen, TemperatureUnit};
+use benchvolt_pd::view_projection::{seven_segment_mask, temperature_projection, TemperatureProjection};
 
 pub struct BenchVoltView<D> {
     display: D,
@@ -44,26 +45,79 @@ where
         Self { display }
     }
 
+    fn clear_screen(&mut self) {
+        self.display.clear(Rgb565::BLACK).ok();
+    }
+
+    // Outlined drawing primitives: every screen funnels its text and fill
+    // calls through these so each call site pays one plain call instead of
+    // inline style-struct construction — a measurable flash saving at -Oz
+    // across the ~70 call sites.
+    #[inline(never)]
+    fn text8(&mut self, text: &str, x: i32, y: i32, color: Rgb565) {
+        Text::with_baseline(
+            text,
+            Point::new(x, y),
+            MonoTextStyle::new(&FONT_8X13_BOLD, color),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    #[inline(never)]
+    fn text20(&mut self, text: &str, x: i32, y: i32, color: Rgb565) {
+        Text::with_baseline(
+            text,
+            Point::new(x, y),
+            MonoTextStyle::new(&FONT_10X20, color),
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .ok();
+    }
+
+    #[inline(never)]
+    fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Rgb565) {
+        self.display
+            .fill_solid(
+                &Rectangle::new(Point::new(x, y), Size::new(width, height)),
+                color,
+            )
+            .ok();
+    }
+
+    #[inline(never)]
+    fn fill_circle(&mut self, x: i32, y: i32, diameter: u32, color: Rgb565) {
+        Circle::new(Point::new(x, y), diameter)
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(&mut self.display)
+            .ok();
+    }
+
+    #[inline(never)]
+    fn stroke_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Rgb565) {
+        Rectangle::new(Point::new(x, y), Size::new(width, height))
+            .into_styled(PrimitiveStyle::with_stroke(color, 1))
+            .draw(&mut self.display)
+            .ok();
+    }
+
     fn fill_capsule(&mut self, top_left: Point, width: u32, height: u32, color: Rgb565) {
         debug_assert!(width >= height);
         let radius = height / 2;
         let right = Point::new(top_left.x + (width - height) as i32, top_left.y);
 
         for origin in [top_left, right] {
-            Circle::new(origin, height)
-                .into_styled(PrimitiveStyle::with_fill(color))
-                .draw(&mut self.display)
-                .ok();
+            self.fill_circle(origin.x, origin.y, height, color);
         }
-        self.display
-            .fill_solid(
-                &Rectangle::new(
-                    Point::new(top_left.x + radius as i32, top_left.y),
-                    Size::new(width - 2 * radius, height),
-                ),
-                color,
-            )
-            .ok();
+        self.fill_rect(
+            top_left.x + radius as i32,
+            top_left.y,
+            width - 2 * radius,
+            height,
+            color,
+        );
     }
 
     fn draw_temperature(&mut self, state: &AppState) {
@@ -72,11 +126,12 @@ where
             TemperatureProjection::Invalid => {
                 text.push_str("T:--.-C").ok();
             }
-            TemperatureProjection::Tenths(value, unit) if value < 0 => {
+            TemperatureProjection::Tenths(value, unit) => {
                 let magnitude = value.abs();
                 write!(
                     &mut text,
-                    "T:-{}.{:01}{}",
+                    "T:{}{}.{:01}{}",
+                    if value < 0 { "-" } else { "" },
                     magnitude / 10,
                     magnitude % 10,
                     if unit == TemperatureUnit::Celsius {
@@ -87,216 +142,14 @@ where
                 )
                 .ok();
             }
-            TemperatureProjection::Tenths(value, unit) => {
-                write!(
-                    &mut text,
-                    "T:{}.{:01}{}",
-                    value / 10,
-                    value % 10,
-                    if unit == TemperatureUnit::Celsius {
-                        'C'
-                    } else {
-                        'F'
-                    }
-                )
-                .ok();
-            }
         }
 
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(226, 2), Size::new(94, 20)),
-                Rgb565::BLACK,
-            )
-            .ok();
-        Text::with_baseline(
-            text.as_str(),
-            Point::new(226, 1),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn channel_row_top(index: usize) -> i32 {
-        HEADER_BOTTOM + index as i32 * ROW_HEIGHT
-    }
-
-    // Clear only the interior. The table dividers are never erased by updates.
-    fn clear_channel_cell(&mut self, column: usize, index: usize) {
-        let left = COLUMN_EDGES[column];
-        let right = COLUMN_EDGES[column + 1];
-        let top = Self::channel_row_top(index);
-        self.display
-            .fill_solid(
-                &Rectangle::new(
-                    Point::new(left + 1, top + 1),
-                    Size::new((right - left - 1) as u32, (ROW_HEIGHT - 1) as u32),
-                ),
-                Rgb565::BLACK,
-            )
-            .ok();
-    }
-
-    fn draw_channel_text(&mut self, text: &str, column: usize, index: usize, color: Rgb565) {
-        Text::with_baseline(
-            text,
-            Point::new(COLUMN_TEXT_X[column], Self::channel_row_top(index) + 5),
-            MonoTextStyle::new(&FONT_8X13_BOLD, color),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn draw_channel_number(&mut self, index: usize) {
-        let mut text: String<32> = String::new();
-        write!(&mut text, "{}", index + 1).ok();
-        self.clear_channel_cell(0, index);
-        self.draw_channel_text(text.as_str(), 0, index, Rgb565::WHITE);
-    }
-
-    fn draw_fixed_value(&mut self, value: u16, column: usize, index: usize) {
-        let mut text: String<32> = String::new();
-        write!(&mut text, "{}.{:02}", value / 100, value % 100).ok();
-        self.clear_channel_cell(column, index);
-        self.draw_channel_text(text.as_str(), column, index, Rgb565::WHITE);
-    }
-
-    fn draw_measured_value(&mut self, value: Option<u16>, column: usize, index: usize) {
-        match value {
-            Some(value) => self.draw_fixed_value(value, column, index),
-            None => {
-                self.clear_channel_cell(column, index);
-                self.draw_channel_text("--.--", column, index, Rgb565::WHITE);
-            }
-        }
-    }
-
-    fn draw_setpoint(&mut self, index: usize, projection: ChannelProjection) {
-        self.draw_fixed_value(projection.setpoint_centivolts, 1, index);
-    }
-
-    fn draw_limit(&mut self, index: usize, projection: ChannelProjection) {
-        self.draw_fixed_value(projection.limit_centiamps, 2, index);
-    }
-
-    fn draw_voltage(&mut self, index: usize, projection: ChannelProjection) {
-        self.draw_measured_value(projection.measured_centivolts, 3, index);
-    }
-
-    fn draw_current(&mut self, index: usize, projection: ChannelProjection) {
-        self.draw_measured_value(projection.measured_centiamps, 4, index);
-    }
-
-    fn draw_status(&mut self, index: usize, projection: ChannelProjection, focused: bool) {
-        self.clear_channel_cell(5, index);
-        let track_color = match projection.status {
-            StatusProjection::On => Rgb565::new(4, 42, 10),
-            StatusProjection::Wait => Rgb565::new(24, 38, 4),
-            StatusProjection::Off => Rgb565::new(16, 16, 16),
-            StatusProjection::Fault => Rgb565::RED,
-        };
-        let top = Self::channel_row_top(index);
-        const TRACK_X: i32 = 248;
-        const TRACK_WIDTH: i32 = 27;
-        const TRACK_HEIGHT: u32 = 14;
-        const KNOB_DIAMETER: i32 = 10;
-        const KNOB_INSET: i32 = 2;
-        let track_y = top + 5;
-        self.fill_capsule(
-            Point::new(TRACK_X, track_y),
-            TRACK_WIDTH as u32,
-            TRACK_HEIGHT,
-            track_color,
-        );
-        let knob_x = match projection.status {
-            StatusProjection::On => TRACK_X + TRACK_WIDTH - KNOB_INSET - KNOB_DIAMETER,
-            StatusProjection::Wait => TRACK_X + (TRACK_WIDTH - KNOB_DIAMETER) / 2,
-            StatusProjection::Off | StatusProjection::Fault => TRACK_X + KNOB_INSET,
-        };
-        Circle::new(
-            Point::new(
-                knob_x,
-                centered_origin(track_y, TRACK_HEIGHT, KNOB_DIAMETER as u32),
-            ),
-            KNOB_DIAMETER as u32,
-        )
-        .into_styled(PrimitiveStyle::with_fill(if focused {
-            Rgb565::CYAN
-        } else {
-            Rgb565::WHITE
-        }))
-        .draw(&mut self.display)
-        .ok();
-        if projection.regulation_mode == RegulationMode::Cc {
-            Text::with_baseline(
-                "CC",
-                Point::new(298, Self::channel_row_top(index) + 5),
-                MonoTextStyle::new(
-                    &FONT_8X13_BOLD,
-                    if projection.regulating_current {
-                        Rgb565::GREEN
-                    } else {
-                        Rgb565::CYAN
-                    },
-                ),
-                Baseline::Top,
-            )
-            .draw(&mut self.display)
-            .ok();
-        }
-    }
-
-    fn draw_channel(&mut self, index: usize, channel: &ChannelSnapshot, focused: bool) {
-        let projection = channel_projection(channel);
-        self.draw_channel_number(index);
-        self.draw_setpoint(index, projection);
-        self.draw_limit(index, projection);
-        self.draw_voltage(index, projection);
-        self.draw_current(index, projection);
-        self.draw_status(index, projection, focused);
-    }
-
-    fn draw_channels(&mut self, state: &AppState) {
-        for (index, channel) in state.channels.iter().enumerate() {
-            self.draw_channel(
-                index,
-                channel,
-                state.focus == ControlFocus::OverviewOutput(index as u8),
-            );
-        }
-    }
-
-    fn draw_table_grid(&mut self) {
-        let color = Rgb565::new(8, 16, 16);
-        for x in COLUMN_EDGES {
-            self.display
-                .fill_solid(
-                    &Rectangle::new(
-                        Point::new(x, TABLE_TOP),
-                        Size::new(1, (TABLE_BOTTOM - TABLE_TOP + 1) as u32),
-                    ),
-                    color,
-                )
-                .ok();
-        }
-        for row in 0..=5 {
-            let y = HEADER_BOTTOM + row * ROW_HEIGHT;
-            self.display
-                .fill_solid(&Rectangle::new(Point::new(0, y), Size::new(320, 1)), color)
-                .ok();
-        }
+        self.fill_rect(226, 2, 94, 20, Rgb565::BLACK);
+        self.text20(text.as_str(), 226, 1, Rgb565::WHITE);
     }
 
     fn clear_detail_region(&mut self, x: i32, y: i32, width: u32, height: u32) {
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(x, y), Size::new(width, height)),
-                Rgb565::BLACK,
-            )
-            .ok();
+        self.fill_rect(x, y, width, height, Rgb565::BLACK);
     }
 
     #[inline(never)]
@@ -312,10 +165,7 @@ where
         };
         for (index, &(x, y, width, height)) in rectangles.iter().enumerate() {
             if segments & (1 << index) != 0 {
-                Rectangle::new(origin + Point::new(x, y), Size::new(width, height))
-                    .into_styled(PrimitiveStyle::with_fill(color))
-                    .draw(&mut self.display)
-                    .ok();
+                self.fill_rect(origin.x + x, origin.y + y, width, height, color);
             }
         }
     }
@@ -344,39 +194,14 @@ where
         let mut cursor = x;
         for character in text.chars() {
             if character == '.' {
-                Circle::new(Point::new(cursor + 1, 34 + 29), 5)
-                    .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
-                    .draw(&mut self.display)
-                    .ok();
+                self.fill_circle(cursor + 1, 34 + 29, 5, Rgb565::WHITE);
                 cursor += 7;
             } else {
                 self.draw_hero_digit(character, Point::new(cursor, 31), Rgb565::WHITE);
                 cursor += 25;
             }
         }
-        Text::with_baseline(
-            suffix,
-            Point::new(cursor + 2, 48),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    // The V column plus the A column form a fixed 253 px ensemble (the A
-    // column's right edge is constant); x = 33 centers it on the 320 px
-    // panel with equal margins.
-    fn draw_detail_voltage(&mut self, projection: DetailProjection) {
-        self.draw_hero(projection.voltage_centivolts.map(u32::from), 33, "V");
-    }
-
-    fn draw_detail_current(&mut self, projection: DetailProjection) {
-        self.draw_hero(projection.current_centiamps.map(u32::from), 192, "A");
-    }
-
-    fn draw_detail_power(&mut self, projection: DetailProjection) {
-        self.draw_power(projection.power_centiwatts);
+        self.text20(suffix, cursor + 2, 48, Rgb565::WHITE);
     }
 
     fn draw_power_digit(&mut self, digit: char, origin: Point) {
@@ -418,21 +243,11 @@ where
                     cursor += 17;
                 }
                 '.' => {
-                    Circle::new(Point::new(cursor, 114), 4)
-                        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
-                        .draw(&mut self.display)
-                        .ok();
+                    self.fill_circle(cursor, 114, 4, Rgb565::WHITE);
                     cursor += 6;
                 }
                 'W' => {
-                    Text::with_baseline(
-                        "W",
-                        Point::new(cursor, 95),
-                        MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-                        Baseline::Top,
-                    )
-                    .draw(&mut self.display)
-                    .ok();
+                    self.text20("W", cursor, 95, Rgb565::WHITE);
                     cursor += 10;
                 }
                 _ => cursor += 5,
@@ -443,10 +258,7 @@ where
     fn draw_detail_setting_frame(&mut self, x: i32, width: u32, focused: bool) {
         self.clear_detail_region(x, 126, width, 37);
         if focused {
-            Rectangle::new(Point::new(x, 128), Size::new(width, 31))
-                .into_styled(PrimitiveStyle::with_stroke(Rgb565::CYAN, 1))
-                .draw(&mut self.display)
-                .ok();
+            self.stroke_rect(x, 128, width, 31, Rgb565::CYAN);
         }
     }
 
@@ -462,113 +274,12 @@ where
         write!(&mut text, "{}.{:02}{}", value / 100, value % 100, suffix).ok();
         // Preserve the focus frame; value edits repaint only its interior.
         self.clear_detail_region(x + 2, 130, width - 4, 27);
-        Text::with_baseline(
+        self.text20(
             text.as_str(),
-            Point::new(x + 8, 135),
-            MonoTextStyle::new(
-                &FONT_10X20,
-                if focused { Rgb565::CYAN } else { Rgb565::WHITE },
-            ),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn draw_detail_setpoint(&mut self, projection: DetailProjection) {
-        let focused = projection.focus == ControlFocus::Voltage;
-        self.draw_detail_setting_frame(4, 84, focused);
-        self.draw_detail_setting_value(projection.setpoint_centivolts, 4, 84, "V", focused);
-    }
-
-    fn draw_detail_setpoint_value(&mut self, projection: DetailProjection) {
-        self.draw_detail_setting_value(
-            projection.setpoint_centivolts,
-            4,
-            84,
-            "V",
-            projection.focus == ControlFocus::Voltage,
+            x + 8,
+            135,
+            if focused { Rgb565::CYAN } else { Rgb565::WHITE },
         );
-    }
-
-    fn draw_detail_limit(&mut self, projection: DetailProjection) {
-        let focused = projection.focus == ControlFocus::CurrentLimit;
-        self.draw_detail_setting_frame(144, 84, focused);
-        self.draw_detail_setting_value(projection.limit_centiamps, 144, 84, "A", focused);
-    }
-
-    fn draw_detail_limit_value(&mut self, projection: DetailProjection) {
-        self.draw_detail_setting_value(
-            projection.limit_centiamps,
-            144,
-            84,
-            "A",
-            projection.focus == ControlFocus::CurrentLimit,
-        );
-    }
-
-    fn draw_detail_status(&mut self, status: StatusProjection, focused: bool) {
-        self.clear_detail_region(238, 125, 82, 39);
-        let track_color = match status {
-            StatusProjection::On => Rgb565::new(4, 42, 10),
-            StatusProjection::Wait => Rgb565::new(24, 38, 4),
-            StatusProjection::Fault => Rgb565::RED,
-            StatusProjection::Off => Rgb565::new(24, 5, 5),
-        };
-        const TRACK_Y: i32 = 130;
-        const TRACK_HEIGHT: u32 = 28;
-        const KNOB_DIAMETER: u32 = 22;
-        self.fill_capsule(Point::new(249, TRACK_Y), 58, TRACK_HEIGHT, track_color);
-        let knob_x = if matches!(status, StatusProjection::On) {
-            282
-        } else {
-            252
-        };
-        Circle::new(
-            Point::new(
-                knob_x,
-                centered_origin(TRACK_Y, TRACK_HEIGHT, KNOB_DIAMETER),
-            ),
-            KNOB_DIAMETER,
-        )
-        .into_styled(PrimitiveStyle::with_fill(if focused {
-            Rgb565::CYAN
-        } else {
-            Rgb565::WHITE
-        }))
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn draw_detail_mode(&mut self, projection: DetailProjection) {
-        let focused = projection.focus == ControlFocus::RegulationMode;
-        self.clear_detail_region(94, 126, 44, 37);
-        if focused {
-            Rectangle::new(Point::new(94, 128), Size::new(44, 31))
-                .into_styled(PrimitiveStyle::with_stroke(Rgb565::CYAN, 1))
-                .draw(&mut self.display)
-                .ok();
-        }
-        Text::with_baseline(
-            match projection.regulation_mode {
-                RegulationMode::Cv => "CV",
-                RegulationMode::Cc => "CC",
-            },
-            Point::new(107, 135),
-            MonoTextStyle::new(
-                &FONT_10X20,
-                if projection.regulating_current {
-                    Rgb565::GREEN
-                } else if focused {
-                    Rgb565::CYAN
-                } else {
-                    Rgb565::WHITE
-                },
-            ),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
     }
 
     /// Voltage with no superfluous decimals: "12", "1.8", "12.34".
@@ -584,669 +295,31 @@ where
         }
     }
 
-    /// Header with the channel's nominal voltage (fixed channels) or its
-    /// adjustable range: "Channel 3 3.3V", "Channel 5 0.8-22V".
-    fn draw_detail_title(&mut self, index: usize, projection: DetailProjection) {
-        self.clear_detail_region(0, 0, 224, 22);
-        let mut title: String<32> = String::new();
-        write!(&mut title, "Channel {} ", index + 1).ok();
-        let range_mv = match index {
-            3 => Some((
-                benchvolt_pd::limits::CH4_MIN_VOLTAGE_MV,
-                benchvolt_pd::limits::CH4_MAX_VOLTAGE_MV,
-            )),
-            4 => Some((
-                benchvolt_pd::limits::CH5_MIN_VOLTAGE_MV,
-                benchvolt_pd::limits::CH5_MAX_VOLTAGE_MV,
-            )),
-            _ => None,
-        };
-        if let Some((minimum, maximum)) = range_mv {
-            Self::write_trimmed_volts(&mut title, minimum / 10);
-            title.push('-').ok();
-            Self::write_trimmed_volts(&mut title, maximum / 10);
-        } else {
-            Self::write_trimmed_volts(&mut title, projection.setpoint_centivolts);
-        }
-        title.push('V').ok();
-        Text::with_baseline(
-            title.as_str(),
-            Point::new(4, 1),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn draw_detail_screen(&mut self, state: &AppState, index: usize) {
-        let channel = &state.channels[index];
-        let projection = detail_projection(channel, state.focus);
-        self.display.clear(Rgb565::BLACK).ok();
-
-        self.draw_detail_title(index, projection);
-        self.draw_temperature(state);
-        if index >= 3 {
-            self.draw_detail_mode(projection);
-        }
-        self.draw_detail_voltage(projection);
-        self.draw_detail_current(projection);
-        self.draw_detail_power(projection);
-        self.draw_detail_setpoint(projection);
-        self.draw_detail_limit(projection);
-        self.draw_detail_status(projection.status, projection.focus == ControlFocus::Output);
-    }
-
-    // Same centered ensemble as the channel detail screens (see
-    // draw_detail_voltage).
-    fn draw_sink_voltage(&mut self, projection: SinkProjection) {
-        self.draw_hero(projection.voltage_centivolts.map(u32::from), 33, "V");
-    }
-
-    fn draw_sink_current(&mut self, projection: SinkProjection) {
-        self.draw_hero(projection.current_centiamps.map(u32::from), 192, "A");
-    }
-
-    fn draw_sink_power(&mut self, projection: SinkProjection) {
-        self.draw_power(projection.power_centiwatts);
-    }
-
-    fn draw_sink_limit_frame(&mut self, projection: SinkProjection) {
-        self.draw_detail_setting_frame(110, 102, projection.focused);
-        self.draw_sink_limit_value(projection);
-    }
-
-    fn draw_sink_limit_value(&mut self, projection: SinkProjection) {
-        self.clear_detail_region(112, 130, 98, 27);
-        let mut text: String<32> = String::new();
-        write!(
-            &mut text,
-            "{}.{:02}A",
-            projection.limit_centiamps / 100,
-            projection.limit_centiamps % 100
-        )
-        .ok();
-        Text::with_baseline(
-            text.as_str(),
-            Point::new(118, 135),
-            MonoTextStyle::new(
-                &FONT_10X20,
-                if projection.over_limit {
-                    Rgb565::RED
-                } else if projection.focused {
-                    Rgb565::CYAN
-                } else {
-                    Rgb565::WHITE
-                },
-            ),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn draw_sink_pd_status(&mut self, projection: SinkProjection) {
-        self.clear_detail_region(214, 128, 106, 36);
-        let mut text: String<32> = String::new();
-        let color = match projection.pd_status {
-            SinkPdStatus::Idle => {
-                text.push_str("PD IDLE").ok();
-                Rgb565::YELLOW
-            }
-            SinkPdStatus::Negotiating => {
-                text.push_str("PD NEGOTIATE").ok();
-                Rgb565::YELLOW
-            }
-            SinkPdStatus::Ready(contract) => {
-                text.push_str(pd_contract_label(contract).as_str()).ok();
-                Rgb565::GREEN
-            }
-            SinkPdStatus::Error(error) => {
-                text.push_str("ERR ").ok();
-                text.push_str(match error {
-                    benchvolt_pd::pd::PdError::Bus => "BUS",
-                    benchvolt_pd::pd::PdError::WrongDevice => "DEVICE",
-                    benchvolt_pd::pd::PdError::Detached => "DETACHED",
-                    benchvolt_pd::pd::PdError::Timeout => "TIMEOUT",
-                    benchvolt_pd::pd::PdError::MalformedCapabilities => "CAPS",
-                    benchvolt_pd::pd::PdError::NoSuitablePdo => "NO PDO",
-                    benchvolt_pd::pd::PdError::ContractMismatch => "CONTRACT",
-                })
-                .ok();
-                Rgb565::RED
-            }
-            SinkPdStatus::Fault(fault) => {
-                text.push_str("IN ").ok();
-                text.push_str(match fault {
-                    Fault::None => "OK",
-                    Fault::OverCurrent => "OVERCURR",
-                    Fault::OverTemperature => "OVERTEMP",
-                    Fault::Sensor => "SENSOR",
-                    Fault::Hardware => "HARDWARE",
-                })
-                .ok();
-                Rgb565::RED
-            }
-        };
-        Text::with_baseline(
-            text.as_str(),
-            Point::new(216, 139),
-            MonoTextStyle::new(&FONT_8X13_BOLD, color),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    /// Header with the negotiated nominal input voltage when a contract is
-    /// active, e.g. "USB PD Input 20V".
-    fn draw_sink_title(&mut self, projection: SinkProjection) {
-        self.clear_detail_region(0, 0, 224, 22);
-        let mut title: String<32> = String::new();
-        title.push_str("USB PD Input").ok();
-        if let SinkPdStatus::Ready(contract) = projection.pd_status {
-            write!(&mut title, " {}V", contract.millivolts / 1_000).ok();
-        }
-        Text::with_baseline(
-            title.as_str(),
-            Point::new(4, 1),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn draw_usb_pd_input(&mut self, state: &AppState) {
-        let projection = sink_projection(state);
-        self.display.clear(Rgb565::BLACK).ok();
-        self.draw_sink_title(projection);
-        self.draw_temperature(state);
-        self.draw_sink_voltage(projection);
-        self.draw_sink_current(projection);
-        self.draw_sink_power(projection);
-        self.draw_sink_limit_frame(projection);
-        self.draw_sink_pd_status(projection);
-    }
-
-    fn draw_recovery_status(&mut self, state: &AppState) {
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(134, 2), Size::new(86, 20)),
-                Rgb565::BLACK,
-            )
-            .ok();
-        Text::with_baseline(
-            if state.recovery_armed {
-                "SAFE"
-            } else {
-                "RECOVERY!"
-            },
-            Point::new(134, 6),
-            MonoTextStyle::new(
-                &FONT_8X13_BOLD,
-                if state.recovery_armed {
-                    Rgb565::GREEN
-                } else {
-                    Rgb565::RED
-                },
-            ),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn draw_overview(&mut self, state: &AppState) {
-        self.display.clear(Rgb565::BLACK).ok();
-        Text::with_baseline(
-            "BenchVolt PD",
-            Point::new(4, 1),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-        self.draw_recovery_status(state);
-        self.draw_temperature(state);
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(0, TABLE_TOP), Size::new(320, 1)),
-                Rgb565::WHITE,
-            )
-            .ok();
-        for (column, label) in ["CH", "SET", "LIM", "VOLTS", "AMPS", "STATE"]
-            .iter()
-            .enumerate()
-        {
-            Text::with_baseline(
-                label,
-                Point::new(COLUMN_TEXT_X[column], 29),
-                MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::CYAN),
-                Baseline::Top,
-            )
-            .draw(&mut self.display)
-            .ok();
-        }
-        self.draw_table_grid();
-        self.draw_channels(state);
-    }
-
     fn draw_menu(&mut self, title: &str, items: &[&str], state: &AppState) {
-        self.display.clear(Rgb565::BLACK).ok();
-        Text::with_baseline(
-            title,
-            Point::new(6, 3),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(0, 27), Size::new(320, 1)),
-                Rgb565::new(8, 16, 16),
-            )
-            .ok();
+        self.clear_screen();
+        self.text20(title, 6, 3, Rgb565::WHITE);
+        self.fill_rect(0, 27, 320, 1, Rgb565::new(8, 16, 16));
         for (index, item) in items.iter().enumerate() {
             self.draw_menu_item(item, index, usize::from(state.menu_selection) == index);
         }
     }
 
     fn draw_menu_item(&mut self, item: &str, index: usize, selected: bool) {
-        let y = 34 + index as i32 * 25;
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(5, y - 2), Size::new(310, 22)),
-                Rgb565::BLACK,
-            )
-            .ok();
-        if selected {
-            Rectangle::new(Point::new(5, y - 2), Size::new(310, 22))
-                .into_styled(PrimitiveStyle::with_fill(Rgb565::new(0, 18, 24)))
-                .draw(&mut self.display)
-                .ok();
-        }
-        Text::with_baseline(
-            if selected { ">" } else { " " },
-            Point::new(10, y),
-            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::CYAN),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-        Text::with_baseline(
-            item,
-            Point::new(30, y),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn main_menu_item(index: usize) -> &'static str {
-        MAIN_MENU_ITEMS[index]
-    }
-
-    fn settings_item(state: &AppState, index: usize) -> &'static str {
-        match index {
-            0 if state.temperature_unit == TemperatureUnit::Celsius => "Temperature       C",
-            0 => "Temperature       F",
-            1 => "Save Profile",
-            2 => "Load Profile",
-            3 => "Factory Defaults",
-            _ => "Back",
-        }
-    }
-
-    fn profile_item(state: &AppState, index: usize) -> &'static str {
-        match index {
-            0 if state.profile_present[0] => "Slot 1          SAVED",
-            0 => "Slot 1          EMPTY",
-            1 if state.profile_present[1] => "Slot 2          SAVED",
-            1 => "Slot 2          EMPTY",
-            2 if state.profile_present[2] => "Slot 3          SAVED",
-            2 => "Slot 3          EMPTY",
-            _ => "Back",
-        }
-    }
-
-    fn draw_main_menu(&mut self, state: &AppState) {
-        self.draw_menu("BenchVolt PD", &MAIN_MENU_ITEMS, state);
-    }
-
-    fn draw_help(&mut self, state: &AppState) {
-        self.display.clear(Rgb565::BLACK).ok();
-        Text::with_baseline(
-            "Help",
-            Point::new(6, 3),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-        self.draw_help_content(state);
-    }
-
-    fn draw_help_content(&mut self, state: &AppState) {
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(0, 28), Size::new(320, 142)),
-                Rgb565::BLACK,
-            )
-            .ok();
-        let start = usize::from(state.help_scroll);
-        for (row, text) in HELP_TEXT
-            .split('\n')
-            .skip(start)
-            .take(usize::from(HELP_VISIBLE_LINES))
-            .enumerate()
-        {
-            let heading = benchvolt_pd::ui_content::is_help_heading(text);
-            Text::with_baseline(
-                text,
-                Point::new(12, 32 + row as i32 * 16),
-                MonoTextStyle::new(
-                    &FONT_8X13_BOLD,
-                    if heading { Rgb565::CYAN } else { Rgb565::WHITE },
-                ),
-                Baseline::Top,
-            )
-            .draw(&mut self.display)
-            .ok();
-        }
-        let footer = help_footer(state.help_scroll);
-        Text::with_baseline(
-            footer.as_str(),
-            Point::new(48, 151),
-            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::GREEN),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn draw_settings(&mut self, state: &AppState) {
-        let unit = Self::settings_item(state, 0);
-        self.draw_menu(
-            "Settings",
-            &[
-                unit,
-                "Save Profile",
-                "Load Profile",
-                "Factory Defaults",
-                "Back",
-            ],
-            state,
-        );
-        self.draw_settings_status(state);
-    }
-
-    fn draw_settings_status(&mut self, state: &AppState) {
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(112, 3), Size::new(208, 20)),
-                Rgb565::BLACK,
-            )
-            .ok();
-        let status = match state.profile_status {
-            ProfileStatus::ConfirmDefaults => Some(("CLICK TO CONFIRM", Rgb565::YELLOW)),
-            ProfileStatus::DefaultsLoaded => Some(("DEFAULTS LOADED / OUT OFF", Rgb565::GREEN)),
-            ProfileStatus::Failed => Some(("FAILED", Rgb565::RED)),
-            _ => None,
-        };
-        if let Some((status, color)) = status {
-            Text::with_baseline(
-                status,
-                Point::new(112, 8),
-                MonoTextStyle::new(&FONT_8X13_BOLD, color),
-                Baseline::Top,
-            )
-            .draw(&mut self.display)
-            .ok();
-        }
-    }
-
-    fn draw_profiles(&mut self, state: &AppState, saving: bool) {
-        let slots = [
-            Self::profile_item(state, 0),
-            Self::profile_item(state, 1),
-            Self::profile_item(state, 2),
-            Self::profile_item(state, 3),
-        ];
-        self.draw_menu(
-            if saving {
-                "Save Profile"
+        // 23 px pitch fits the six-row main menu on the 170 px panel.
+        let y = 31 + index as i32 * 23;
+        self.fill_rect(
+            5,
+            y - 2,
+            310,
+            22,
+            if selected {
+                Rgb565::new(0, 18, 24)
             } else {
-                "Load Profile"
+                Rgb565::BLACK
             },
-            &slots,
-            state,
         );
-        self.draw_profile_status(state);
-    }
-
-    fn draw_profile_status(&mut self, state: &AppState) {
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(160, 3), Size::new(160, 20)),
-                Rgb565::BLACK,
-            )
-            .ok();
-        let status = match state.profile_status {
-            ProfileStatus::ConfirmSave(_) | ProfileStatus::ConfirmLoad(_) => {
-                Some(("CLICK TO CONFIRM", Rgb565::YELLOW))
-            }
-            ProfileStatus::Working => Some(("WORKING", Rgb565::CYAN)),
-            ProfileStatus::Saved(_) => Some(("SAVED", Rgb565::GREEN)),
-            ProfileStatus::Loaded(_) => Some(("LOADED - OUTPUTS OFF", Rgb565::GREEN)),
-            ProfileStatus::Empty(_) => Some(("EMPTY SLOT", Rgb565::YELLOW)),
-            ProfileStatus::Failed => Some(("FAILED", Rgb565::RED)),
-            _ => None,
-        };
-        if let Some((status, color)) = status {
-            Text::with_baseline(
-                status,
-                Point::new(160, 8),
-                MonoTextStyle::new(&FONT_8X13_BOLD, color),
-                Baseline::Top,
-            )
-            .draw(&mut self.display)
-            .ok();
-        }
-    }
-
-    fn draw_awg(&mut self, state: &AppState) {
-        self.display.clear(Rgb565::BLACK).ok();
-        Text::with_baseline(
-            "AWG",
-            Point::new(6, 3),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(0, 27), Size::new(320, 1)),
-                Rgb565::new(8, 16, 16),
-            )
-            .ok();
-        for index in 0..8 {
-            self.draw_awg_row(state, index);
-        }
-    }
-
-    fn draw_awg_row(&mut self, state: &AppState, index: usize) {
-        let y = 30 + index as i32 * 17;
-        let selected = usize::from(state.menu_selection) == index;
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(4, y - 1), Size::new(190, 16)),
-                if selected {
-                    Rgb565::new(0, 18, 24)
-                } else {
-                    Rgb565::BLACK
-                },
-            )
-            .ok();
-        let label = [
-            "Channel",
-            "Waveform",
-            "Frequency",
-            "Duty",
-            "Low",
-            "High",
-            "Output",
-            "Back",
-        ][index];
-        Text::with_baseline(
-            if selected { ">" } else { " " },
-            Point::new(8, y),
-            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::CYAN),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-        Text::with_baseline(
-            label,
-            Point::new(27, y),
-            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-        self.draw_awg_value(state, index);
-    }
-
-    fn draw_awg_value(&mut self, state: &AppState, index: usize) {
-        if index == 7 {
-            return;
-        }
-        let y = 30 + index as i32 * 17;
-        let selected = usize::from(state.menu_selection) == index;
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(102, y - 1), Size::new(92, 16)),
-                if selected {
-                    Rgb565::new(0, 18, 24)
-                } else {
-                    Rgb565::BLACK
-                },
-            )
-            .ok();
-        let mut value: String<32> = String::new();
-        match index {
-            0 => write!(&mut value, "CH{}", state.awg.channel + 1).ok(),
-            1 => value
-                .push_str(match state.awg.waveform {
-                    AwgWaveform::Square => "SQUARE",
-                    AwgWaveform::Triangle => "TRIANGLE",
-                    AwgWaveform::Ramp => "RAMP",
-                    AwgWaveform::Sine => "SINE",
-                })
-                .ok(),
-            2 => write!(
-                &mut value,
-                "{}.{:01} Hz",
-                state.awg.frequency_millihz / 1_000,
-                state.awg.frequency_millihz % 1_000 / 100
-            )
-            .ok(),
-            3 => {
-                if state.awg.waveform == AwgWaveform::Square {
-                    write!(&mut value, "{}%", state.awg.duty_percent).ok()
-                } else {
-                    value.push_str("--").ok()
-                }
-            }
-            4 => write!(
-                &mut value,
-                "{}.{:02} V",
-                state.awg.low_mv / 1_000,
-                state.awg.low_mv % 1_000 / 10
-            )
-            .ok(),
-            5 => write!(
-                &mut value,
-                "{}.{:02} V",
-                state.awg.high_mv / 1_000,
-                state.awg.high_mv % 1_000 / 10
-            )
-            .ok(),
-            6 => value
-                .push_str(match state.awg_status {
-                    AwgStatus::Stopped => "START",
-                    AwgStatus::StartRequested | AwgStatus::Starting => "STARTING",
-                    AwgStatus::Running => "STOP",
-                    AwgStatus::StopRequested => "STOPPING",
-                    AwgStatus::Fault => "FAULT",
-                })
-                .ok(),
-            _ => None,
-        };
-        let color = if index == 6 {
-            match state.awg_status {
-                AwgStatus::Running => Rgb565::GREEN,
-                AwgStatus::Fault => Rgb565::RED,
-                AwgStatus::StartRequested | AwgStatus::Starting | AwgStatus::StopRequested => {
-                    Rgb565::YELLOW
-                }
-                AwgStatus::Stopped => Rgb565::CYAN,
-            }
-        } else if selected && state.awg_editing {
-            Rgb565::CYAN
-        } else {
-            Rgb565::WHITE
-        };
-        Text::with_baseline(
-            value.as_str(),
-            Point::new(106, y),
-            MonoTextStyle::new(&FONT_8X13_BOLD, color),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn draw_system(&mut self, state: &AppState) {
-        self.draw_menu("System", &["Back"], state);
-        Text::with_baseline(
-            "BenchVolt PD",
-            Point::new(65, 72),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-        Text::with_baseline(
-            benchvolt_pd::FIRMWARE_BUILD,
-            Point::new(65, 98),
-            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::CYAN),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-        Text::with_baseline(
-            if state.recovery_armed {
-                "Recovery: SAFE"
-            } else {
-                "Recovery: NOT ARMED"
-            },
-            Point::new(65, 122),
-            MonoTextStyle::new(
-                &FONT_8X13_BOLD,
-                if state.recovery_armed {
-                    Rgb565::GREEN
-                } else {
-                    Rgb565::RED
-                },
-            ),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
+        self.text8(if selected { ">" } else { " " }, 10, y, Rgb565::CYAN);
+        self.text20(item, 30, y, Rgb565::WHITE);
     }
 }
 
@@ -1256,198 +329,39 @@ where
 {
     type State = AppState;
 
+    #[inline(never)]
     fn render(&mut self, state: &Self::State) {
         match state.screen {
-            Screen::MainMenu => self.draw_main_menu(state),
-            Screen::Overview => self.draw_overview(state),
-            Screen::Channel(index) => self.draw_detail_screen(state, usize::from(index)),
-            Screen::UsbPdInput => self.draw_usb_pd_input(state),
-            Screen::Awg => self.draw_awg(state),
-            Screen::Settings => self.draw_settings(state),
-            Screen::ProfileSave => self.draw_profiles(state, true),
-            Screen::ProfileLoad => self.draw_profiles(state, false),
-            Screen::System => self.draw_system(state),
-            Screen::Help => self.draw_help(state),
+            Screen::MainMenu => main_menu::render(self, state),
+            Screen::Overview => overview::render(self, state),
+            Screen::Channel(_) => channel::render(self, state),
+            Screen::UsbPdInput => usb_pd::render(self, state),
+            Screen::Awg => awg::render(self, state),
+            Screen::Settings => settings::render(self, state),
+            Screen::ProfileSave | Screen::ProfileLoad => profiles::render(self, state),
+            Screen::PdSource => pd_source::render(self, state),
+            Screen::System => system::render(self, state),
+            Screen::Help => help::render(self, state),
         }
     }
 
+    #[inline(never)]
     fn render_transition(&mut self, old: &Self::State, new: &Self::State) {
         if old.screen != new.screen {
             self.render(new);
             return;
         }
-        if old.recovery_armed != new.recovery_armed && new.screen == Screen::Overview {
-            self.draw_recovery_status(new);
-        }
-        if temperature_projection(old) != temperature_projection(new)
-            && matches!(
-                new.screen,
-                Screen::Overview | Screen::Channel(_) | Screen::UsbPdInput
-            )
-        {
-            self.draw_temperature(new);
-        }
         match new.screen {
-            Screen::MainMenu => {
-                if old.menu_selection != new.menu_selection {
-                    let old_index = usize::from(old.menu_selection);
-                    let new_index = usize::from(new.menu_selection);
-                    self.draw_menu_item(Self::main_menu_item(old_index), old_index, false);
-                    self.draw_menu_item(Self::main_menu_item(new_index), new_index, true);
-                }
-            }
-            Screen::Awg => {
-                let damage = awg_damage(old, new);
-                for index in 0..8 {
-                    if damage.rows & (1 << index) != 0 {
-                        self.draw_awg_row(new, index);
-                    } else if damage.values & (1 << index) != 0 {
-                        self.draw_awg_value(new, index);
-                    }
-                }
-            }
-            Screen::Settings => {
-                if old.menu_selection != new.menu_selection {
-                    let old_index = usize::from(old.menu_selection);
-                    let new_index = usize::from(new.menu_selection);
-                    self.draw_menu_item(Self::settings_item(new, old_index), old_index, false);
-                    self.draw_menu_item(Self::settings_item(new, new_index), new_index, true);
-                }
-                if old.temperature_unit != new.temperature_unit {
-                    self.draw_menu_item(Self::settings_item(new, 0), 0, new.menu_selection == 0);
-                }
-                if old.profile_status != new.profile_status {
-                    self.draw_settings_status(new);
-                }
-            }
-            Screen::ProfileSave | Screen::ProfileLoad => {
-                if old.menu_selection != new.menu_selection {
-                    let old_index = usize::from(old.menu_selection);
-                    let new_index = usize::from(new.menu_selection);
-                    self.draw_menu_item(Self::profile_item(new, old_index), old_index, false);
-                    self.draw_menu_item(Self::profile_item(new, new_index), new_index, true);
-                }
-                for index in 0..3 {
-                    if old.profile_present[index] != new.profile_present[index] {
-                        self.draw_menu_item(
-                            Self::profile_item(new, index),
-                            index,
-                            usize::from(new.menu_selection) == index,
-                        );
-                    }
-                }
-                if old.profile_status != new.profile_status {
-                    self.draw_profile_status(new);
-                }
-            }
-            Screen::System => {
-                if old.recovery_armed != new.recovery_armed {
-                    self.draw_system(new);
-                }
-            }
-            Screen::Help => {
-                if old.help_scroll != new.help_scroll {
-                    self.draw_help_content(new);
-                }
-            }
-            Screen::Overview => {
-                for index in 0..new.channels.len() {
-                    let old_focused = old.focus == ControlFocus::OverviewOutput(index as u8);
-                    let new_focused = new.focus == ControlFocus::OverviewOutput(index as u8);
-                    let old = channel_projection(&old.channels[index]);
-                    let new = channel_projection(&new.channels[index]);
-                    if old.setpoint_centivolts != new.setpoint_centivolts {
-                        self.draw_setpoint(index, new);
-                    }
-                    if old.limit_centiamps != new.limit_centiamps {
-                        self.draw_limit(index, new);
-                    }
-                    if old.measured_centivolts != new.measured_centivolts {
-                        self.draw_voltage(index, new);
-                    }
-                    if old.measured_centiamps != new.measured_centiamps {
-                        self.draw_current(index, new);
-                    }
-                    if old.status != new.status
-                        || old.regulation_mode != new.regulation_mode
-                        || old.regulating_current != new.regulating_current
-                        || old_focused != new_focused
-                    {
-                        self.draw_status(index, new, new_focused);
-                    }
-                }
-            }
-            Screen::Channel(index) => {
-                let index = usize::from(index);
-                let old = detail_projection(&old.channels[index], old.focus);
-                let new = detail_projection(&new.channels[index], new.focus);
-                if old.voltage_centivolts != new.voltage_centivolts {
-                    self.draw_detail_voltage(new);
-                }
-                if old.current_centiamps != new.current_centiamps {
-                    self.draw_detail_current(new);
-                }
-                if old.power_centiwatts != new.power_centiwatts {
-                    self.draw_detail_power(new);
-                }
-                match framed_value_damage(
-                    old.setpoint_centivolts,
-                    new.setpoint_centivolts,
-                    old.focus == ControlFocus::Voltage,
-                    new.focus == ControlFocus::Voltage,
-                ) {
-                    FramedValueDamage::Frame => self.draw_detail_setpoint(new),
-                    FramedValueDamage::Value => self.draw_detail_setpoint_value(new),
-                    FramedValueDamage::None => {}
-                }
-                match framed_value_damage(
-                    old.limit_centiamps,
-                    new.limit_centiamps,
-                    old.focus == ControlFocus::CurrentLimit,
-                    new.focus == ControlFocus::CurrentLimit,
-                ) {
-                    FramedValueDamage::Frame => self.draw_detail_limit(new),
-                    FramedValueDamage::Value => self.draw_detail_limit_value(new),
-                    FramedValueDamage::None => {}
-                }
-                if old.status != new.status
-                    || (old.focus == ControlFocus::Output) != (new.focus == ControlFocus::Output)
-                {
-                    self.draw_detail_status(new.status, new.focus == ControlFocus::Output);
-                }
-                if index >= 3
-                    && (old.regulation_mode != new.regulation_mode
-                        || old.regulating_current != new.regulating_current
-                        || (old.focus == ControlFocus::RegulationMode)
-                            != (new.focus == ControlFocus::RegulationMode))
-                {
-                    self.draw_detail_mode(new);
-                }
-            }
-            Screen::UsbPdInput => {
-                let old = sink_projection(old);
-                let new = sink_projection(new);
-                if old.voltage_centivolts != new.voltage_centivolts {
-                    self.draw_sink_voltage(new);
-                }
-                if old.current_centiamps != new.current_centiamps {
-                    self.draw_sink_current(new);
-                }
-                if old.power_centiwatts != new.power_centiwatts {
-                    self.draw_sink_power(new);
-                }
-                if old.focused != new.focused {
-                    self.draw_sink_limit_frame(new);
-                } else if old.limit_centiamps != new.limit_centiamps
-                    || old.over_limit != new.over_limit
-                {
-                    self.draw_sink_limit_value(new);
-                }
-                if old.pd_status != new.pd_status {
-                    self.draw_sink_pd_status(new);
-                    self.draw_sink_title(new);
-                }
-            }
+            Screen::MainMenu => main_menu::transition(self, old, new),
+            Screen::Overview => overview::transition(self, old, new),
+            Screen::Channel(_) => channel::transition(self, old, new),
+            Screen::UsbPdInput => usb_pd::transition(self, old, new),
+            Screen::Awg => awg::transition(self, old, new),
+            Screen::Settings => settings::transition(self, old, new),
+            Screen::ProfileSave | Screen::ProfileLoad => profiles::transition(self, old, new),
+            Screen::PdSource => pd_source::transition(self, old, new),
+            Screen::System => system::transition(self, old, new),
+            Screen::Help => help::transition(self, old, new),
         }
     }
 }

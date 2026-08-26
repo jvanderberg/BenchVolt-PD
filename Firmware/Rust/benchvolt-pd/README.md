@@ -80,7 +80,27 @@ full advertised current, USB communication capable), recovering a unit whose
 PD voltage was profiled to something unusual; the NVM change takes effect at
 the next cold attach, so replug the power cable afterwards.
 
-The main menu contains DC Power, AWG, Settings, System, and Help. AWG supports
+The main menu contains DC Power, AWG, Settings, PD Source, System, and Help.
+
+The PD Source screen lists the attached source's advertised fixed PDOs (read
+live once per screen entry, filtered like the GUI's PDO list and capped at
+the 20 V board input ceiling), marks the live contract's row ACTIVE, and lets
+a row be armed by click and applied from the front panel. The capability read
+transmits Get_Source_Cap, which briefly restarts negotiation, so it waits
+until every output is inactive and never repeats on contract events (that
+feedback loop was observed on hardware). Apply obeys the same admission rule
+as `SOUR:PDO:SET`: every output must be inactive (a hint banner explains a
+dimmed Apply or a stalled list). Applying first appends a settings-journal
+record carrying the requested voltage, then reprofiles the STUSB4500 NVM PDO2
+and triggers renegotiation. Because the MCU is VBUS-powered, an apply that
+hard-resets VBUS cold-boots the device: the journaled flag routes that boot
+directly back to the PD Source screen with a requested-vs-actual banner. That
+boot path is display-only — it never re-attempts the apply or writes the
+STUSB — and the flag is cleared after a single boot, so a source that refuses
+or drops the request converges to a normal boot instead of a boot loop.
+Apply persists the choice as the STUSB4500's cold-attach boot preference (the
+same NVM PDO2 mechanism as `SOUR:PDO:SET`); Factory Defaults restores the
+canonical 20 V profile and `SYST:PD:NEGOTIATE` remains the USB escape hatch. AWG supports
 CH4/CH5 selection, square/triangle/ramp/sine waveforms, frequency, square-wave
 duty cycle from 1% to 99%, low/high voltage, and Start/Stop. Duty is unavailable
 and electrically inert for non-square waveforms. A field click enters or leaves

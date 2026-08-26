@@ -50,7 +50,7 @@ fn any_disable(operation: &DriverOperation) -> bool {
 }
 
 fn random_event(harness: &mut Harness, rng: &mut Rng) {
-    match rng.below(23) {
+    match rng.below(25) {
         0 | 1 | 2 => harness.detent(rng.accel()),
         3 => {
             harness.dispatch(Action::NextControl);
@@ -163,13 +163,19 @@ fn random_event(harness: &mut Harness, rng: &mut Rng) {
         }
         19 | 20 => {
             // INVARIANT (token discipline): completion-shaped actions with
-            // arbitrary operation tokens must never move physical state
-            // unless they match the exact pending transition. The reducer's
-            // token fence is what makes fire-and-forget hardware sequencing
-            // safe against fast user input; fuzzing hostile completions
-            // keeps any future completion arm honest.
+            // stale operation tokens must never move physical state; only
+            // the exact pending transition's token may. The forged token is
+            // guaranteed non-matching — a forgery carrying the live token is
+            // indistinguishable from the real executor completion, so the
+            // reducer legitimately accepts it while the mock hardware never
+            // performed the work.
             let channel = rng.below(7) as u8;
-            let operation = rng.below(8) as u16;
+            let live = harness
+                .state()
+                .channels
+                .get(usize::from(channel))
+                .map_or(0, |output| output.operation);
+            let operation = live.wrapping_add(1 + rng.below(8) as u16);
             let action = match rng.below(4) {
                 0 => Action::OutputApplied {
                     channel,
@@ -182,15 +188,54 @@ fn random_event(harness: &mut Harness, rng: &mut Rng) {
                     operation,
                     fault: Fault::Hardware,
                 },
-                _ => Action::HardwareSettingFailed {
-                    channel,
-                    fault: Fault::Hardware,
-                },
+                _ => {
+                    // HardwareSettingFailed carries no token; its emitter
+                    // contract is that a real channel's hardware was
+                    // best-effort shut down before the action was dispatched
+                    // (out-of-range channels are refusals that touch no
+                    // hardware). Mirror that so the injection stays a
+                    // possible reality.
+                    if usize::from(channel) < 5 {
+                        let state = *harness.state();
+                        benchvolt_pd::power::best_effort_shutdown(
+                            harness.driver_mut(),
+                            &state,
+                            channel,
+                        );
+                    }
+                    Action::HardwareSettingFailed {
+                        channel,
+                        fault: Fault::Hardware,
+                    }
+                }
             };
             harness.dispatch(action);
         }
         21 => {
             harness.dispatch(Action::BootRecoveryStatus(rng.below(2) == 0));
+        }
+        22 => {
+            // PD Source list loads with arbitrary lengths and rows; combined
+            // with the menu/click cases above this fuzzes arm and apply
+            // (the harness mirrors main.rs by completing pending applies),
+            // which must uphold "no apply while outputs live".
+            let mut pdos = [benchvolt_pd::app::NO_PDO; benchvolt_pd::app::PD_SOURCE_MAX_PDOS];
+            let count = rng.below(1 + pdos.len() as u64) as u8;
+            for (index, pdo) in pdos[..usize::from(count)].iter_mut().enumerate() {
+                *pdo = benchvolt_pd::pd::FixedPdo {
+                    source_position: index as u8 + 1,
+                    millivolts: (1 + rng.below(400) as u16) * 50,
+                    milliamps: (1 + rng.below(500) as u16) * 10,
+                };
+            }
+            harness.dispatch(Action::PdSourceListLoaded {
+                pdos,
+                count,
+                error: rng.below(4) == 0,
+            });
+        }
+        23 => {
+            harness.dispatch(Action::PdoApplyFinished(rng.below(2) == 0));
         }
         _ => harness.tick(rng.below(50) as u32),
     }
@@ -240,7 +285,9 @@ fn action_fuzz_coverage(action: &Action) -> Coverage {
         | Action::OutputApplied { .. }
         | Action::OutputEnergized { .. }
         | Action::OutputFailed { .. }
-        | Action::HardwareSettingFailed { .. } => Fuzzed,
+        | Action::HardwareSettingFailed { .. }
+        | Action::PdSourceListLoaded { .. }
+        | Action::PdoApplyFinished(_) => Fuzzed,
 
         // Emitted by the harness itself while fuzz runs: tick() drives the
         // protection/measurement/AWG service paths exactly like main.rs.

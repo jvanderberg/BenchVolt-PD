@@ -217,6 +217,100 @@ fn failed_global_shutdown_never_claims_outputs_are_off() {
 }
 
 #[test]
+fn pd_source_apply_flow_arms_guards_and_reports_the_outcome() {
+    use benchvolt_pd::app::{PdoApply, PD_SOURCE_MAX_PDOS};
+    use benchvolt_pd::pd::FixedPdo;
+
+    let mut harness = Harness::new();
+    // Main-menu row 3 opens the PD Source screen and marks the list stale.
+    for _ in 0..3 {
+        harness.dispatch(Action::NavigateMenu(1));
+    }
+    harness.dispatch(Action::ActivateMenu);
+    assert!(harness.state().screen == Screen::PdSource);
+    assert!(harness.state().pd_source_stale);
+
+    // The main.rs-shaped list load clears the stale marker.
+    let mut pdos = [benchvolt_pd::app::NO_PDO; PD_SOURCE_MAX_PDOS];
+    pdos[0] = FixedPdo {
+        source_position: 1,
+        millivolts: 5_000,
+        milliamps: 3_000,
+    };
+    pdos[1] = FixedPdo {
+        source_position: 2,
+        millivolts: 12_000,
+        milliamps: 3_000,
+    };
+    harness.dispatch(Action::PdSourceListLoaded {
+        pdos,
+        count: 2,
+        error: false,
+    });
+    assert!(!harness.state().pd_source_stale);
+
+    // Click on the 12 V row arms it; nothing is applied yet.
+    harness.dispatch(Action::NavigateMenu(1));
+    harness.dispatch(Action::ActivateMenu);
+    assert_eq!(harness.state().pd_source_armed, Some(1));
+    assert!(harness.state().pd_apply_request.is_none());
+
+    // Apply while an output is live must be a rejected no-op.
+    harness.enable_channel(0);
+    harness.dispatch(Action::NavigateMenu(1));
+    harness.dispatch(Action::ActivateMenu);
+    assert!(harness.state().pd_apply_request.is_none());
+    assert_eq!(harness.state().pdo_apply_pending_mv, 0);
+
+    // With outputs inactive again, Apply arms the request and pending flag.
+    harness.dispatch(Action::SetOutputRequested {
+        channel: 0,
+        enabled: false,
+    });
+    harness.tick(200);
+    assert!(harness.state().outputs_inactive());
+    harness.dispatch(Action::ActivateMenu);
+    assert_eq!(
+        harness.state().pd_apply_request,
+        Some(PdoApply {
+            millivolts: 12_000,
+            milliamps: 3_000,
+        })
+    );
+    assert_eq!(harness.state().pdo_apply_pending_mv, 12_000);
+    assert_eq!(harness.state().pd_banner_mv, Some(12_000));
+
+    // While the apply is in flight, no output may be enabled.
+    harness.dispatch(Action::SetOutputRequested {
+        channel: 0,
+        enabled: true,
+    });
+    assert!(!harness.state().channels[0].requested_enabled);
+
+    // The mirrored main-loop servicing completes the request; the in-place
+    // renegotiation outcome then clears the journal flag and keeps the
+    // banner. It must NOT mark the list stale: the capability read itself
+    // provokes a renegotiation event, so re-reading on contract changes is a
+    // self-sustaining loop.
+    harness.tick(1);
+    assert!(harness.state().pd_apply_request.is_none());
+    harness.dispatch(Action::PdNegotiated(benchvolt_pd::pd::Contract {
+        source_position: 2,
+        millivolts: 12_000,
+        operating_milliamps: 3_000,
+        maximum_milliamps: 3_000,
+    }));
+    assert_eq!(harness.state().pdo_apply_pending_mv, 0);
+    assert_eq!(harness.state().pd_banner_mv, Some(12_000));
+    assert!(!harness.state().pd_source_stale);
+
+    // The back gesture discards the armed choice and the banner.
+    harness.dispatch(Action::GoMainMenu);
+    assert!(harness.state().pd_source_armed.is_none());
+    assert!(harness.state().pd_banner_mv.is_none());
+}
+
+#[test]
 fn hostile_persisted_settings_are_sanitized_before_reaching_state() {
     let mut state = AppState::new(true, Some(25 * 16));
     let hostile = PersistentSettings {
@@ -235,6 +329,7 @@ fn hostile_persisted_settings_are_sanitized_before_reaching_state() {
             low_mv: 60_000,
             high_mv: 0,
         },
+        pdo_apply_pending_mv: 60_000,
     };
     hostile.apply_to(&mut state);
 

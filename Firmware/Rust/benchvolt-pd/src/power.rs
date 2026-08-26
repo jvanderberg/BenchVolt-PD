@@ -1057,7 +1057,10 @@ fn enable_is_eligible(state: &AppState, channel: u8) -> Result<(), Fault> {
     Ok(())
 }
 
-fn best_effort_shutdown<D: PowerDriver>(driver: &mut D, state: &AppState, channel: u8) {
+/// Public so the test harness can mirror the emitter contract of
+/// `HardwareSettingFailed`: the hardware for the channel is best-effort shut
+/// down before the failure action is dispatched.
+pub fn best_effort_shutdown<D: PowerDriver>(driver: &mut D, state: &AppState, channel: u8) {
     if channel == 4 {
         let _ = driver.apply(DriverOperation::Ch5OutputEnable(false));
         let _ = driver.apply(DriverOperation::Ch5Enable(false));

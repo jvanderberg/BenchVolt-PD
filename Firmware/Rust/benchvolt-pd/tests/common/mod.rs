@@ -365,6 +365,15 @@ impl Harness {
         self.tick(60);
     }
 
+    /// main.rs services a PDO apply request the same loop pass it is armed
+    /// (journal write, STUSB reprofile); the harness mirrors that by
+    /// completing it on the next simulated millisecond.
+    fn mirror_pdo_apply(&mut self) {
+        if self.state().pd_apply_request.is_some() {
+            self.dispatch(Action::PdoApplyFinished(true));
+        }
+    }
+
     fn mirror_awg_lifecycle(&mut self) {
         match self.state().awg_status {
             AwgStatus::StartRequested => {
@@ -391,6 +400,7 @@ impl Harness {
     pub fn tick(&mut self, milliseconds: u32) {
         for _ in 0..milliseconds {
             self.now_ms += 1;
+            self.mirror_pdo_apply();
             self.mirror_awg_lifecycle();
             let due = self.cadence.advance(1);
 
@@ -551,6 +561,16 @@ pub fn assert_invariants(harness: &Harness) {
 
     // Electrical sequencing invariant on the modeled hardware.
     assert!(driver.safe(), "mock driver electrical invariant violated");
+
+    // INVARIANT (no apply while outputs live): a PDO apply collapses the
+    // input rail under any enabled output. The arm guard requires inactive
+    // outputs and every enable path rejects while a request is in flight.
+    if state.pd_apply_request.is_some() {
+        assert!(
+            state.outputs_inactive(),
+            "PDO apply request pending while an output is requested or live"
+        );
+    }
 
     // If the reducer claims every output is physically off, the hardware must
     // agree -- unless a de-energizing driver command was deliberately failed,

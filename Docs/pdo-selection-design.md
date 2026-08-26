@@ -1,6 +1,18 @@
 # On-device PDO selection — design
 
-Status: proposed, not implemented. Target: `Firmware/Rust/benchvolt-pd`.
+Status: implemented (see `Firmware/Rust/benchvolt-pd`). Notes on deviations:
+the "re-read on contract-change events" data flow below proved wrong on
+hardware — the capability read transmits Get_Source_Cap, which itself
+restarts negotiation and raises contract events, so re-reading on them is a
+self-sustaining read/renegotiate loop (and the resulting full-screen repaint
+storm overflowed the 192-command paint queue into a latched display failure).
+The list is read once per screen entry, only while outputs are inactive;
+the journal records the requested millivolts only (no index — the banner
+names the voltage), encoded in previously-unused record bytes so no record
+version bump was needed (old and new records decode in both directions); and
+the row markers are colored ARMED/ACTIVE suffixes. The flash budget was met
+by outlining the view layer's text/fill primitives (~2.1 KiB reclaimed
+across every screen).
 
 ## Goal
 

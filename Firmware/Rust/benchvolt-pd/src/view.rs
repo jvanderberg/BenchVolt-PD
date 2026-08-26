@@ -341,7 +341,14 @@ where
         };
         self.clear_detail_region(x - 7, 29, 151, 42);
 
-        let mut cursor = x;
+        // The unit letter sits at a fixed column on every screen; digits are
+        // right-aligned against it so varying digit counts never move it.
+        let suffix_x = x + 109;
+        let width: i32 = text
+            .chars()
+            .map(|character| if character == '.' { 7 } else { 25 })
+            .sum();
+        let mut cursor = suffix_x - 2 - width;
         for character in text.chars() {
             if character == '.' {
                 Circle::new(Point::new(cursor + 1, 34 + 29), 5)
@@ -356,7 +363,7 @@ where
         }
         Text::with_baseline(
             suffix,
-            Point::new(cursor + 2, 48),
+            Point::new(suffix_x, 48),
             MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
             Baseline::Top,
         )
@@ -571,19 +578,26 @@ where
         .ok();
     }
 
+    /// Nominal voltage with no superfluous decimals: "12V", "1.8V", "12.34V".
+    fn write_nominal_volts(title: &mut String<32>, centivolts: u16) {
+        let whole = centivolts / 100;
+        let fraction = centivolts % 100;
+        if fraction == 0 {
+            write!(title, "{whole}V").ok();
+        } else if fraction.is_multiple_of(10) {
+            write!(title, "{whole}.{}V", fraction / 10).ok();
+        } else {
+            write!(title, "{whole}.{fraction:02}V").ok();
+        }
+    }
+
     /// Header with the channel's nominal (setpoint) voltage, e.g.
-    /// "Channel 3 3.30V".
+    /// "Channel 3 3.3V".
     fn draw_detail_title(&mut self, index: usize, projection: DetailProjection) {
         self.clear_detail_region(0, 0, 224, 22);
         let mut title: String<32> = String::new();
-        write!(
-            &mut title,
-            "Channel {} {}.{:02}V",
-            index + 1,
-            projection.setpoint_centivolts / 100,
-            projection.setpoint_centivolts % 100
-        )
-        .ok();
+        write!(&mut title, "Channel {} ", index + 1).ok();
+        Self::write_nominal_volts(&mut title, projection.setpoint_centivolts);
         Text::with_baseline(
             title.as_str(),
             Point::new(4, 1),

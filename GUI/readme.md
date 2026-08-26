@@ -101,14 +101,23 @@ Output: `dist/BenchVolt-PD`
 
 ## Hardware protocol notes
 
+Full command syntax, reply formats, and scripting examples are in the
+[SCPI interface reference](../Docs/scpi-interface.md).
+
 - SCPI-style commands over USB CDC, e.g. `SOUR:VOLT:CH4 5.00`,
   `OUTP:CH1:STAT 1`, `MEAS:VOLT:CH2?`.
-- ARB uploads retain the original `ARB:DATA` / `ARB:START` protocol. Generated
-  waveforms use multiplier `0.5` with the Rust firmware's 2 kHz scheduler;
-  custom CSV files may specify `MULTIPLIER=0.5` or a legacy positive integer.
-  The generator exposes the scheduler ceiling (1 kHz for a two-point square,
-  500 Hz for a four-point shape). These are command-rate limits, not guaranteed
-  analog bandwidth; usable limits depend on channel, voltage swing, and load.
+- Standard waveforms (square, triangle, ramp, sine) run on the firmware's
+  built-in AWG engine via `SOUR:WAVE:CHn:FUNC <SQU|TRI|RAMP|SIN>,<freq_millihz>,
+  <duty_pct>,<low_mv>,<high_mv>` plus `SOUR:WAVE:CHn:RUN` / `:STOP` / `:STAT?`.
+  The limits match the on-device UI: 125 Hz square, 120 Hz shaped, 0.1 Hz
+  minimum. `RUN` acknowledges only after the output is actually running.
+- Custom ARB uploads retain the original `ARB:DATA` / `ARB:START` protocol;
+  CSV files may specify `MULTIPLIER=0.5` (one 2 kHz scheduler tick per dwell
+  unit) or a legacy positive integer (milliseconds). ARB timing is command
+  rate, not guaranteed analog bandwidth.
+- `SYST:PD:CONTRACT?` reports the negotiated PD contract as
+  `position,millivolts,milliamps` (or `NONE`); the GUI uses it to auto-select
+  the active PDO after connecting.
 - PDO list query (`SOUR:PD:LIST?`) streams data between
   `UI_PDO_LIST_START` / `UI_PDO_LIST_END` markers.
 - Firmware bootloader protocol uses `CMD_START` / `CMD_DATA` /

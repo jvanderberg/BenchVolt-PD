@@ -93,12 +93,21 @@ also provides `SOUR:WAVE:CHn:ARB:STOP` and `...:ARB:STAT?`; status reports the
 current point, completed cycles, late updates, and cycles skipped to preserve
 absolute time.
 
+The built-in waveform engine is also remote-controllable:
+`SOUR:WAVE:CHn:FUNC <SQU|TRI|RAMP|SIN>,<freq_millihz>,<duty_pct>,<low_mv>,<high_mv>`
+configures it (validated by the same reducer rules the front panel uses, and
+rejected with `ERR:BUSY` while any waveform is active), `SOUR:WAVE:CHn:RUN`
+starts it (the `OK` ack is deferred until the output is verified running, like
+ARB `START`), `SOUR:WAVE:CHn:STOP` performs a confirmed global shutdown, and
+`SOUR:WAVE:CHn:STAT?` reports the engine status for the owning channel.
+
 The application never touches the bootloader's CRC seal at startup, so an
 interrupted boot cannot strand the device in the bootloader. `JUMP:BOOTLOADER`
 erases the seal deliberately for a firmware upload, and SWD remains the
 recovery path for an application build that crashes before USB comes up.
 
-USB commands:
+USB commands (full syntax, reply formats, and scripting examples are in the
+[SCPI interface reference](../../../Docs/scpi-interface.md)):
 
 - `*IDN?`
 - `SYST:BUILD?`
@@ -106,6 +115,15 @@ USB commands:
 - `SOUR:WAVE:CH4:ARB:START ...` / `SOUR:WAVE:CH5:ARB:START ...`
 - `SOUR:WAVE:CH4:ARB:STOP` / `SOUR:WAVE:CH5:ARB:STOP`
 - `SOUR:WAVE:CH4:ARB:STAT?` / `SOUR:WAVE:CH5:ARB:STAT?`
+- `SOUR:WAVE:CH4:FUNC ...` / `SOUR:WAVE:CH5:FUNC ...` (built-in engine config:
+  `<SQU|TRI|RAMP|SIN>,<freq_millihz>,<duty_pct>,<low_mv>,<high_mv>`)
+- `SOUR:WAVE:CH4:RUN` / `SOUR:WAVE:CH5:RUN`
+- `SOUR:WAVE:CH4:STOP` / `SOUR:WAVE:CH5:STOP`
+- `SOUR:WAVE:CH4:STAT?` / `SOUR:WAVE:CH5:STAT?`
+- `SOUR:WAVE:FUNC?` (the on-device engine configuration:
+  `CH<n>,<waveform>,<freq_millihz>,<duty_pct>,<low_mv>,<high_mv>`)
+- `SYST:PD:CONTRACT?` (negotiated PD contract: `position,millivolts,milliamps`,
+  or `NONE`)
 - `SYST:TICK?` (free-running hardware milliseconds, for timing diagnostics)
 - `MEAS:TEMP?`
 - `MEAS:CH1?` through `MEAS:CH5?`

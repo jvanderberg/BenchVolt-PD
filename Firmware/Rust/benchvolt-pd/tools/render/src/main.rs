@@ -25,8 +25,8 @@ use embedded_graphics::{
 };
 
 use benchvolt_pd::app::{
-    Action, AppReducer, AppState, AwgStatus, AwgWaveform, ControlFocus, Fault, LoadMeasurement,
-    Measurement, OutputTransition, RegulationMode, Screen,
+    Action, AppReducer, AppState, AwgStatus, AwgWaveform, ControlFocus, Fault, Measurement,
+    OutputTransition, RegulationMode, Screen,
 };
 use benchvolt_pd::input_policy::{
     clamp_adjustment, encoder_action, ButtonTracker, EncoderAccumulator,
@@ -220,7 +220,7 @@ fn stills(out_dir: &Path) {
     ch5.transition = OutputTransition::Stable;
     render_still("channel5_fault.png", out_dir, &state);
 
-    // AWG: CH5, sine, 60 Hz, running, with load measurements.
+    // AWG: CH5, sine, 60 Hz, running.
     let mut state = base_state();
     state.screen = Screen::Awg;
     state.awg.channel = 4;
@@ -229,11 +229,6 @@ fn stills(out_dir: &Path) {
     state.awg_status = AwgStatus::Running;
     state.channels[4].requested_enabled = true;
     state.channels[4].physical_enabled = true;
-    state.awg_load = LoadMeasurement {
-        milliamps_rms: 248,
-        milliwatts_average: 743,
-        valid: true,
-    };
     render_still("awg.png", out_dir, &state);
 
     // USB PD input screen with the active contract.

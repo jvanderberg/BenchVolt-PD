@@ -417,6 +417,14 @@ fn main() -> ! {
     let mut protection = ProtectionService::default();
     let mut waveform_service = WaveformService::new();
     let mut arb_upload = ArbUploadSession::new();
+    // Deferred SOUR:WAVE:CHn:RUN ack: reply only once the builtin engine is
+    // actually running (or has faulted), mirroring the ARB start contract.
+    let mut pending_awg_ack: Option<u8> = None;
+    // Second half of a staggered AWG load-readout update: painting both value
+    // rows in one pass floods the display queue and stalls the 2 kHz waveform
+    // sampler, so the power row is deferred to the next measurement tick.
+    // Elapsed time withheld from the PD service while a waveform is running.
+    let mut pd_deferred_elapsed_ms: u16 = 0;
     let mut settings_effect = SettingsDebouncer::new(PersistentSettings::from_state(app.state()));
     let mut pd_service = PdService::new(app.state().sink_current_limit_ma);
     let mut input_ticks = monotonic_ms();
@@ -772,6 +780,58 @@ fn main() -> ! {
                         queue_usb_response(b"OK\r\n");
                     }
                 }
+                UsbIntent::AwgConfigure(config) => {
+                    if !matches!(
+                        app.state().awg_status,
+                        AwgStatus::Stopped | AwgStatus::Fault
+                    ) {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                        break 'usb_command;
+                    }
+                    dispatch_app(&mut app, &mut power_driver, Action::ConfigureAwg(config));
+                    if app.state().awg == config {
+                        queue_usb_response(b"OK\r\n");
+                    } else {
+                        queue_usb_response(b"ERR:RANGE\r\n");
+                    }
+                }
+                UsbIntent::AwgRun(channel) => {
+                    if app.state().awg.channel != channel {
+                        queue_usb_response(b"ERR:RANGE\r\n");
+                        break 'usb_command;
+                    }
+                    dispatch_app(&mut app, &mut power_driver, Action::RequestAwgStart);
+                    if app.state().awg_status == AwgStatus::StartRequested
+                        && app.state().awg_source == AwgSource::Builtin
+                    {
+                        pending_awg_ack = Some(channel);
+                    } else {
+                        queue_usb_response(b"ERR:BUSY\r\n");
+                    }
+                }
+                UsbIntent::AwgStop(channel) => {
+                    if app.state().awg_source == AwgSource::Builtin
+                        && app.state().awg.channel == channel
+                        && !matches!(app.state().awg_status, AwgStatus::Stopped)
+                    {
+                        pending_awg_ack = None;
+                        if execute_global_shutdown(&mut power_driver).is_ok() {
+                            dispatch_app(
+                                &mut app,
+                                &mut power_driver,
+                                Action::GlobalShutdownApplied,
+                            );
+                            dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
+                            queue_usb_response(b"OK\r\n");
+                        } else {
+                            unsafe { raw_emergency_shutdown() };
+                            dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
+                            queue_usb_response(b"ERR:HARDWARE\r\n");
+                        }
+                    } else {
+                        queue_usb_response(b"OK\r\n");
+                    }
+                }
             }
         }
 
@@ -800,10 +860,40 @@ fn main() -> ! {
         service_tick = input_ticks;
         let mut due = cadence.advance(elapsed_ms);
 
+        // While the AWG runs, the sampler owns the loop: the full monitoring
+        // scan (12 oversampled ADC reads, TPS health reads, the TMP1075
+        // temperature read, and the PD contract watchdog — each a
+        // multi-millisecond soft-I2C/ADC pass every 20-100 ms) puts visible
+        // flat spots into fast waveforms, so it is suspended for the duration
+        // of the run. What remains while hot: a single two-pin ADC read of
+        // the driven channel every 20 ms (feeding the RMS/power readout and
+        // that channel's software current protection), plus the converters'
+        // hardware OCP/OVP/SCP, which are always active. Everything resumes
+        // its normal cadence the moment the run ends.
+        let awg_hot = app.state().awg_status == AwgStatus::Running;
+        if awg_hot {
+            due.temperature = false;
+            due.display_measurement = false;
+            if due.measurement {
+                due.measurement = false;
+                let channel = app.state().active_awg_channel();
+                let measurement = if channel == 3 {
+                    read_channel_measurement(&mut adc, &mut ch4_voltage, &mut ch4_current, 2, 1)
+                } else {
+                    read_channel_measurement(&mut adc, &mut ch5_voltage, &mut ch5_current, 78, 10)
+                };
+                if let Some(action) = protection.observe_channel(app.state(), channel, measurement)
+                {
+                    dispatch_app(&mut app, &mut power_driver, action);
+                }
+            }
+        }
+
         let outputs_off = app.state().outputs_inactive();
-        for event in pd_service
-            .tick(
-                elapsed_ms,
+        pd_deferred_elapsed_ms = pd_deferred_elapsed_ms.saturating_add(elapsed_ms);
+        let pd_events = if !awg_hot {
+            pd_service.tick(
+                core::mem::take(&mut pd_deferred_elapsed_ms),
                 input_ticks,
                 outputs_off,
                 app.state().sink_current_limit_ma,
@@ -813,9 +903,10 @@ fn main() -> ! {
                     .then_some(app.state().sink.millivolts),
                 &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
             )
-            .into_iter()
-            .flatten()
-        {
+        } else {
+            [None, None]
+        };
+        for event in pd_events.into_iter().flatten() {
             let (action, pd_event) = match event {
                 PdServiceEvent::NegotiationStarted => (Action::PdNegotiationStarted, None),
                 PdServiceEvent::Pd(benchvolt_pd::pd::PdEvent::Negotiated(contract)) => (
@@ -912,6 +1003,21 @@ fn main() -> ! {
                 if execute_global_shutdown(&mut power_driver).is_err() {
                     unsafe { raw_emergency_shutdown() };
                 }
+            }
+        }
+
+        if pending_awg_ack.is_some() {
+            if app.state().awg_status == AwgStatus::Running
+                && app.state().awg_source == AwgSource::Builtin
+            {
+                queue_usb_response(b"OK:WAVE_STARTED\r\n");
+                pending_awg_ack = None;
+            } else if matches!(
+                app.state().awg_status,
+                AwgStatus::Fault | AwgStatus::Stopped
+            ) {
+                queue_usb_response(b"ERR:HARDWARE\r\n");
+                pending_awg_ack = None;
             }
         }
 
@@ -1054,14 +1160,6 @@ fn main() -> ! {
                 Action::SinkMeasurement(sink_measurement),
             );
         }
-        if due.awg_load {
-            dispatch_app(
-                &mut app,
-                &mut power_driver,
-                Action::AwgLoadMeasurement(measurement_windows.take_awg_load()),
-            );
-        }
-
         // Safety observations above preempt a power-up stage that becomes due
         // in this same pass. One bounded stage can then advance before the
         // watchdog is fed, without blocking USB, PD, or protection cadence.

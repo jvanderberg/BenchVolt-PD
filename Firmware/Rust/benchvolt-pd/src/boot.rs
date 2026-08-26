@@ -9,7 +9,6 @@ const SETTINGS_ADDR: usize = 0x0801_F000;
 const FLASH_PAGE_SIZE: usize = 2_048;
 pub(crate) const SETTINGS_SLOTS: usize = FLASH_PAGE_SIZE / RECORD_SIZE;
 
-
 #[derive(Clone, Copy)]
 pub(crate) struct SettingsStore {
     pub(crate) latest: Option<SettingsRecord>,

@@ -6,11 +6,12 @@
 
 use core::fmt::Write as _;
 
-use heapless::String;
-
 use crate::usb_command::Response;
 
-use crate::app::{AppState, AwgSource, AwgStatus, ControlFocus, Fault, RegulationMode, Screen};
+use crate::app::{
+    AppState, AwgConfig, AwgSource, AwgStatus, AwgWaveform, ControlFocus, Fault, RegulationMode,
+    Screen,
+};
 use crate::arb::{
     parse_data as parse_arb_data, parse_start as parse_arb_start, ParseError as ArbParseError,
 };
@@ -51,6 +52,43 @@ fn reply(out: &mut Response, text: &str) -> Option<UsbIntent> {
     None
 }
 
+/// Parse `SQU|TRI|RAMP|SIN,<freq_millihz>,<duty_pct>,<low_mv>,<high_mv>`.
+/// Only syntax lives here; range checks belong to the reducer.
+fn parse_awg_func(channel: u8, args: &[u8]) -> Option<AwgConfig> {
+    let mut fields = args.split(|byte| *byte == b',');
+    let waveform = match fields.next()? {
+        b"SQU" => AwgWaveform::Square,
+        b"TRI" => AwgWaveform::Triangle,
+        b"RAMP" => AwgWaveform::Ramp,
+        b"SIN" => AwgWaveform::Sine,
+        _ => return None,
+    };
+    let mut number = || {
+        let field = fields.next()?;
+        if field.is_empty() || field.iter().any(|byte| !byte.is_ascii_digit()) {
+            return None;
+        }
+        field.iter().try_fold(0u32, |value, byte| {
+            value.checked_mul(10)?.checked_add(u32::from(*byte - b'0'))
+        })
+    };
+    let frequency_millihz = number()?;
+    let duty_percent = u8::try_from(number()?).ok()?;
+    let low_mv = u16::try_from(number()?).ok()?;
+    let high_mv = u16::try_from(number()?).ok()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(AwgConfig {
+        channel,
+        waveform,
+        frequency_millihz,
+        duty_percent,
+        low_mv,
+        high_mv,
+    })
+}
+
 fn finish(out: &mut Response, response: &Response) -> Option<UsbIntent> {
     let _ = out.push_bytes(response.as_bytes());
     None
@@ -66,41 +104,97 @@ pub fn dispatch_command(
     out: &mut Response,
 ) -> Option<UsbIntent> {
     let command = command.strip_suffix(b"\r").unwrap_or(command);
-    for channel in 4..=5u8 {
-        let mut status_command: String<64> = String::new();
-        write!(&mut status_command, "SOUR:WAVE:CH{channel}:ARB:STAT?").ok();
-        if command == status_command.as_bytes() {
-            let owner = state.awg_source == AwgSource::Arbitrary
-                && state.active_awg_channel() + 1 == channel;
-            let status = if owner {
-                match state.awg_status {
-                    AwgStatus::Running => "RUNNING",
-                    AwgStatus::StartRequested | AwgStatus::Starting => "STARTING",
-                    AwgStatus::StopRequested => "STOPPING",
-                    AwgStatus::Fault => "FAULT",
-                    AwgStatus::Stopped => "STOPPED",
+    if let Some(rest) = command.strip_prefix(b"SOUR:WAVE:CH") {
+        if let Some((&digit, tail)) = rest.split_first() {
+            if matches!(digit, b'4' | b'5') {
+                // 0-based output index (3 or 4).
+                let channel = digit - b'1';
+                let owner_status = |owned: bool| {
+                    if owned {
+                        match state.awg_status {
+                            AwgStatus::Running => "RUNNING",
+                            AwgStatus::StartRequested | AwgStatus::Starting => "STARTING",
+                            AwgStatus::StopRequested => "STOPPING",
+                            AwgStatus::Fault => "FAULT",
+                            AwgStatus::Stopped => "STOPPED",
+                        }
+                    } else {
+                        "STOPPED"
+                    }
+                };
+                match tail {
+                    b":ARB:STAT?" => {
+                        let owner = state.awg_source == AwgSource::Arbitrary
+                            && state.active_awg_channel() == channel;
+                        let mut response = Response::new_empty();
+                        write!(
+                            &mut response,
+                            "{},INDEX:{},CYCLES:{},LATE:{},SKIP:{}\r\n",
+                            owner_status(owner),
+                            diagnostics.arb_index,
+                            diagnostics.arb_cycles,
+                            diagnostics.arb_late_updates,
+                            diagnostics.arb_skipped_cycles,
+                        )
+                        .ok();
+                        return finish(out, &response);
+                    }
+                    b":ARB:STOP" => return Some(UsbIntent::ArbStop(channel)),
+                    b":STAT?" => {
+                        let owner =
+                            state.awg_source == AwgSource::Builtin && state.awg.channel == channel;
+                        let mut response = Response::new_empty();
+                        write!(&mut response, "{}\r\n", owner_status(owner)).ok();
+                        return finish(out, &response);
+                    }
+                    b":RUN" => return Some(UsbIntent::AwgRun(channel)),
+                    b":STOP" => return Some(UsbIntent::AwgStop(channel)),
+                    _ => {
+                        if let Some(args) = tail.strip_prefix(b":FUNC ") {
+                            return match parse_awg_func(channel, args) {
+                                Some(config) => Some(UsbIntent::AwgConfigure(config)),
+                                None => reply(out, "ERR:SYNTAX\r\n"),
+                            };
+                        }
+                    }
                 }
-            } else {
-                "STOPPED"
-            };
-            let mut response = Response::new_empty();
-            write!(
+            }
+        }
+    }
+    if command == b"SOUR:WAVE:FUNC?" {
+        // The on-device AWG configuration is the single source of truth the
+        // desktop GUI syncs its waveform panel from.
+        let mut response = Response::new_empty();
+        write!(
+            &mut response,
+            "CH{},{},{},{},{},{}\r\n",
+            state.awg.channel + 1,
+            match state.awg.waveform {
+                AwgWaveform::Square => "SQU",
+                AwgWaveform::Triangle => "TRI",
+                AwgWaveform::Ramp => "RAMP",
+                AwgWaveform::Sine => "SIN",
+            },
+            state.awg.frequency_millihz,
+            state.awg.duty_percent,
+            state.awg.low_mv,
+            state.awg.high_mv,
+        )
+        .ok();
+        return finish(out, &response);
+    }
+    if command == b"SYST:PD:CONTRACT?" {
+        let mut response = Response::new_empty();
+        match state.pd_contract {
+            Some(contract) => write!(
                 &mut response,
-                "{},INDEX:{},CYCLES:{},LATE:{},SKIP:{}\r\n",
-                status,
-                diagnostics.arb_index,
-                diagnostics.arb_cycles,
-                diagnostics.arb_late_updates,
-                diagnostics.arb_skipped_cycles,
+                "{},{},{}\r\n",
+                contract.source_position, contract.millivolts, contract.operating_milliamps,
             )
-            .ok();
-            return finish(out, &response);
-        }
-        let mut stop_command: String<64> = String::new();
-        write!(&mut stop_command, "SOUR:WAVE:CH{channel}:ARB:STOP").ok();
-        if command == stop_command.as_bytes() {
-            return Some(UsbIntent::ArbStop(channel - 1));
-        }
+            .ok(),
+            None => response.write_str("NONE\r\n").ok(),
+        };
+        return finish(out, &response);
     }
     match parse_arb_data(command) {
         Ok(Some(chunk)) => return Some(UsbIntent::ArbData(chunk)),
@@ -634,6 +728,101 @@ mod tests {
 
         let (intent, _) = dispatch(b"SOUR:WAVE:CH5:ARB:STOP", &state, &diagnostics);
         assert_eq!(intent, Some(UsbIntent::ArbStop(4)));
+    }
+
+    #[test]
+    fn builtin_awg_commands_produce_typed_intents() {
+        let diagnostics = DiagnosticsSnapshot::default();
+        let (intent, _) = dispatch(
+            b"SOUR:WAVE:CH4:FUNC SIN,60000,50,1000,5000",
+            &state(),
+            &diagnostics,
+        );
+        assert_eq!(
+            intent,
+            Some(UsbIntent::AwgConfigure(AwgConfig {
+                channel: 3,
+                waveform: AwgWaveform::Sine,
+                frequency_millihz: 60_000,
+                duty_percent: 50,
+                low_mv: 1_000,
+                high_mv: 5_000,
+            }))
+        );
+
+        let (intent, _) = dispatch(b"SOUR:WAVE:CH5:RUN", &state(), &diagnostics);
+        assert_eq!(intent, Some(UsbIntent::AwgRun(4)));
+        let (intent, _) = dispatch(b"SOUR:WAVE:CH4:STOP", &state(), &diagnostics);
+        assert_eq!(intent, Some(UsbIntent::AwgStop(3)));
+
+        // Malformed FUNC arguments are syntax errors, not intents.
+        let (intent, reply) = dispatch(
+            b"SOUR:WAVE:CH4:FUNC SAW,60000,50,1000,5000",
+            &state(),
+            &diagnostics,
+        );
+        assert!(intent.is_none());
+        assert_eq!(reply, "ERR:SYNTAX\r\n");
+        let (intent, reply) = dispatch(
+            b"SOUR:WAVE:CH4:FUNC SIN,60000,50,1000",
+            &state(),
+            &diagnostics,
+        );
+        assert!(intent.is_none());
+        assert_eq!(reply, "ERR:SYNTAX\r\n");
+    }
+
+    #[test]
+    fn builtin_awg_status_reports_only_the_owning_channel() {
+        let diagnostics = DiagnosticsSnapshot::default();
+        let mut state = state();
+        state.awg_source = AwgSource::Builtin;
+        state.awg.channel = 4;
+        state.awg_status = AwgStatus::Running;
+        let (_, reply) = dispatch(b"SOUR:WAVE:CH5:STAT?", &state, &diagnostics);
+        assert_eq!(reply, "RUNNING\r\n");
+        let (_, reply) = dispatch(b"SOUR:WAVE:CH4:STAT?", &state, &diagnostics);
+        assert_eq!(reply, "STOPPED\r\n");
+
+        // An arbitrary run does not leak into the builtin status view.
+        state.awg_source = AwgSource::Arbitrary;
+        state.arb_run.channel = 4;
+        let (_, reply) = dispatch(b"SOUR:WAVE:CH5:STAT?", &state, &diagnostics);
+        assert_eq!(reply, "STOPPED\r\n");
+    }
+
+    #[test]
+    fn wave_func_query_reports_the_on_device_configuration() {
+        let diagnostics = DiagnosticsSnapshot::default();
+        let mut state = state();
+        state.awg = AwgConfig {
+            channel: 4,
+            waveform: AwgWaveform::Triangle,
+            frequency_millihz: 2_500,
+            duty_percent: 50,
+            low_mv: 1_000,
+            high_mv: 12_000,
+        };
+        let (intent, reply) = dispatch(b"SOUR:WAVE:FUNC?", &state, &diagnostics);
+        assert!(intent.is_none());
+        assert_eq!(reply, "CH5,TRI,2500,50,1000,12000\r\n");
+    }
+
+    #[test]
+    fn pd_contract_query_reports_negotiated_position_or_none() {
+        let diagnostics = DiagnosticsSnapshot::default();
+        let mut state = state();
+        let (_, reply) = dispatch(b"SYST:PD:CONTRACT?", &state, &diagnostics);
+        assert_eq!(reply, "NONE\r\n");
+
+        state.pd_contract = Some(crate::pd::Contract {
+            source_position: 4,
+            millivolts: 20_000,
+            operating_milliamps: 5_000,
+            maximum_milliamps: 5_000,
+        });
+        let (_, reply) = dispatch(b"SYST:PD:CONTRACT?", &state, &diagnostics);
+        assert_eq!(reply, "4,20000,5000\r\n");
     }
 
     #[test]

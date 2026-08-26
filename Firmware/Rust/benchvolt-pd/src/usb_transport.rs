@@ -224,7 +224,8 @@ fn chip_serial() -> &'static str {
     const UID_BASE: usize = 0x1fff_f7ac;
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let serial = cortex_m::singleton!(: [u8; 12] = [0; 12]).unwrap();
-    let uid = |offset: usize| unsafe { core::ptr::read_volatile((UID_BASE + offset) as *const u32) };
+    let uid =
+        |offset: usize| unsafe { core::ptr::read_volatile((UID_BASE + offset) as *const u32) };
     let mut value = uid(0).wrapping_add(uid(8));
     let mut high = uid(4);
     for (index, byte) in serial.iter_mut().enumerate() {

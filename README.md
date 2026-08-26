@@ -36,8 +36,8 @@ Highlights:
 - **Protection.** Voltage/current sampled every 20 ms (temperature every 100 ms), with a 3-strike latching policy for current/voltage-window violations; invalid sensor readings fail immediately. USB-PD input overcurrent protection with a configurable sink limit.
 - **Bounded voltage slew.** Live CH4/CH5 voltage edits slew the physical drive in verified 200 mV steps, with protection active throughout.
 - **CV/CC modes on CH4/CH5.** Digital constant-current loops with a compliance-voltage ceiling; CC state is indicated on the overview and detail screens.
-- **Remote control.** USB CDC SCPI-style command set (`*IDN?`, `MEAS:CHn?`, `OUTP:CHn ON/OFF`, `SOUR:CURR`, `SOUR:MODE`, protection/diagnostic queries, `JUMP:BOOTLOADER`, and more). Output commands acknowledge only after the hardware transition actually completes.
-- **AWG.** Square, triangle, ramp, and sine waveforms on CH4/CH5 from a 2 kHz scheduler — square to 125 Hz, other shapes to 120 Hz — plus a desktop-compatible arbitrary-waveform upload (up to 1024 validated points).
+- **Remote control.** USB CDC SCPI-style command set (`*IDN?`, `MEAS:CHn?`, `OUTP:CHn ON/OFF`, `SOUR:CURR`, `SOUR:MODE`, waveform control, protection/diagnostic queries, `JUMP:BOOTLOADER`, and more). Output commands acknowledge only after the hardware transition actually completes. Full reference: [SCPI interface documentation](Docs/scpi-interface.md).
+- **AWG.** Square, triangle, ramp, and sine waveforms on CH4/CH5 from a 2 kHz scheduler — square to 125 Hz, other shapes to 120 Hz — controllable from the front panel or over USB (`SOUR:WAVE:CHn:FUNC`/`RUN`/`STOP`), plus a desktop-compatible arbitrary-waveform upload (up to 1024 validated points).
 - **Persistence.** Versioned, CRC-checked append-only settings journal in a reserved flash page (current limits, setpoints, modes, PD limit, units), three profile slots, and safe deferred compaction. Torn or corrupt records are ignored.
 - **UI.** Rotary-encoder-driven menu system with overview, per-channel detail, AWG, settings, system, help, and USB-PD input screens; encoder acceleration; coalesced detent handling so display work never drops a quick spin.
 - **Bootloader compatibility.** Links at `0x08008000` within the 92 KiB application partition; the update path cannot touch the bootloader, settings page, or boot-metadata page. The boot seal written by the bootloader stays valid across power interruptions, so the device always returns to the application; `JUMP:BOOTLOADER` (or SWD) is the way back into the bootloader.
@@ -61,8 +61,9 @@ the channel is in constant-current regulation.
 
 ![AWG screen](Images/firmware/awg.png)
 
-The arbitrary waveform generator configured for a 60 Hz sine on CH5, with live
-RMS current and average power measured at the load.
+The arbitrary waveform generator configured for a 60 Hz sine on CH5. While a
+waveform runs, the firmware keeps the loop dedicated to the 2 kHz sampler —
+display updates and background monitoring are suspended for waveform purity.
 
 ![Menu flow animation](Images/firmware/menu_flow.gif)
 

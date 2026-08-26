@@ -1006,16 +1006,9 @@ where
                 Rgb565::new(8, 16, 16),
             )
             .ok();
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(198, 27), Size::new(1, 143)),
-                Rgb565::new(8, 16, 16),
-            )
-            .ok();
         for index in 0..8 {
             self.draw_awg_row(state, index);
         }
-        self.draw_awg_load_panel(state);
     }
 
     fn draw_awg_row(&mut self, state: &AppState, index: usize) {
@@ -1150,112 +1143,6 @@ where
         .ok();
     }
 
-    fn draw_awg_load_panel(&mut self, state: &AppState) {
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(202, 29), Size::new(118, 140)),
-                Rgb565::BLACK,
-            )
-            .ok();
-        self.draw_awg_load_heading(state);
-        Text::with_baseline(
-            "CURRENT RMS",
-            Point::new(205, 52),
-            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::new(18, 36, 24)),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-        Text::with_baseline(
-            "POWER AVG",
-            Point::new(205, 101),
-            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::new(18, 36, 24)),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-        self.draw_awg_load_current(state);
-        self.draw_awg_load_power(state);
-    }
-
-    fn draw_awg_load_heading(&mut self, state: &AppState) {
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(202, 29), Size::new(118, 18)),
-                Rgb565::BLACK,
-            )
-            .ok();
-        let channel = benchvolt_pd::view_projection::load_channel_number(state);
-        let mut heading: String<32> = String::new();
-        write!(&mut heading, "CH{} LOAD", channel).ok();
-        Text::with_baseline(
-            heading.as_str(),
-            Point::new(205, 32),
-            MonoTextStyle::new(&FONT_8X13_BOLD, Rgb565::CYAN),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn draw_awg_load_current(&mut self, state: &AppState) {
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(202, 64), Size::new(118, 22)),
-                Rgb565::BLACK,
-            )
-            .ok();
-        let mut current: String<32> = String::new();
-        if state.awg_load.valid {
-            write!(
-                &mut current,
-                "{}.{:03} A",
-                state.awg_load.milliamps_rms / 1_000,
-                state.awg_load.milliamps_rms % 1_000
-            )
-            .ok();
-        } else {
-            current.push_str("-.--- A").ok();
-        }
-        Text::with_baseline(
-            current.as_str(),
-            Point::new(205, 65),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
-    fn draw_awg_load_power(&mut self, state: &AppState) {
-        self.display
-            .fill_solid(
-                &Rectangle::new(Point::new(202, 113), Size::new(118, 22)),
-                Rgb565::BLACK,
-            )
-            .ok();
-        let mut power: String<32> = String::new();
-        if state.awg_load.valid {
-            write!(
-                &mut power,
-                "{}.{:02} W",
-                state.awg_load.milliwatts_average / 1_000,
-                state.awg_load.milliwatts_average % 1_000 / 10
-            )
-            .ok();
-        } else {
-            power.push_str("--.-- W").ok();
-        }
-        Text::with_baseline(
-            power.as_str(),
-            Point::new(205, 114),
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
-            Baseline::Top,
-        )
-        .draw(&mut self.display)
-        .ok();
-    }
-
     fn draw_system(&mut self, state: &AppState) {
         self.draw_menu("System", &["Back"], state);
         Text::with_baseline(
@@ -1350,15 +1237,6 @@ where
                     } else if damage.values & (1 << index) != 0 {
                         self.draw_awg_value(new, index);
                     }
-                }
-                if damage.load_heading {
-                    self.draw_awg_load_heading(new);
-                }
-                if damage.load_current {
-                    self.draw_awg_load_current(new);
-                }
-                if damage.load_power {
-                    self.draw_awg_load_power(new);
                 }
             }
             Screen::Settings => {

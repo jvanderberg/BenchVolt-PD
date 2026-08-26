@@ -46,14 +46,13 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
 # --- Waveform / ARB Settings ---
-MIN_WAVE_FREQ_HZ = 1
-MAX_WAVE_FREQ_HZ = 1000
-MAX_WAVE_FREQ_HZ_SQUARE = 1000
-MAX_WAVE_FREQ_HZ_OTHER = 500
+# Standard waveforms run on the firmware's built-in AWG engine, so the limits
+# here are the same ones the on-device UI enforces: 125 Hz for square,
+# 120 Hz for triangle/ramp/sine, 0.1 Hz minimum.
+MIN_WAVE_FREQ_HZ = 0.1
+MAX_WAVE_FREQ_HZ_SQUARE = 125
+MAX_WAVE_FREQ_HZ_OTHER = 120
 ARB_MAX_POINTS = 1024
-AUTO_ARB_MIN_DWELL_TICKS = 1
-AUTO_ARB_MULTIPLIER = 0.5
-AUTO_ARB_REPETITION = 0
 
 
 class BenchVoltUI(ctk.CTk):
@@ -705,9 +704,19 @@ class BenchVoltUI(ctk.CTk):
             master_switch.configure(text="OUTPUT ON" if state else "OUTPUT OFF")
             if getattr(self, 'syncing_outputs', False):
                 return
-            self.output_sync_grace_until[ch_num - 1] = time.time() + 1.0
-            # Send command to hardware
-            self.remote.set_output(ch_num, state)
+            if mode_switch.get() == "Waveform Gen.":
+                # In waveform mode the master switch starts/stops the
+                # generator itself; a start can take a few seconds to
+                # sequence, so widen the poll-sync grace window.
+                self.output_sync_grace_until[ch_num - 1] = time.time() + 4.0
+                if state:
+                    send_final_data()
+                else:
+                    stop_waveform()
+            else:
+                self.output_sync_grace_until[ch_num - 1] = time.time() + 1.0
+                # Send command to hardware
+                self.remote.set_output(ch_num, state)
 
         master_switch.configure(command=toggle_output)
 
@@ -788,7 +797,7 @@ class BenchVoltUI(ctk.CTk):
         wave_ctrls = ctk.CTkFrame(wave_panel, fg_color="transparent")
         wave_ctrls.grid(row=0, column=0, sticky="ns", padx=20, pady=20)
 
-        wave_type = ctk.CTkOptionMenu(wave_ctrls, values=["Square", "Triangle", "Ramp", "Custom ARB"],
+        wave_type = ctk.CTkOptionMenu(wave_ctrls, values=["Square", "Triangle", "Ramp", "Sine", "Custom ARB"],
                                       width=150)
         wave_type.pack(pady=5)
 
@@ -797,6 +806,12 @@ class BenchVoltUI(ctk.CTk):
         freq_entry = ctk.CTkEntry(wave_ctrls, width=150, validate="key", validatecommand=f_cmd)
         freq_entry.insert(0, "100")
         freq_entry.pack(pady=5)
+
+        duty_label = ctk.CTkLabel(wave_ctrls, text="Duty Cycle (1-99 %):")
+        duty_label.pack(anchor="w", pady=(5, 0))
+        duty_entry = ctk.CTkEntry(wave_ctrls, width=150, validate="key", validatecommand=f_cmd)
+        duty_entry.insert(0, "50")
+        duty_entry.pack(pady=5)
 
         limit_frame = ctk.CTkFrame(wave_ctrls, fg_color="transparent")
         limit_frame.pack(fill="x", pady=5)
@@ -816,7 +831,7 @@ class BenchVoltUI(ctk.CTk):
         w_vmax_entry.pack(side="left")
 
         # Store channel-specific inputs
-        local_wave_inputs = [freq_entry, w_vmin_entry, w_vmax_entry]
+        local_wave_inputs = [freq_entry, duty_entry, w_vmin_entry, w_vmax_entry]
 
         # --- ARB SPECIAL AREA ---
         arb_frame = ctk.CTkFrame(wave_ctrls, fg_color="transparent")
@@ -833,7 +848,19 @@ class BenchVoltUI(ctk.CTk):
 
         apply_btn = ctk.CTkButton(wave_panel, text="🚀 SEND ", fg_color="#27ae60", hover_color="#219150",
                                   font=ctk.CTkFont(weight="bold"))
-        apply_btn.grid(row=1, column=0, columnspan=2, pady=20, padx=20, sticky="ew")
+        apply_btn.grid(row=1, column=0, pady=(20, 0), padx=(20, 5), sticky="ew")
+        stop_btn = ctk.CTkButton(wave_panel, text="⏹ STOP", fg_color="#c0392b", hover_color="#992d22",
+                                 font=ctk.CTkFont(weight="bold"))
+        stop_btn.grid(row=1, column=1, pady=(20, 0), padx=(5, 20), sticky="ew")
+
+        # Always-visible engine status line (the ARB file label lives inside
+        # the ARB frame, which is hidden for standard waveforms).
+        wave_status_label = ctk.CTkLabel(wave_panel, text="", font=ctk.CTkFont(size=12),
+                                         text_color="#777777")
+        wave_status_label.grid(row=2, column=0, columnspan=2, pady=(4, 12), padx=20, sticky="w")
+        if not hasattr(self, 'wave_status_labels'):
+            self.wave_status_labels = {}
+        self.wave_status_labels[4 if row == 0 else 5] = wave_status_label
 
         # Graph Area
         graph_frame = ctk.CTkFrame(wave_panel)
@@ -916,17 +943,18 @@ class BenchVoltUI(ctk.CTk):
         def get_wave_max_freq(w_mode):
             if w_mode == "Square":
                 return MAX_WAVE_FREQ_HZ_SQUARE
-            elif w_mode == "Triangle" or w_mode == "Ramp":
-                return MAX_WAVE_FREQ_HZ_OTHER
-            return MAX_WAVE_FREQ_HZ_SQUARE
+            return MAX_WAVE_FREQ_HZ_OTHER
 
         def update_frequency_limit_for_waveform(w_mode):
+            if w_mode == "Custom ARB":
+                # Custom ARB timing comes from the CSV dwell values, not this field.
+                freq_label.configure(text="Timing: CSV dwell values")
+                return
             max_freq = get_wave_max_freq(w_mode)
             freq_label.configure(text=f"Frequency ({MIN_WAVE_FREQ_HZ}-{max_freq} Hz):")
-            if w_mode != "Custom ARB":
-                clamped_freq = clamp_value(freq_entry.get(), MIN_WAVE_FREQ_HZ, max_freq)
-                freq_entry.delete(0, "end")
-                freq_entry.insert(0, f"{clamped_freq:.2f}")
+            clamped_freq = clamp_value(freq_entry.get(), MIN_WAVE_FREQ_HZ, max_freq)
+            freq_entry.delete(0, "end")
+            freq_entry.insert(0, f"{clamped_freq:.2f}")
 
         # Call this function when input boxes lose focus (FocusOut)
         def on_focus_out(event, entry, v_min, v_max):
@@ -967,13 +995,17 @@ class BenchVoltUI(ctk.CTk):
                 t = np.linspace(0, 2 / f_val if f_val > 0 else 0.1, 500)
 
                 if w_type == "Square":
-                    y = offset + amp * np.sign(np.sin(2 * np.pi * f_val * t))
+                    duty = clamp_value(duty_entry.get(), 1, 99) / 100.0 if duty_entry.get() else 0.5
+                    phase = f_val * t - np.floor(f_val * t)
+                    y = np.where(phase < duty, v2, v1)
                 elif w_type == "Triangle":
                     # Triangle wave formula: 2/pi * arcsin(sin(2*pi*f*t))
                     y = offset + amp * (2 / np.pi * np.arcsin(np.sin(2 * np.pi * f_val * t)))
                 elif w_type == "Ramp":
                     # Ramp (Sawtooth): 2 * (f*t - floor(0.5 + f*t))
                     y = offset + amp * (2 * (f_val * t - np.floor(0.5 + f_val * t)))
+                elif w_type == "Sine":
+                    y = offset + amp * np.sin(2 * np.pi * f_val * t)
 
                 ax.plot(t, y, color='#3498db', linewidth=2)
                 ax.set_ylim(min_v - 0.5, max_v + 0.5)
@@ -981,22 +1013,50 @@ class BenchVoltUI(ctk.CTk):
 
             canvas.draw()
 
+        def set_wave_status(ch, text, color):
+            if hasattr(self, 'wave_status_labels') and ch in self.wave_status_labels:
+                self.wave_status_labels[ch].configure(text=text, text_color=color)
+            if hasattr(self, 'wave_status_cache'):
+                # Manual updates supersede the background status poll.
+                self.wave_status_cache.pop(ch, None)
+            self.update()
+
+        def force_switch_off():
+            self.syncing_outputs = True
+            try:
+                master_switch.deselect()
+                master_switch.configure(text="OUTPUT OFF")
+            finally:
+                self.syncing_outputs = False
+
         def send_final_data():
             if not self.remote.is_connected: return
 
             w_mode = wave_type.get()
             ch = 4 if row == 0 else 5
+            other = 5 if ch == 4 else 4
+
+            # The AWG engine is channel-exclusive (one waveform at a time,
+            # matching the on-device UI). Refuse to start while the other
+            # channel owns a run instead of silently taking it over.
+            for probe in (f"SOUR:WAVE:CH{other}:STAT?", f"SOUR:WAVE:CH{other}:ARB:STAT?"):
+                status = self.remote.query(probe)
+                if status and status.split(',')[0] in ("RUNNING", "STARTING"):
+                    set_wave_status(ch, f"⚠ AWG busy on CH{other} — stop it first", "#e67e22")
+                    force_switch_off()
+                    return
 
             # --- CRITICAL DISTINCTION HERE ---
             if w_mode == "Custom ARB":
                 # If ARB selected, route to binary transfer function
                 self.send_binary_arb(ch)
             else:
-                # Generate Square/Triangle/Ramp in Python as ARB-compatible points,
-                # then upload them with the existing ARB transfer path.
+                # Standard waveforms run on the firmware's built-in AWG engine —
+                # the same generator the front panel uses.
                 final_vmin = clamp_value(w_vmin_entry.get(), min_v, max_v)
                 final_vmax = clamp_value(w_vmax_entry.get(), min_v, max_v)
                 final_freq = clamp_value(freq_entry.get(), MIN_WAVE_FREQ_HZ, get_wave_max_freq(w_mode))
+                final_duty = int(clamp_value(duty_entry.get(), 1, 99))
 
                 if final_vmin > final_vmax:
                     final_vmin, final_vmax = final_vmax, final_vmin
@@ -1008,32 +1068,36 @@ class BenchVoltUI(ctk.CTk):
                 w_vmax_entry.insert(0, f"{final_vmax:.2f}")
                 freq_entry.delete(0, "end")
                 freq_entry.insert(0, f"{final_freq:.2f}")
+                duty_entry.delete(0, "end")
+                duty_entry.insert(0, str(final_duty))
 
-                try:
-                    actual_freq, actual_period_ms, point_dwell = self.generate_standard_waveform_as_arb(
-                        w_mode, final_freq, final_vmin, final_vmax
-                    )
-                except ValueError as e:
-                    print(f"TX > AUTO ARB ERROR: {e}")
-                    if hasattr(self, 'arb_status_labels') and ch in self.arb_status_labels:
-                        self.arb_status_labels[ch].configure(text=f"❌ {e}", text_color="#e74c3c")
-                        self.update()
+                # A previous run on this channel blocks reconfiguration.
+                self.remote.stop_wave(ch)
+                self.remote.send_scpi(f"SOUR:WAVE:CH{ch}:ARB:STOP")
+
+                reply = self.remote.configure_wave(ch, w_mode, final_freq, final_duty,
+                                                   final_vmin, final_vmax)
+                if reply != "OK":
+                    set_wave_status(ch, f"❌ Configure failed: {reply}", "#e74c3c")
+                    force_switch_off()
                     return
 
-                if hasattr(self, 'arb_status_labels') and ch in self.arb_status_labels:
-                    self.arb_status_labels[ch].configure(
-                        text=f"Generated {w_mode}: {len(self.current_arb_data)} Pts | {actual_freq:.2f}Hz",
-                        text_color="#f39c12"
-                    )
-                    self.update()
+                set_wave_status(ch, f"Starting {w_mode} @ {final_freq:.2f} Hz...", "#f39c12")
+                ack = self.remote.run_wave(ch)
+                if ack and ack.startswith("OK"):
+                    set_wave_status(ch, f"✔ {w_mode} running @ {final_freq:.2f} Hz", "#2ecc71")
+                else:
+                    reason = "device faulted" if ack and "HARDWARE" in ack else (ack or "no response")
+                    set_wave_status(ch, f"❌ Start failed: {reason}", "#e74c3c")
+                    force_switch_off()
 
-                self.send_binary_arb(ch)
-                print(
-                    f"TX > AUTO ARB CH{ch}: {w_mode.upper()}, "
-                    f"REQ={final_freq:.3f}Hz, ACT={actual_freq:.3f}Hz, "
-                    f"PERIOD={actual_period_ms:.1f}ms, PTS={len(self.current_arb_data)}, "
-                    f"DWELL={point_dwell}, M={AUTO_ARB_MULTIPLIER}, R={AUTO_ARB_REPETITION}"
-                )
+        def stop_waveform():
+            if not self.remote.is_connected: return
+            ch = 4 if row == 0 else 5
+            # Stop whichever engine owns the channel; both replies are OK when idle.
+            self.remote.stop_wave(ch)
+            self.remote.send_scpi(f"SOUR:WAVE:CH{ch}:ARB:STOP")
+            set_wave_status(ch, "⏹ Stopped", "#aaaaaa")
 
         def check_arb_visibility(choice):
             update_frequency_limit_for_waveform(choice)
@@ -1043,6 +1107,9 @@ class BenchVoltUI(ctk.CTk):
             else:
                 arb_frame.pack_forget()
                 for w in local_wave_inputs: w.configure(state="normal", fg_color="#333333")
+                # Duty cycle only applies to square waves.
+                if choice != "Square":
+                    duty_entry.configure(state="disabled", fg_color="#1a1a1a")
             update_plot()
 
         def toggle_wave_panel(value):
@@ -1066,6 +1133,8 @@ class BenchVoltUI(ctk.CTk):
         wave_type.configure(command=check_arb_visibility)
         mode_switch.configure(command=toggle_wave_panel)
         apply_btn.configure(command=send_final_data)
+        stop_btn.configure(command=stop_waveform)
+        duty_entry.bind("<KeyRelease>", lambda e: update_plot())
         def on_slider_change(v):
             v_entry.configure(text_color="#4cb5f5")
             v_entry.delete(0, "end")
@@ -1081,144 +1150,11 @@ class BenchVoltUI(ctk.CTk):
         # Initial graph state
         update_plot()
 
-        return {"type": "adj", "switch": master_switch, "i_lbl": i_lbl, "v_read_lbl": v_read_lbl, "ilim_lbl": ilim_lbl, "ilim_entry": curr_entry, "v_set_entry": v_entry, "slider": slider}
-
-    def generate_standard_waveform_as_arb(self, wave_mode, freq_hz, v_min, v_max):
-        """Generate Square/Triangle/Ramp as firmware-compatible ARB points.
-
-        Rust firmware timing model (the command format remains C-compatible):
-            target_delay = dwell * multiplier milliseconds
-
-        The Rust extension accepts multiplier 0.5, exposing the dedicated 2 kHz
-        scheduler while legacy integer multipliers retain their millisecond meaning.
-        """
-        if wave_mode == "Square":
-            max_freq_hz = MAX_WAVE_FREQ_HZ_SQUARE
-        elif wave_mode == "Triangle" or wave_mode == "Ramp":
-            max_freq_hz = MAX_WAVE_FREQ_HZ_OTHER
-        else:
-            max_freq_hz = MAX_WAVE_FREQ_HZ_SQUARE
-
-        freq_hz = max(MIN_WAVE_FREQ_HZ, min(float(freq_hz), max_freq_hz))
-        period_ms = 1000.0 / freq_hz
-
-        v_min = float(v_min)
-        v_max = float(v_max)
-        if v_min > v_max:
-            v_min, v_max = v_max, v_min
-
-        def choose_point_count_and_dwell(period_ms, min_points, require_even=False):
-            max_possible_points = int(period_ms // (AUTO_ARB_MIN_DWELL_TICKS * AUTO_ARB_MULTIPLIER))
-            max_possible_points = min(max_possible_points, ARB_MAX_POINTS)
-
-            if max_possible_points < min_points:
-                return None, None, None
-
-            best = None
-
-            for point_count in range(min_points, max_possible_points + 1):
-                if require_even and (point_count % 2 != 0):
-                    continue
-
-                dwell_ticks = int(round(period_ms / (point_count * AUTO_ARB_MULTIPLIER)))
-                if dwell_ticks < AUTO_ARB_MIN_DWELL_TICKS:
-                    continue
-                if dwell_ticks > 65535:
-                    continue
-
-                actual_period_ms = point_count * dwell_ticks * AUTO_ARB_MULTIPLIER
-                timing_error_ms = abs(actual_period_ms - period_ms)
-
-                # Primary: lowest timing error.
-                # Secondary: more points for smoother waveform.
-                score = (timing_error_ms, -point_count)
-
-                if best is None or score < best[0]:
-                    best = (score, point_count, dwell_ticks, actual_period_ms)
-
-            if best is None:
-                return None, None, None
-
-            _, point_count, dwell_ticks, actual_period_ms = best
-            return point_count, dwell_ticks, actual_period_ms
-
-        points = []
-        selected_dwell = 0
-        actual_period_ms = 0.0
-
-        if wave_mode == "Square":
-            # Square needs only two points: HIGH and LOW.
-            # At 125 Hz: period=8 ms, half-period=4 ms.
-            dwell_ticks = int(round((period_ms / 2.0) / AUTO_ARB_MULTIPLIER))
-            if dwell_ticks < AUTO_ARB_MIN_DWELL_TICKS:
-                raise ValueError(
-                    f"Square cannot be generated at {freq_hz:.2f} Hz with minimum dwell "
-                    f"{AUTO_ARB_MIN_DWELL_TICKS} ticks. Try lower frequency."
-                )
-            if dwell_ticks > 65535:
-                raise ValueError("Dwell value is too large for firmware uint16_t buffer.")
-
-            points = [
-                (v_max, dwell_ticks),
-                (v_min, dwell_ticks),
-            ]
-            selected_dwell = dwell_ticks
-            actual_period_ms = 2 * dwell_ticks * AUTO_ARB_MULTIPLIER
-
-        elif wave_mode == "Triangle":
-            # Triangle needs an even number of points: half rising, half falling.
-            point_count, dwell_ticks, actual_period_ms = choose_point_count_and_dwell(
-                period_ms=period_ms,
-                min_points=4,
-                require_even=True
-            )
-
-            if point_count is None:
-                raise ValueError(
-                    f"Triangle cannot be generated at {freq_hz:.2f} Hz with minimum dwell "
-                    f"{AUTO_ARB_MIN_DWELL_TICKS} ticks. Try lower frequency."
-                )
-
-            half_count = point_count // 2
-            rising = np.linspace(v_min, v_max, half_count, endpoint=False)
-            falling = np.linspace(v_max, v_min, half_count, endpoint=False)
-            points = [(float(v), dwell_ticks) for v in np.concatenate((rising, falling))]
-            selected_dwell = dwell_ticks
-
-        elif wave_mode == "Ramp":
-            # Sawtooth ramp: rise from v_min to v_max, then jump back to v_min at wrap.
-            point_count, dwell_ticks, actual_period_ms = choose_point_count_and_dwell(
-                period_ms=period_ms,
-                min_points=4,
-                require_even=False
-            )
-
-            if point_count is None:
-                raise ValueError(
-                    f"Ramp cannot be generated at {freq_hz:.2f} Hz with minimum dwell "
-                    f"{AUTO_ARB_MIN_DWELL_TICKS} ticks. Try lower frequency."
-                )
-
-            ramp = np.linspace(v_min, v_max, point_count, endpoint=False)
-            points = [(float(v), dwell_ticks) for v in ramp]
-            selected_dwell = dwell_ticks
-
-        else:
-            raise ValueError(f"Unsupported waveform mode for auto ARB: {wave_mode}")
-
-        actual_freq_hz = 1000.0 / actual_period_ms if actual_period_ms > 0 else 0.0
-
-        self.current_arb_data = points
-        self.arb_params = (AUTO_ARB_MULTIPLIER, AUTO_ARB_REPETITION)
-
-        print(
-            f"AUTO ARB GENERATED: mode={wave_mode}, requested={freq_hz:.3f}Hz, "
-            f"actual={actual_freq_hz:.3f}Hz, period={actual_period_ms:.1f}ms, "
-            f"points={len(points)}, dwell={selected_dwell} ticks, "
-            f"multiplier={AUTO_ARB_MULTIPLIER}, repetition={AUTO_ARB_REPETITION}"
-        )
-
-        return actual_freq_hz, actual_period_ms, selected_dwell
+        return {"type": "adj", "switch": master_switch, "i_lbl": i_lbl, "v_read_lbl": v_read_lbl,
+                "ilim_lbl": ilim_lbl, "ilim_entry": curr_entry, "v_set_entry": v_entry, "slider": slider,
+                "wave_type": wave_type, "freq_entry": freq_entry, "duty_entry": duty_entry,
+                "vmin_entry": w_vmin_entry, "vmax_entry": w_vmax_entry,
+                "wave_refresh": lambda: check_arb_visibility(wave_type.get())}
 
     def send_binary_arb(self, channel_num):
         try:
@@ -1336,6 +1272,11 @@ class BenchVoltUI(ctk.CTk):
                     clean_info = build_info.replace("  ", " ")
                     self.fw_date_info.configure(text=clean_info)
 
+                # Auto-detect the source's PDOs and the negotiated contract,
+                # and pull the on-device waveform configuration into the panel.
+                self.update_pdo_dropdown()
+                self.sync_wave_config_from_device()
+
                 # 2. START BACKGROUND POLLING LOOP WHEN DONE
                 self.initial_vset_sync_done = False
                 self.running = True
@@ -1435,6 +1376,25 @@ class BenchVoltUI(ctk.CTk):
 
     def mock_data_loop(self):
         while self.running:
+            # AUTO-RECONNECT: if the connection dropped (unplug, device reset),
+            # keep retrying the last port until it comes back or the user
+            # disconnects explicitly (which stops this loop).
+            if not self.remote.is_connected:
+                self.after(0, lambda: self.status_indicator.configure(
+                    text="RECONNECTING...", text_color="#f39c12"))
+                if self.remote.try_reconnect():
+                    port = self.remote.last_port
+                    self.after(0, lambda p=port: self.status_indicator.configure(
+                        text=f"CONNECTED ({p})", text_color="#2ecc71"))
+                    # Re-sync setpoints, the PD contract, and the waveform
+                    # configuration after the drop.
+                    self.initial_vset_sync_done = False
+                    self.update_pdo_dropdown()
+                    self.sync_wave_config_from_device()
+                else:
+                    time.sleep(2.0)
+                    continue
+
             # SKIP POLLING IF PAUSE FLAG IS RAISED
             if self.remote.is_connected and not getattr(self, 'pause_polling', False):
                 try:
@@ -1471,6 +1431,15 @@ class BenchVoltUI(ctk.CTk):
                         else:
                             print(f"!!! Missing Packet Error: {len(parts)} parts found. Expected: 13")
 
+                    # Poll the waveform engine every ~1 s so a fault or stop on
+                    # the device is reflected in the GUI status line.
+                    self._wave_poll_counter = getattr(self, '_wave_poll_counter', 0) + 1
+                    if self._wave_poll_counter % 3 == 0:
+                        for ch in (4, 5):
+                            status = self.remote.get_wave_status(ch)
+                            if status:
+                                self.after(0, lambda c=ch, s=status: self._apply_wave_status(c, s))
+
                 except Exception as e:
                     pass
 
@@ -1481,16 +1450,75 @@ class BenchVoltUI(ctk.CTk):
         self.destroy()
 
     def update_pdo_dropdown(self):
-        """Fetches PDO list from device and updates UI Dropdown."""
+        """Fetches the PDO list and negotiated contract, then updates the
+        dropdown with the active PDO marked and pre-selected. Safe to call from
+        the polling thread: queries run here, UI updates are scheduled."""
         if not self.remote.is_connected:
             return
 
         raw_list = self.remote.query_pdo_list()
         if not raw_list:
             return
+        contract = self.remote.get_pd_contract()
+        self.after(0, lambda: self._apply_pdo_list(raw_list, contract))
 
+    def _apply_wave_status(self, ch, status):
+        """Reflects the device's waveform engine status in the GUI. Only
+        transitions are announced, so manual status text isn't clobbered."""
+        if not hasattr(self, 'wave_status_cache'):
+            self.wave_status_cache = {}
+        previous = self.wave_status_cache.get(ch)
+        if status == previous:
+            return
+        self.wave_status_cache[ch] = status
+        label = getattr(self, 'wave_status_labels', {}).get(ch)
+        if label is None:
+            return
+        if status == "FAULT":
+            label.configure(text="⚠ FAULT — output shut down (see device screen)",
+                            text_color="#e74c3c")
+        elif status == "RUNNING" and previous is not None:
+            # previous=None means a manual status line was just written (e.g.
+            # "Sine running @ 10 Hz"); keep it until the state actually moves.
+            label.configure(text="▶ Waveform running", text_color="#2ecc71")
+        elif status == "STOPPED" and previous in ("RUNNING", "STARTING", "STOPPING", "FAULT"):
+            label.configure(text="⏹ Stopped", text_color="#aaaaaa")
+
+    def sync_wave_config_from_device(self):
+        """Pulls the on-device AWG configuration — the single source of truth —
+        into the matching channel's waveform panel. Safe from any thread."""
+        config = self.remote.get_wave_config()
+        if config:
+            self.after(0, lambda: self._apply_wave_config(config))
+
+    def _apply_wave_config(self, config):
+        idx = config["channel"] - 1  # CH4 -> channels[3], CH5 -> channels[4]
+        if idx >= len(self.channels):
+            return
+        card = self.channels[idx]
+        if "wave_type" not in card:
+            return
+        # Don't clobber a Custom ARB selection — the device query only
+        # describes the built-in engine.
+        if card["wave_type"].get() != "Custom ARB":
+            card["wave_type"].set(config["mode"])
+        for key, value in (("freq_entry", f"{config['freq_hz']:.2f}"),
+                           ("duty_entry", str(config["duty"])),
+                           ("vmin_entry", f"{config['low_v']:.2f}"),
+                           ("vmax_entry", f"{config['high_v']:.2f}")):
+            entry = card[key]
+            previous_state = entry.cget("state")
+            entry.configure(state="normal")
+            entry.delete(0, "end")
+            entry.insert(0, value)
+            entry.configure(state=previous_state)
+        card["wave_refresh"]()
+
+    def _apply_pdo_list(self, raw_list, contract):
         dropdown_values = []
         self.current_pdo_data = {}  # Map data to send upon selection
+        active_entry = None
+        previous_selection = self.pdo_menu.get()
 
         for line in raw_list:
             # Incoming format: index,volt_mv,curr_ma,power_mw
@@ -1498,12 +1526,25 @@ class BenchVoltUI(ctk.CTk):
             if len(parts) == 4:
                 idx, v_mv, i_ma, p_mw = parts
                 display_str = f"PDO {idx}: {int(v_mv) / 1000}V | {int(i_ma) / 1000}A"
+                if contract is not None and int(v_mv) == contract[1]:
+                    display_str += " ● active"
+                    active_entry = display_str
                 dropdown_values.append(display_str)
                 self.current_pdo_data[display_str] = (v_mv, i_ma)
 
         if dropdown_values:
             self.pdo_menu.configure(values=dropdown_values)
-            self.pdo_menu.set(dropdown_values[0])
+            if active_entry:
+                self.pdo_menu.set(active_entry)
+            else:
+                # Contract unknown (e.g. older firmware): keep the user's pick
+                # if it still exists, ignoring any stale active marker.
+                previous = previous_selection.replace(" ● active", "")
+                match = next(
+                    (v for v in dropdown_values if v.replace(" ● active", "") == previous),
+                    None,
+                )
+                self.pdo_menu.set(match or dropdown_values[0])
 
     def set_selected_pdo(self):
         """Writes selected PDO to slot 3 (Active)."""

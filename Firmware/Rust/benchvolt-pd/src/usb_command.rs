@@ -1,5 +1,5 @@
 use crate::{
-    app::{AppState, AwgSource, AwgStatus, Fault, Measurement, RegulationMode},
+    app::{AppState, AwgConfig, AwgSource, AwgStatus, Fault, Measurement, RegulationMode},
     arb::{DataChunk as ArbDataChunk, Start as ArbStart},
     limits::{CH5_MAX_VOLTAGE_MV, CH5_MIN_VOLTAGE_MV},
     protocol::parse_milliunits,
@@ -107,6 +107,9 @@ pub enum UsbIntent {
     ArbData(ArbDataChunk),
     ArbStart(ArbStart),
     ArbStop(u8),
+    AwgConfigure(AwgConfig),
+    AwgRun(u8),
+    AwgStop(u8),
 }
 
 impl core::fmt::Write for Response {

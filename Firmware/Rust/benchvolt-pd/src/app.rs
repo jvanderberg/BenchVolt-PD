@@ -30,7 +30,7 @@ pub enum TemperatureUnit {
     Fahrenheit,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AwgWaveform {
     Square,
     Triangle,
@@ -71,7 +71,7 @@ pub struct ArbRunConfig {
     pub high_mv: u16,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AwgConfig {
     pub channel: u8,
     pub waveform: AwgWaveform,
@@ -388,6 +388,8 @@ pub enum Action {
     GlobalShutdownApplied,
     GlobalShutdownFailed,
     AdjustAwg(i8),
+    ConfigureAwg(AwgConfig),
+    RequestAwgStart,
     RequestArbStart {
         channel: u8,
         initial_mv: u16,
@@ -460,6 +462,14 @@ pub enum Action {
 pub struct AppReducer;
 
 impl AppReducer {
+    /// A remote waveform start pulls the panel to the AWG screen with the
+    /// Start/Stop row highlighted, so the physical stop control is in reach.
+    fn show_awg_screen(state: &mut AppState) {
+        state.screen = Screen::Awg;
+        state.menu_selection = 6;
+        state.focus = ControlFocus::None;
+    }
+
     fn enforce_invariants(mut state: AppState) -> AppState {
         if state.awg_status != AwgStatus::Running && state.awg_load.valid {
             state.awg_load = LoadMeasurement::INVALID;
@@ -851,6 +861,38 @@ impl Reducer for AppReducer {
                     }
                 }
             }
+            Action::ConfigureAwg(config) => {
+                let (minimum, maximum) = if config.channel == 3 {
+                    (500, 5_000)
+                } else if config.channel == 4 {
+                    (CH5_MIN_VOLTAGE_MV, CH5_MAX_VOLTAGE_MV)
+                } else {
+                    return Self::enforce_invariants(next);
+                };
+                if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault)
+                    || !(100..=config.waveform.max_frequency_millihz())
+                        .contains(&config.frequency_millihz)
+                    || !(1..=99).contains(&config.duty_percent)
+                    || !(minimum..=maximum).contains(&config.low_mv)
+                    || !(config.low_mv..=maximum).contains(&config.high_mv)
+                {
+                    false
+                } else {
+                    next.awg = config;
+                    true
+                }
+            }
+            Action::RequestAwgStart => {
+                if state.awg_status != AwgStatus::Stopped {
+                    false
+                } else {
+                    next.awg_source = AwgSource::Builtin;
+                    next.awg_editing = false;
+                    next.awg_status = AwgStatus::StartRequested;
+                    Self::show_awg_screen(&mut next);
+                    true
+                }
+            }
             Action::RequestArbStart {
                 channel,
                 initial_mv,
@@ -880,6 +922,7 @@ impl Reducer for AppReducer {
                     };
                     next.awg_editing = false;
                     next.awg_status = AwgStatus::StartRequested;
+                    Self::show_awg_screen(&mut next);
                     true
                 }
             }
@@ -1875,6 +1918,8 @@ mod tests {
         );
         assert!(requested.awg_source == AwgSource::Arbitrary);
         assert!(requested.awg_status == AwgStatus::StartRequested);
+        assert!(requested.screen == Screen::Awg);
+        assert_eq!(requested.menu_selection, 6);
         assert_eq!(requested.active_awg_channel(), 4);
         assert_eq!(requested.active_awg_initial_mv(), 900);
         assert_eq!(requested.active_awg_bounds(), (800, 2_000));
@@ -1897,6 +1942,103 @@ mod tests {
         let ui_toggle = AppReducer::reduce(&running, Action::ToggleOutputRequested { channel: 0 });
         assert!(ui_toggle.awg_status == AwgStatus::StopRequested);
         assert!(!ui_toggle.channels[0].requested_enabled);
+    }
+
+    #[test]
+    fn remote_awg_configure_validates_and_applies() {
+        let state = AppState::new(true, None);
+        let config = AwgConfig {
+            channel: 4,
+            waveform: AwgWaveform::Sine,
+            frequency_millihz: 60_000,
+            duty_percent: 50,
+            low_mv: 1_000,
+            high_mv: 12_000,
+        };
+        let configured = AppReducer::reduce(&state, Action::ConfigureAwg(config));
+        assert!(configured.awg == config);
+
+        // Out-of-range fields leave the configuration untouched.
+        for bad in [
+            AwgConfig {
+                frequency_millihz: 125_000,
+                ..config
+            },
+            AwgConfig {
+                frequency_millihz: 0,
+                ..config
+            },
+            AwgConfig {
+                duty_percent: 0,
+                ..config
+            },
+            AwgConfig {
+                low_mv: 700,
+                ..config
+            },
+            AwgConfig {
+                high_mv: 22_100,
+                ..config
+            },
+            AwgConfig {
+                low_mv: 5_000,
+                high_mv: 4_000,
+                ..config
+            },
+            AwgConfig {
+                channel: 2,
+                ..config
+            },
+        ] {
+            let rejected = AppReducer::reduce(&configured, Action::ConfigureAwg(bad));
+            assert!(rejected.awg == config);
+        }
+
+        // Square accepts its slightly higher 125 Hz ceiling; CH4 bounds apply.
+        let square = AwgConfig {
+            channel: 3,
+            waveform: AwgWaveform::Square,
+            frequency_millihz: 125_000,
+            duty_percent: 25,
+            low_mv: 500,
+            high_mv: 5_000,
+        };
+        let configured = AppReducer::reduce(&state, Action::ConfigureAwg(square));
+        assert!(configured.awg == square);
+
+        // Reconfiguration is rejected while a run is active.
+        let mut running = configured;
+        running.awg_status = AwgStatus::Running;
+        let rejected = AppReducer::reduce(&running, Action::ConfigureAwg(config));
+        assert!(rejected.awg == square);
+    }
+
+    #[test]
+    fn remote_awg_start_mirrors_the_panel_start_semantics() {
+        let state = AppState::new(true, None);
+        let requested = AppReducer::reduce(&state, Action::RequestAwgStart);
+        assert!(requested.awg_source == AwgSource::Builtin);
+        assert!(requested.awg_status == AwgStatus::StartRequested);
+        assert_eq!(requested.active_awg_channel(), state.awg.channel);
+        // The panel follows a remote start to the AWG screen, landing on the
+        // Start/Stop row so the physical stop control is immediately usable.
+        assert!(requested.screen == Screen::Awg);
+        assert_eq!(requested.menu_selection, 6);
+
+        // A faulted engine requires an explicit stop acknowledgement first,
+        // and an active run cannot be restarted.
+        for status in [
+            AwgStatus::Fault,
+            AwgStatus::Running,
+            AwgStatus::StartRequested,
+            AwgStatus::Starting,
+            AwgStatus::StopRequested,
+        ] {
+            let mut busy = state;
+            busy.awg_status = status;
+            let unchanged = AppReducer::reduce(&busy, Action::RequestAwgStart);
+            assert!(unchanged.awg_status == status);
+        }
     }
 
     #[test]

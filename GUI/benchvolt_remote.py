@@ -8,6 +8,7 @@ class BenchVoltRemote:
     def __init__(self):
         self.ser = None
         self.is_connected = False
+        self.last_port = None
         # Use an RLock to prevent deadlocks during nested calls
         self.lock = threading.RLock()
 
@@ -17,10 +18,33 @@ class BenchVoltRemote:
             # Use a low timeout to prevent UI freezing during serial operations
             self.ser = serial.Serial(port, baudrate, timeout=0.1, exclusive=True)
             self.is_connected = True
+            self.last_port = port
             return True
         except Exception as e:
             print(f"Connection Error: {e}")
             return False
+
+    def try_reconnect(self):
+        """Attempts to reopen the last known port after a dropped connection."""
+        if self.is_connected or not self.last_port:
+            return False
+        with self.lock:
+            try:
+                if self.ser and self.ser.is_open:
+                    self.ser.close()
+            except Exception:
+                pass
+            try:
+                self.ser = serial.Serial(self.last_port, 115200, timeout=0.1, exclusive=True)
+                self.is_connected = True
+            except Exception:
+                return False
+        # Prove the device is actually responsive, not just enumerated.
+        if self.query("*IDN?"):
+            print(f"Reconnected to {self.last_port}")
+            return True
+        self.disconnect()
+        return False
 
     def disconnect(self):
         """Closes the serial connection safely."""
@@ -86,6 +110,88 @@ class BenchVoltRemote:
             return float(response)
         except (ValueError, TypeError):
             return 0.0
+
+    # --- Built-in waveform engine (SOUR:WAVE:CHn:...) ---
+    WAVE_FUNC_CODES = {"Square": "SQU", "Triangle": "TRI", "Ramp": "RAMP", "Sine": "SIN"}
+
+    def configure_wave(self, channel, wave_mode, freq_hz, duty_percent, low_v, high_v):
+        """Configures the on-device waveform engine. Returns the OK/ERR reply."""
+        func = self.WAVE_FUNC_CODES[wave_mode]
+        freq_millihz = int(round(float(freq_hz) * 1000))
+        low_mv = int(round(float(low_v) * 1000))
+        high_mv = int(round(float(high_v) * 1000))
+        return self.query(
+            f"SOUR:WAVE:CH{channel}:FUNC {func},{freq_millihz},{int(duty_percent)},{low_mv},{high_mv}"
+        )
+
+    def run_wave(self, channel, timeout=5.0):
+        """Starts the configured waveform. The firmware acknowledges only after
+        the output is actually running, so wait beyond the usual query window."""
+        if not self.is_connected:
+            return None
+        with self.lock:
+            try:
+                self.ser.reset_input_buffer()
+                command = f"SOUR:WAVE:CH{channel}:RUN"
+                print(f"TX > {command}")
+                self.ser.write(f"{command}\n".encode('ascii'))
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    line = self.ser.readline().decode('ascii', errors='ignore').strip()
+                    if "OK" in line or "ERR" in line:
+                        return line
+            except Exception as e:
+                print(f"Wave Start Error: Device communication was lost! ({e})")
+                self.is_connected = False
+                return None
+        # No ack within the window — ask the engine directly so a late fault
+        # (or a late success) is still reported instead of silently lost.
+        status = self.get_wave_status(channel)
+        if status:
+            if status.startswith("RUNNING"):
+                return "OK:LATE"
+            if status.startswith("FAULT"):
+                return "ERR:HARDWARE"
+        return None
+
+    def stop_wave(self, channel):
+        """Stops a running built-in waveform. Returns the OK/ERR reply."""
+        return self.query(f"SOUR:WAVE:CH{channel}:STOP")
+
+    def get_wave_status(self, channel):
+        """Returns RUNNING/STARTING/STOPPING/FAULT/STOPPED for the engine."""
+        return self.query(f"SOUR:WAVE:CH{channel}:STAT?")
+
+    def get_wave_config(self):
+        """Reads the on-device AWG configuration (the single source of truth
+        for the waveform panel). Returns a dict or None."""
+        response = self.query("SOUR:WAVE:FUNC?")
+        if not response or not response.startswith("CH"):
+            return None
+        try:
+            fields = response.split(',')
+            names = {"SQU": "Square", "TRI": "Triangle", "RAMP": "Ramp", "SIN": "Sine"}
+            return {
+                "channel": int(fields[0][2:]),
+                "mode": names[fields[1]],
+                "freq_hz": int(fields[2]) / 1000.0,
+                "duty": int(fields[3]),
+                "low_v": int(fields[4]) / 1000.0,
+                "high_v": int(fields[5]) / 1000.0,
+            }
+        except (ValueError, KeyError, IndexError):
+            return None
+
+    def get_pd_contract(self):
+        """Returns the negotiated PD contract as (position, mv, ma), or None."""
+        response = self.query("SYST:PD:CONTRACT?")
+        if not response or response == "NONE":
+            return None
+        try:
+            position, mv, ma = (int(field) for field in response.split(','))
+            return position, mv, ma
+        except ValueError:
+            return None
 
     def query_pdo_list(self):
         """Sends the SOUR:PD:LIST? query and collects data between the response markers."""

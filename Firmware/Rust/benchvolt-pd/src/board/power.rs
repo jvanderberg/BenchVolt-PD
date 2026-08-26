@@ -323,16 +323,14 @@ where
             DriverOperation::Ch5OutputEnable(_) => 4,
             DriverOperation::ConfigureRail { .. } => 5,
             DriverOperation::VerifyRail { .. } | DriverOperation::VerifyOutput { .. } => 6,
+            DriverOperation::Ch5Enable(_) => 8,
             _ => 7,
         };
         let result = match operation {
             DriverOperation::ChannelGate { channel, enabled } => {
                 Self::channel_gate(channel, enabled)
             }
-            DriverOperation::RailEnable { rail, enabled } => {
-                Self::rail_enable(rail, enabled)?;
-                Ok(())
-            }
+            DriverOperation::RailEnable { rail, enabled } => Self::rail_enable(rail, enabled),
             DriverOperation::ConfigureRail { rail, millivolts } => {
                 let address = match rail {
                     Rail::Dc1 => Self::TPS_DC1,
@@ -346,8 +344,7 @@ where
                     SHARED_RAIL_LIMIT_MA,
                     true,
                     false,
-                )?;
-                Ok(())
+                )
             }
             DriverOperation::VerifyRail { rail } => Self::tps_verify(
                 &mut self.shared_bus,
@@ -378,10 +375,18 @@ where
             }
             DriverOperation::Ch5Enable(enabled) => {
                 Self::write_gpio('B', 7, enabled);
-                if Self::gpio_is_set('B', 7) != enabled {
-                    return Err(HardwareError::Verify);
+                // Unlike the bare load-switch gates, the TPS55289 EN net rises
+                // slower than a next-instruction IDR read. Allow a bounded
+                // settle before declaring the pin stuck at the wrong level.
+                let mut result = Err(HardwareError::Verify);
+                for _ in 0..10 {
+                    if Self::gpio_is_set('B', 7) == enabled {
+                        result = Ok(());
+                        break;
+                    }
+                    self.delay.delay_us(100u32);
                 }
-                Ok(())
+                result
             }
             DriverOperation::ConfigureCh5 {
                 millivolts,
@@ -397,15 +402,12 @@ where
                 forced_pwm,
             ),
             DriverOperation::ClearCh5Status => self.read_ch5_status().map(|_| ()),
-            DriverOperation::Ch5OutputEnable(enabled) => {
-                Self::tps_set_output(
-                    &mut self.adjustable_bus,
-                    &mut self.delay,
-                    Self::TPS_CH5,
-                    enabled,
-                )?;
-                Ok(())
-            }
+            DriverOperation::Ch5OutputEnable(enabled) => Self::tps_set_output(
+                &mut self.adjustable_bus,
+                &mut self.delay,
+                Self::TPS_CH5,
+                enabled,
+            ),
             DriverOperation::Ch5Voltage(millivolts) => Self::tps_set_voltage(
                 &mut self.adjustable_bus,
                 &mut self.delay,

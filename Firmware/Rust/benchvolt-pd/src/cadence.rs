@@ -23,7 +23,7 @@ impl ServiceCadence {
             temperature: tick(&mut self.temperature_ms, elapsed_ms, 100),
             measurement: tick(&mut self.measurement_ms, elapsed_ms, 20),
             display_measurement: tick(&mut self.display_measurement_ms, elapsed_ms, 200),
-            awg_load: tick(&mut self.awg_load_ms, elapsed_ms, 1_000),
+            awg_load: tick(&mut self.awg_load_ms, elapsed_ms, 2_000),
         }
     }
 
@@ -66,7 +66,7 @@ mod tests {
 
         let mut cadence = ServiceCadence::default();
         assert_eq!(
-            cadence.advance(1_000),
+            cadence.advance(2_000),
             Due {
                 temperature: true,
                 measurement: true,
@@ -74,8 +74,8 @@ mod tests {
                 awg_load: true,
             }
         );
-        assert!(cadence.healthy_for(1_000));
-        assert!(!cadence.healthy_for(1_001));
+        assert!(cadence.healthy_for(2_000));
+        assert!(!cadence.healthy_for(2_001));
     }
 
     #[test]
@@ -97,14 +97,14 @@ mod tests {
     #[test]
     fn invalid_awg_window_restarts_only_the_load_period() {
         let mut cadence = ServiceCadence::default();
-        let mut due = cadence.advance(1_000);
+        let mut due = cadence.advance(2_000);
         cadence.invalidate_awg_window(&mut due);
 
         assert!(due.temperature);
         assert!(due.measurement);
         assert!(due.display_measurement);
         assert!(!due.awg_load);
-        assert!(!cadence.advance(999).awg_load);
+        assert!(!cadence.advance(1_999).awg_load);
         assert!(cadence.advance(1).awg_load);
     }
 

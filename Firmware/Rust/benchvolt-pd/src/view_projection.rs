@@ -109,23 +109,6 @@ pub fn sink_projection(state: &AppState) -> SinkProjection {
 pub struct AwgDamage {
     pub rows: u8,
     pub values: u8,
-    pub load_heading: bool,
-    pub load_current: bool,
-    pub load_power: bool,
-}
-
-/// One-based channel number shown in the AWG "CHn LOAD" heading. Shared by
-/// the damage computation and the painter so they cannot drift.
-pub fn load_channel_number(state: &AppState) -> u8 {
-    load_channel_projection(state) + 1
-}
-
-fn load_channel_projection(state: &AppState) -> u8 {
-    if state.awg_status == crate::app::AwgStatus::Running {
-        state.active_awg_channel()
-    } else {
-        state.awg.channel
-    }
 }
 
 pub fn awg_damage(old: &AppState, new: &AppState) -> AwgDamage {
@@ -160,12 +143,6 @@ pub fn awg_damage(old: &AppState, new: &AppState) -> AwgDamage {
     if old.awg_status != new.awg_status {
         damage.values |= 1 << 6;
     }
-    damage.load_heading = load_channel_projection(old) != load_channel_projection(new);
-    damage.load_current = (old.awg_load.valid, old.awg_load.milliamps_rms)
-        != (new.awg_load.valid, new.awg_load.milliamps_rms);
-    damage.load_power = (old.awg_load.valid, old.awg_load.milliwatts_average / 10)
-        != (new.awg_load.valid, new.awg_load.milliwatts_average / 10);
-
     // A row repaint already includes its value. Keep each damaged pixel region single-owner.
     damage.values &= !damage.rows;
     damage
@@ -540,48 +517,6 @@ mod tests {
             AwgDamage {
                 rows: 0,
                 values: (1 << 1) | (1 << 3),
-                ..AwgDamage::default()
-            }
-        );
-    }
-
-    #[test]
-    fn load_damage_tracks_only_text_visible_precision() {
-        let mut old = AppState::new(true, None);
-        old.awg_load = crate::app::LoadMeasurement {
-            milliamps_rms: 420,
-            milliwatts_average: 1_234,
-            valid: true,
-        };
-        let mut hidden_change = old;
-        hidden_change.awg_load.milliwatts_average = 1_239;
-        assert_eq!(awg_damage(&old, &hidden_change), AwgDamage::default());
-
-        let mut visible_change = old;
-        visible_change.awg_load.milliwatts_average = 1_240;
-        assert_eq!(
-            awg_damage(&old, &visible_change),
-            AwgDamage {
-                load_power: true,
-                ..AwgDamage::default()
-            }
-        );
-    }
-
-    #[test]
-    fn current_and_power_are_independent_damage_regions() {
-        let mut old = AppState::new(true, None);
-        old.awg_load = crate::app::LoadMeasurement {
-            milliamps_rms: 420,
-            milliwatts_average: 1_230,
-            valid: true,
-        };
-        let mut new = old;
-        new.awg_load.milliamps_rms = 421;
-        assert_eq!(
-            awg_damage(&old, &new),
-            AwgDamage {
-                load_current: true,
                 ..AwgDamage::default()
             }
         );

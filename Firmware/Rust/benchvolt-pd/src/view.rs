@@ -364,12 +364,15 @@ where
         .ok();
     }
 
+    // The V column plus the A column form a fixed 253 px ensemble (the A
+    // column's right edge is constant); x = 33 centers it on the 320 px
+    // panel with equal margins.
     fn draw_detail_voltage(&mut self, projection: DetailProjection) {
-        self.draw_hero(projection.voltage_centivolts.map(u32::from), 5, "V");
+        self.draw_hero(projection.voltage_centivolts.map(u32::from), 33, "V");
     }
 
     fn draw_detail_current(&mut self, projection: DetailProjection) {
-        self.draw_hero(projection.current_centiamps.map(u32::from), 164, "A");
+        self.draw_hero(projection.current_centiamps.map(u32::from), 192, "A");
     }
 
     fn draw_detail_power(&mut self, projection: DetailProjection) {
@@ -395,8 +398,9 @@ where
             Some(value) => write!(&mut text, "{}.{:02} W", value / 100, value % 100).ok(),
             None => text.push_str("--.-- W").ok(),
         };
-        self.clear_detail_region(90, 88, 150, 35);
-        let mut cursor = 100;
+        // A typical "XX.XX W" is 89 px wide; starting at 116 centers it.
+        self.clear_detail_region(106, 88, 150, 35);
+        let mut cursor = 116;
         for character in text.chars() {
             match character {
                 '0'..='9' | '-' => {

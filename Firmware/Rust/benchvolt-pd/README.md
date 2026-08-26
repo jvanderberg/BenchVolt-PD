@@ -82,13 +82,16 @@ the next cold attach, so replug the power cable afterwards.
 
 The main menu contains DC Power, AWG, Settings, PD Source, System, and Help.
 
-The PD Source screen lists the attached source's advertised fixed PDOs (read
-live once per screen entry, filtered like the GUI's PDO list and capped at
-the 20 V board input ceiling), marks the live contract's row ACTIVE, and lets
+The PD Source screen lists the attached source's advertised fixed PDOs
+(filtered like the GUI's PDO list and capped at the 20 V board input
+ceiling), marks the live contract's row ACTIVE, and lets
 a row be armed by click and applied from the front panel. The capability read
-transmits Get_Source_Cap, which briefly restarts negotiation, so it waits
-until every output is inactive and never repeats on contract events (that
-feedback loop was observed on hardware). Apply obeys the same admission rule
+transmits Get_Source_Cap, which restarts negotiation — and some sources
+answer that with a VBUS hard reset that cold-boots this VBUS-powered board —
+so it runs at most once per boot (the cache cannot go stale: a source swap
+always cold-boots the board), waits until every output is inactive, and
+never repeats on contract events (that feedback loop was observed on
+hardware). Apply obeys the same admission rule
 as `SOUR:PDO:SET`: every output must be inactive (a hint banner explains a
 dimmed Apply or a stalled list). Applying first appends a settings-journal
 record carrying the requested voltage, then reprofiles the STUSB4500 NVM PDO2

@@ -641,7 +641,14 @@ impl Reducer for AppReducer {
                     next.menu_selection = 0;
                     next.help_scroll = 0;
                     if next.screen == Screen::PdSource {
-                        next.pd_source_stale = true;
+                        // Read the capability list at most once per boot: the
+                        // Get_Source_Cap it transmits restarts negotiation,
+                        // and some sources answer that with a VBUS hard reset
+                        // (observed: entering the screen cold-booted the
+                        // board). The cache cannot go stale — this VBUS-
+                        // powered board cannot survive a source swap. A
+                        // failed read still retries on the next entry.
+                        next.pd_source_stale = state.pd_source_count == 0;
                         next.pd_source_error = false;
                         next.pd_source_armed = None;
                     }
@@ -2273,6 +2280,15 @@ mod tests {
         let cancelled = AppReducer::reduce(&state, Action::ActivateMenu);
         assert!(cancelled.screen == Screen::MainMenu);
         assert!(cancelled.pd_source_armed.is_none());
+
+        // Re-entry with a cached list must not mark it stale: the read's
+        // Get_Source_Cap restarts negotiation and can VBUS-reset the board,
+        // so it runs at most once per boot.
+        let mut reentry = cancelled;
+        reentry.menu_selection = 3;
+        let reentry = AppReducer::reduce(&reentry, Action::ActivateMenu);
+        assert!(reentry.screen == Screen::PdSource);
+        assert!(!reentry.pd_source_stale);
     }
 
     #[test]

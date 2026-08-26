@@ -21,7 +21,7 @@ use benchvolt_pd::cadence::ServiceCadence;
 use benchvolt_pd::input_policy::{encoder_action, ButtonTracker};
 use benchvolt_pd::measurement::MeasurementWindows;
 use benchvolt_pd::monitoring::{ProtectionService, TpsStatusObservation};
-use benchvolt_pd::pd::{BootContractAction, Service as PdService, ServiceEvent as PdServiceEvent};
+use benchvolt_pd::pd::{Service as PdService, ServiceEvent as PdServiceEvent};
 use benchvolt_pd::power::{execute_global_shutdown, FirmwareEffectPlanner, PowerExecutor, Rail};
 use benchvolt_pd::reset_cause::ResetReason;
 use benchvolt_pd::settings::{PersistentSettings, SettingsDebouncer};
@@ -36,9 +36,8 @@ use board::{
     power::HardwarePowerDriver,
 };
 use boot::{
-    compact_settings_store, erase_flash_page, load_settings_store, pd_attempt_pending,
-    pd_renegotiation_allowed, persist_settings, record_pd_marker, BOOT_METADATA_ADDR,
-    SETTINGS_SLOTS,
+    compact_settings_store, erase_flash_page, load_settings_store, persist_settings,
+    BOOT_METADATA_ADDR, SETTINGS_SLOTS,
 };
 use cortex_m_rt::{entry, exception, ExceptionFrame};
 use display_interface_spi::SPIInterface;
@@ -422,9 +421,7 @@ fn main() -> ! {
     let mut pd_service = PdService::new(app.state().sink_current_limit_ma);
     let mut input_ticks = monotonic_ms();
     let mut service_tick = input_ticks;
-    let mut boot_pd_settled = false;
     let mut comm_capable_checked = false;
-    let mut legacy_pd_requested_at = None;
     let mut button = ButtonTracker::new(encoder_sw.is_high().unwrap_or(true));
     let mut encoder_accumulator = benchvolt_pd::input_policy::EncoderAccumulator {
         last_tick: input_ticks,
@@ -641,12 +638,18 @@ fn main() -> ! {
                     listing.push_str("UI_PDO_LIST_START\r\n").ok();
                     match result {
                         Ok((raw_pdos, count)) => {
-                            // Match the original C firmware: extract the fixed-PDO
-                            // voltage/current fields from every object without
-                            // filtering by supply type.
+                            // Unlike the original C firmware, list only valid
+                            // fixed-supply objects: some sources lead with a
+                            // malformed or augmented object whose blind field
+                            // extraction produced an unselectable phantom row.
                             for (index, raw) in raw_pdos[..count].iter().enumerate() {
-                                let millivolts = ((raw >> 10) & 0x3ff) * 50;
-                                let milliamps = (raw & 0x3ff) * 10;
+                                let Some(pdo) =
+                                    benchvolt_pd::pd::decode_fixed_pdo(*raw, index as u8 + 1)
+                                else {
+                                    continue;
+                                };
+                                let millivolts = u32::from(pdo.millivolts);
+                                let milliamps = u32::from(pdo.milliamps);
                                 write!(
                                     &mut listing,
                                     "{},{},{},{}\r\n",
@@ -1087,50 +1090,23 @@ fn main() -> ! {
             }
         }
 
-        if !boot_pd_settled
+        if !comm_capable_checked
             && cadence.healthy_for(3_000)
             && app.state().temp_valid
             && outputs_physically_off
             && display_dma::ready_for_seal()
         {
-            if !comm_capable_checked {
-                // One-time STUSB4500 NVM check: declare USB data support in PD
-                // requests so macOS keeps the port's data connection alive. A
-                // bus error retries on the next boot; the update itself takes
-                // effect at the next cold attach.
-                comm_capable_checked = true;
-                let _ = benchvolt_pd::pd::configure_usb_comm_capable(&mut SoftPdBus::new(
-                    &mut pd_bus,
-                    power_driver.delay_mut(),
-                ));
-            }
-            match benchvolt_pd::pd::boot_contract_action(
-                app.state().pd_contract.map(|contract| contract.millivolts),
-                legacy_pd_requested_at,
-                input_ticks,
-            ) {
-                BootContractAction::Wait => {}
-                BootContractAction::Request => {
-                    // The request can VBUS-reset the MCU. A flash marker
-                    // written first turns any such reset into a skipped
-                    // renegotiation on the next boot instead of a reset loop;
-                    // if the marker cannot be written (or a previous attempt
-                    // never settled), keep the current contract and let the
-                    // settle window close out below.
-                    legacy_pd_requested_at = Some(input_ticks);
-                    if pd_renegotiation_allowed() && record_pd_marker() {
-                        let _ = benchvolt_pd::pd::request_legacy_boot_contract(
-                            &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
-                        );
-                    }
-                }
-                BootContractAction::Settle => {
-                    boot_pd_settled = true;
-                    if pd_attempt_pending() {
-                        let _ = record_pd_marker();
-                    }
-                }
-            }
+            // One-time STUSB4500 NVM check: declare USB data support in PD
+            // requests so macOS keeps the port's data connection alive. A
+            // bus error retries on the next boot; the update itself takes
+            // effect at the next cold attach. The boot contract needs no
+            // firmware involvement: the STUSB4500 autonomously negotiates the
+            // NVM PDO2 preference (set via `SOUR:PDO:SET`) at every attach.
+            comm_capable_checked = true;
+            let _ = benchvolt_pd::pd::configure_usb_comm_capable(&mut SoftPdBus::new(
+                &mut pd_bus,
+                power_driver.delay_mut(),
+            ));
         }
         if app.state().reboot_requested {
             // A physical reboot is safe only after every independent output-off

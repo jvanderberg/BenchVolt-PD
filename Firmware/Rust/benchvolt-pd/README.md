@@ -179,20 +179,19 @@ last in the DC-screen rotation. Passive discovery errors such as `DETACHED` or
 `BUS` remain visible there, while an imported contract displays its PDO number,
 voltage, and current.
 Startup first imports the STUSB4500's autonomous contract without transmitting.
+The boot contract requires no firmware involvement: the STUSB4500 autonomously
+negotiates its NVM PDO2 voltage preference at every cold attach, before the
+application runs. `SOUR:PDO:SET 3 <mv> <ma>` (the GUI's PDO selector) persists
+the chosen voltage into NVM PDO2 first, then applies a volatile RAM override
+and re-advertises source capabilities to renegotiate live. A downward voltage
+transition can reboot this VBUS-powered board; because the preference is
+already in NVM, the re-attach lands directly on the chosen voltage. Writing
+the RAM override also raises `DPM_PDO_NUMB` to cover slot 3 — the NVM loads a
+count of 2, which silently disabled the archived C firmware's slot-3 override.
 After three seconds of healthy execution with every output physically off, a
-contract below 20 V triggers the archived original firmware's RAM-PDO sequence:
-10 V / 2 A, 10 V / 3 A, and 20 V / 5 A, followed by PD Soft Reset. Before
-transmitting, the firmware appends an attempt marker to the tail of the
-boot-metadata page and appends a matching settle marker once a 20 V contract
-or a bounded 500 ms no-reset interval completes the cycle. A VBUS reset during
-the transition leaves the attempt marker unmatched, so the next boot skips the
-renegotiation and keeps the source's autonomous contract instead of entering a
-reset loop; the following cold attach may retry. The markers reset whenever a
-firmware upload rewrites the page. At the same startup point, a one-time check
-programs the STUSB4500 NVM `USB_COMM_CAPABLE` flag if it is clear, so PD
-requests declare USB data support and macOS keeps the port's data connection
-alive; the flag takes effect at the next cold attach. There is no automatic
-renegotiation retry within the same boot.
+one-time check programs the STUSB4500 NVM `USB_COMM_CAPABLE` flag if it is
+clear, so PD requests declare USB data support and macOS keeps the port's data
+connection alive; the flag takes effect at the next cold attach.
 
 Read-only status polling imports the resulting contract. Import requires sink-ready
 state, a valid non-mismatch RDO, a valid input ADC sample, and measured VBUS to

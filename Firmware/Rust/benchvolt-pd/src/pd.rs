@@ -158,34 +158,6 @@ pub fn request_legacy_boot_contract(bus: &mut impl PdBus) -> Result<(), PdError>
         .map_err(|_| PdError::Bus)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BootContractAction {
-    Wait,
-    Request,
-    Settle,
-}
-
-/// The legacy soft-reset request can reset the VBUS-powered MCU. USB PD
-/// requires the transition to complete in 275 ms; 500 ms is a bounded margin
-/// before the boot contract is treated as settled.
-pub const fn boot_contract_action(
-    contract_mv: Option<u16>,
-    requested_at: Option<u16>,
-    now: u16,
-) -> BootContractAction {
-    if matches!(contract_mv, Some(millivolts) if millivolts >= 20_000) {
-        BootContractAction::Settle
-    } else if let Some(start) = requested_at {
-        if now.wrapping_sub(start) >= 500 {
-            BootContractAction::Settle
-        } else {
-            BootContractAction::Wait
-        }
-    } else {
-        BootContractAction::Request
-    }
-}
-
 fn read_register(bus: &mut impl PdBus, register: u8) -> Result<u8, PdError> {
     let mut value = [0u8];
     bus.read(register, &mut value).map_err(|_| PdError::Bus)?;
@@ -1139,26 +1111,6 @@ mod tests {
 
         assert_eq!(request_legacy_boot_contract(&mut bus), Ok(()));
         assert!(bus.0.is_empty());
-    }
-
-    #[test]
-    fn boot_pd_gate_keeps_recovery_open_until_contract_or_bounded_settle() {
-        assert_eq!(
-            boot_contract_action(Some(20_000), None, 100),
-            BootContractAction::Settle
-        );
-        assert_eq!(
-            boot_contract_action(Some(5_000), None, 100),
-            BootContractAction::Request
-        );
-        assert_eq!(
-            boot_contract_action(Some(5_000), Some(u16::MAX - 99), 100),
-            BootContractAction::Wait
-        );
-        assert_eq!(
-            boot_contract_action(Some(5_000), Some(u16::MAX - 399), 100),
-            BootContractAction::Settle
-        );
     }
 
     #[test]

@@ -38,11 +38,12 @@ def enter(application_port: str) -> str:
         if response != b"OK:JUMPING_TO_BOOTLOADER":
             raise RuntimeError(f"bootloader request failed: {response.decode(errors='replace')}")
 
+    # The application presents the bootloader's chip-unique USB serial so the
+    # desktop GUI can reopen one port name across the jump; the bootloader is
+    # recognized by its distinct product string, not by a new port name.
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         for candidate in list_ports.comports():
-            if candidate.device == application_port:
-                continue
             description = candidate.description or ""
             if "STM32 Virtual ComPort" in description:
                 return candidate.device

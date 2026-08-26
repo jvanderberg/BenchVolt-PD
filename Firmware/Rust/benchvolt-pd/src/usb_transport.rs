@@ -215,6 +215,27 @@ unsafe impl UsbPeripheral for BenchUsb {
     }
 }
 
+/// The stock bootloader's CDC serial number is ST's `Get_SerialNum`: eight
+/// uppercase hex digits of `UID0 + UID2` followed by the top four hex digits
+/// of `UID1`. The application must present the identical serial so the host
+/// assigns the same port name to both — the desktop GUI's firmware updater
+/// reopens the pre-jump port name to reach the bootloader.
+fn chip_serial() -> &'static str {
+    const UID_BASE: usize = 0x1fff_f7ac;
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let serial = cortex_m::singleton!(: [u8; 12] = [0; 12]).unwrap();
+    let uid = |offset: usize| unsafe { core::ptr::read_volatile((UID_BASE + offset) as *const u32) };
+    let mut value = uid(0).wrapping_add(uid(8));
+    let mut high = uid(4);
+    for (index, byte) in serial.iter_mut().enumerate() {
+        let source = if index < 8 { &mut value } else { &mut high };
+        *byte = HEX[(*source >> 28) as usize];
+        *source <<= 4;
+    }
+    // Every byte is an ASCII hex digit from the table above.
+    unsafe { core::str::from_utf8_unchecked(serial) }
+}
+
 pub(crate) fn install(usb: pac::USB, dm: PA11<Input<Floating>>, dp: PA12<Input<Floating>>) {
     let peripheral = BenchUsb {
         _usb: usb,
@@ -228,7 +249,7 @@ pub(crate) fn install(usb: pac::USB, dm: PA11<Input<Floating>>, dp: PA12<Input<F
     let strings = [StringDescriptors::default()
         .manufacturer("BenchVolt-PD")
         .product("BenchVolt PD")
-        .serial_number("BENCHVOLT-01")];
+        .serial_number(chip_serial())];
     let device = UsbDeviceBuilder::new(usb_bus, UsbVidPid(USB_VID, USB_PID))
         .strings(&strings)
         .unwrap()

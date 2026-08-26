@@ -74,7 +74,11 @@ slot. If the journal fills, page erase/compaction is deferred until every power
 output is physically off. Three explicit profile slots store validated snapshots
 of those settings. Loading a profile or Factory Defaults first performs a global
 hardware shutdown. Output states, faults, UI location, and active operation are
-never persisted.
+never persisted. As a fail-safe, Factory Defaults also restores the STUSB4500's
+NVM to its canonical configuration (20 V sink profile, request the source's
+full advertised current, USB communication capable), recovering a unit whose
+PD voltage was profiled to something unusual; the NVM change takes effect at
+the next cold attach, so replug the power cable afterwards.
 
 The main menu contains DC Power, AWG, Settings, System, and Help. AWG supports
 CH4/CH5 selection, square/triangle/ramp/sine waveforms, frequency, square-wave

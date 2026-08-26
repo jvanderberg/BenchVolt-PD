@@ -262,6 +262,30 @@ pub fn configure_request_source_current(bus: &mut impl PdBus) -> Result<NvmUpdat
     configure_nvm_bit(bus, 4, 6, 0x10, CANONICAL_NVM_SECTOR4)
 }
 
+/// Fail-safe: rewrite both configurable NVM sectors to their canonical
+/// contents — a 20 V sink profile requesting the source's full advertised
+/// current, with USB communication declared. Used by the factory-defaults
+/// action so a unit profiled to an unusual voltage can always be recovered.
+/// Takes effect at the STUSB4500's next cold attach (power replug).
+pub fn restore_canonical_nvm(bus: &mut impl PdBus) -> Result<NvmUpdate, PdError> {
+    let mut updated = false;
+    for (sector, canonical) in [(3u8, CANONICAL_NVM_SECTOR3), (4, CANONICAL_NVM_SECTOR4)] {
+        if read_nvm_sector(bus, sector)? == canonical {
+            continue;
+        }
+        write_nvm_sector(bus, sector, &canonical)?;
+        if read_nvm_sector(bus, sector)? != canonical {
+            return Err(PdError::ContractMismatch);
+        }
+        updated = true;
+    }
+    Ok(if updated {
+        NvmUpdate::Updated
+    } else {
+        NvmUpdate::AlreadyConfigured
+    })
+}
+
 /// Persist the USB_COMM_CAPABLE flag so PD requests declare USB data support.
 /// The stock NVM ships with the flag clear, and macOS disables USB data on
 /// the port as soon as a contract claiming no data support completes. Takes
@@ -962,6 +986,20 @@ mod tests {
         [0x00, 0x19, 0x54, 0xaa, 0x57, 0x35, 0x5f, 0x00],
         [0x00, 0x64, 0x90, 0x21, 0x43, 0x00, 0x40, 0xfb],
     ];
+
+    #[test]
+    fn factory_restore_rewrites_both_sectors_to_canonical_and_is_idempotent() {
+        let mut bus = NvmBus::new(NVM_TEST_SECTORS);
+        assert_eq!(restore_canonical_nvm(&mut bus), Ok(NvmUpdate::Updated));
+        assert_eq!(bus.sectors[3], CANONICAL_NVM_SECTOR3);
+        assert_eq!(bus.sectors[4], CANONICAL_NVM_SECTOR4);
+        let programs = bus.programs;
+        assert_eq!(
+            restore_canonical_nvm(&mut bus),
+            Ok(NvmUpdate::AlreadyConfigured)
+        );
+        assert_eq!(bus.programs, programs);
+    }
 
     #[test]
     fn request_source_current_nvm_update_is_verified_and_idempotent() {

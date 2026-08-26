@@ -120,14 +120,19 @@ where
     }
 }
 
+/// Returns true when factory defaults were just applied, so the caller can
+/// also restore the STUSB4500 NVM (which needs the PD bus this module does
+/// not own).
 pub(crate) fn service_profile_request<V, D, const Q: usize>(
     app: &mut EffectApp<AppReducer, V, FirmwareEffectPlanner, Q>,
     power_driver: &mut PowerExecutor<D>,
     settings_store: &mut SettingsStore,
-) where
+) -> bool
+where
     V: reducto::View<State = AppState>,
     D: PowerDriver,
 {
+    let mut factory_defaults_applied = false;
     match app.state().profile_request {
         ProfileRequest::None => {}
         ProfileRequest::Save(slot) => {
@@ -180,6 +185,7 @@ pub(crate) fn service_profile_request<V, D, const Q: usize>(
                         ProfileStatus::DefaultsLoaded,
                     ),
                 );
+                factory_defaults_applied = true;
             } else {
                 dispatch_app(app, power_driver, Action::GlobalShutdownFailed);
                 dispatch_app(
@@ -190,4 +196,5 @@ pub(crate) fn service_profile_request<V, D, const Q: usize>(
             }
         }
     }
+    factory_defaults_applied
 }

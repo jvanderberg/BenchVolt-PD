@@ -941,7 +941,17 @@ fn main() -> ! {
             }
         }
 
-        service_profile_request(&mut app, &mut power_driver, &mut settings_store);
+        if service_profile_request(&mut app, &mut power_driver, &mut settings_store) {
+            // Fail-safe: factory defaults also restore the STUSB4500 NVM to
+            // its canonical 20 V / request-max / comm-capable configuration,
+            // recovering a unit profiled to an unusual PD voltage. Best
+            // effort — the settings reset above stands either way — and the
+            // NVM takes effect at the next cold attach (power replug).
+            let _ = benchvolt_pd::pd::restore_canonical_nvm(&mut SoftPdBus::new(
+                &mut pd_bus,
+                power_driver.delay_mut(),
+            ));
+        }
 
         let waveform_status = app.state().awg_status;
         let waveform_source = app.state().awg_source;

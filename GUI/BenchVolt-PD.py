@@ -1173,6 +1173,14 @@ class BenchVoltUI(ctk.CTk):
             # 1. STOP BACKGROUND POLLING (CUT TRAFFIC)
             self.pause_polling = True
             time.sleep(0.4)  # Wait briefly for current query to finish
+
+            # The AWG engine is exclusive: uploads are refused while any
+            # waveform (built-in or ARB, either channel) is active, so stop
+            # everything first. Each stop replies OK even when idle.
+            for ch in (4, 5):
+                for cmd in (f"SOUR:WAVE:CH{ch}:STOP", f"SOUR:WAVE:CH{ch}:ARB:STOP"):
+                    self.remote.ser.write(f"{cmd}\n".encode('ascii'))
+                    time.sleep(0.4)
             self.remote.ser.reset_input_buffer()  # Discard old data left in buffer
 
             CHUNK_SIZE = 8
@@ -1221,15 +1229,31 @@ class BenchVoltUI(ctk.CTk):
             start_cmd = f"SOUR:WAVE:CH{channel_num}:ARB:START {total_count},{m_val},{r_val}\n"
             self.remote.ser.write(start_cmd.encode('ascii'))
 
-            final_resp = self.remote.ser.read_until(b"\n").decode('ascii', errors='ignore').strip()
-            print(f"SUCCESS: {final_resp}\n")
+            # The START ack is deferred until the output is verified running;
+            # a failed start reports ERR (e.g. ERR:HARDWARE) the same way.
+            final_resp = ""
+            deadline = time.time() + 6.0
+            while time.time() < deadline:
+                line = self.remote.ser.read_until(b"\n").decode('ascii', errors='ignore').strip()
+                if "OK:" in line and "STARTED" in line:
+                    final_resp = line
+                    break
+                if "ERR" in line:
+                    final_resp = line
+                    break
+            print(f"ARB START result: {final_resp!r}\n")
 
-            # Show success on UI
             if hasattr(self, 'arb_status_labels') and channel_num in self.arb_status_labels:
-                self.arb_status_labels[channel_num].configure(
-                    text=f"✔ Upload Complete! Started.",
-                    text_color="#2ecc71"
-                )
+                if final_resp.startswith("OK"):
+                    self.arb_status_labels[channel_num].configure(
+                        text="✔ Upload Complete! Running.",
+                        text_color="#2ecc71"
+                    )
+                else:
+                    self.arb_status_labels[channel_num].configure(
+                        text=f"❌ Start failed: {final_resp or 'no response'}",
+                        text_color="#e74c3c"
+                    )
                 self.update()
 
         except Exception as e:
@@ -1238,7 +1262,11 @@ class BenchVoltUI(ctk.CTk):
                 self.arb_status_labels[channel_num].configure(text="❌ Critical Error", text_color="#e74c3c")
                 self.update()
         finally:
-            # 2. RESTART BACKGROUND POLLING WHEN DONE
+            # 2. RESTORE THE SHORT TIMEOUT AND RESTART BACKGROUND POLLING
+            try:
+                self.remote.ser.timeout = 0.1
+            except Exception:
+                pass
             self.pause_polling = False
 
     def load_csv_and_fill_box():

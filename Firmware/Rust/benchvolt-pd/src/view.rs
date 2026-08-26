@@ -588,12 +588,14 @@ where
         self.draw_detail_status(projection.status, projection.focus == ControlFocus::Output);
     }
 
+    // Same centered ensemble as the channel detail screens (see
+    // draw_detail_voltage).
     fn draw_sink_voltage(&mut self, projection: SinkProjection) {
-        self.draw_hero(projection.voltage_centivolts.map(u32::from), 5, "V");
+        self.draw_hero(projection.voltage_centivolts.map(u32::from), 33, "V");
     }
 
     fn draw_sink_current(&mut self, projection: SinkProjection) {
-        self.draw_hero(projection.current_centiamps.map(u32::from), 164, "A");
+        self.draw_hero(projection.current_centiamps.map(u32::from), 192, "A");
     }
 
     fn draw_sink_power(&mut self, projection: SinkProjection) {

@@ -15,7 +15,7 @@ class BenchVoltRemote:
         """Connects to the STM32 via USB CDC."""
         try:
             # Use a low timeout to prevent UI freezing during serial operations
-            self.ser = serial.Serial(port, baudrate, timeout=0.1)
+            self.ser = serial.Serial(port, baudrate, timeout=0.1, exclusive=True)
             self.is_connected = True
             return True
         except Exception as e:

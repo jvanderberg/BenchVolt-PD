@@ -10,4 +10,4 @@ Release/
 *.su
 .settings/
 *.launch
-.metadata/
+.metadata/__pycache__/

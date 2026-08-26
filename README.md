@@ -23,11 +23,11 @@
 
 BenchVolt PD is an open-source, USB-C powered multi-channel lab power supply delivering up to 100 W. It has 5 outputs (0.5 V–22 V), STM32 control, USB-PD input, low-noise LDOs, and a Python control interface.
 
-This repository is a fork of [sydundar/BenchVolt-PD](https://github.com/sydundar/BenchVolt-PD). All hardware design (PCB, schematics, enclosure) and the original C firmware are the work of the upstream author — full credit for the device itself belongs there. What this fork changes: **the C application firmware has been replaced with a new Rust firmware**, located at [`Firmware/Rust/benchvolt-poc`](Firmware/Rust/benchvolt-poc). The original C bootloader is retained and unmodified; the Rust application honors its partition and update contract, so firmware update over USB continues to work without an ST-LINK.
+This repository is a fork of [sydundar/BenchVolt-PD](https://github.com/sydundar/BenchVolt-PD). All hardware design (PCB, schematics, enclosure) and the original C firmware are the work of the upstream author — full credit for the device itself belongs there. What this fork changes: **the C application firmware has been replaced with a new Rust firmware**, located at [`Firmware/Rust/benchvolt-pd`](Firmware/Rust/benchvolt-pd). The original C bootloader is retained and unmodified; the Rust application honors its partition and update contract, so firmware update over USB continues to work without an ST-LINK.
 
 ## Rust firmware
 
-The Rust firmware is a ground-up rewrite built around a redux-style reducer architecture (using the [`reducto`](https://github.com/jvanderberg/reducto) crate): all state changes flow through typed actions and a pure reducer, a transition observer derives hardware effects from state transitions, and reducers/views never touch GPIO, I2C, ADC, or delays directly. Full detail is in the [firmware README](Firmware/Rust/benchvolt-poc/README.md).
+The Rust firmware is a ground-up rewrite built around a redux-style reducer architecture (using the [`reducto`](https://github.com/jvanderberg/reducto) crate): all state changes flow through typed actions and a pure reducer, a transition observer derives hardware effects from state transitions, and reducers/views never touch GPIO, I2C, ADC, or delays directly. Full detail is in the [firmware README](Firmware/Rust/benchvolt-pd/README.md).
 
 Highlights:
 
@@ -40,19 +40,18 @@ Highlights:
 - **AWG.** Square, triangle, ramp, and sine waveforms on CH4/CH5 from a 2 kHz scheduler — square to 125 Hz, other shapes to 120 Hz — plus a desktop-compatible arbitrary-waveform upload (up to 1024 validated points).
 - **Persistence.** Versioned, CRC-checked append-only settings journal in a reserved flash page (current limits, setpoints, modes, PD limit, units), three profile slots, and safe deferred compaction. Torn or corrupt records are ignored.
 - **UI.** Rotary-encoder-driven menu system with overview, per-channel detail, AWG, settings, system, help, and USB-PD input screens; encoder acceleration; coalesced detent handling so display work never drops a quick spin.
-- **Bootloader compatibility.** Links at `0x08008000` within the 92 KiB application partition; the update path cannot touch the bootloader, settings page, or boot-metadata page. A boot seal mechanism returns to the bootloader if the application crashes early.
+- **Bootloader compatibility.** Links at `0x08008000` within the 92 KiB application partition; the update path cannot touch the bootloader, settings page, or boot-metadata page. The boot seal written by the bootloader stays valid across power interruptions, so the device always returns to the application; `JUMP:BOOTLOADER` (or SWD) is the way back into the bootloader.
 
 ### Firmware screenshots
 
 All screenshots are rendered by the actual firmware view code via the host-side
-simulator in [`tools/render`](Firmware/Rust/benchvolt-poc/tools/render).
+simulator in [`tools/render`](Firmware/Rust/benchvolt-pd/tools/render).
 
 ![DC power overview](Images/firmware/overview.png)
 
 The DC power overview: setpoints, current limits, and live measurements for all
-five channels, with per-channel output toggles. Channel 2 is off, so its
-measurement columns are blanked. The header shows the protection status and
-board temperature.
+five channels, with per-channel output toggles. Channel 2 is off, so it reads
+0.00 V / 0.00 A. The header shows the protection status and board temperature.
 
 ![Channel 5 detail](Images/firmware/channel5_detail.png)
 
@@ -131,17 +130,17 @@ The Rust firmware targets `thumbv6m-none-eabi`, selected automatically by the cr
 
 ```sh
 rustup target add thumbv6m-none-eabi
-cd Firmware/Rust/benchvolt-poc
+cd Firmware/Rust/benchvolt-pd
 cargo build --release
 ```
 
-This produces an image linked at `0x08008000` for the existing C bootloader. See the [firmware README](Firmware/Rust/benchvolt-poc/README.md) for image generation and the USB flashing runbook (`tools/flash_latest.sh`).
+This produces an image linked at `0x08008000` for the existing C bootloader. See the [firmware README](Firmware/Rust/benchvolt-pd/README.md) for image generation and the USB flashing runbook (`tools/flash_latest.sh`).
 
 ### Installing firmware
 
 Every push to `main` publishes a prebuilt image to the
 [latest release](https://github.com/jvanderberg/BenchVolt-PD/releases/tag/latest)
-(`benchvolt-poc.bin`, linked at `0x08008000` for the stock bootloader). No
+(`benchvolt-pd.bin`, linked at `0x08008000` for the stock bootloader). No
 programming hardware is needed - the bootloader accepts uploads over the same
 USB port:
 
@@ -149,7 +148,7 @@ USB port:
   [`GUI/BenchVolt-PD.py`](GUI), pick the device's COM port and the `.bin`,
   and start the upload. The GUI reboots the device into the bootloader,
   streams the image with CRC verification, and restarts it.
-- **Command line**: `python3 Firmware/Rust/benchvolt-poc/tools/flash_poc.py <port> benchvolt-poc.bin`
+- **Command line**: `python3 Firmware/Rust/benchvolt-pd/tools/flash_firmware.py <port> benchvolt-pd.bin`
   (needs `pyserial`; `tools/flash_latest.sh` wraps this for locally built
   images).
 
@@ -165,7 +164,7 @@ The original desktop GUI ([`GUI/BenchVolt-PD.py`](GUI), Python/customtkinter) wo
 
 | Path | Contents |
 | --- | --- |
-| [`Firmware/Rust/benchvolt-poc`](Firmware/Rust/benchvolt-poc) | Rust application firmware (this fork's main change) |
+| [`Firmware/Rust/benchvolt-pd`](Firmware/Rust/benchvolt-pd) | Rust application firmware (this fork's main change) |
 | [`Firmware/`](Firmware) | C bootloader and archived original C application firmware |
 | [`Schematics/`](Schematics) | Block diagram and full schematic PDF (r3) |
 | [`Enclosure/`](Enclosure) | STL files for the acrylic/aluminium enclosure |

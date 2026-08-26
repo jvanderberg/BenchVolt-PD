@@ -11,7 +11,7 @@ env:
 
 defaults:
   run:
-    working-directory: Firmware/Rust/benchvolt-poc
+    working-directory: Firmware/Rust/benchvolt-pd
 
 jobs:
   firmware:
@@ -29,17 +29,17 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            Firmware/Rust/benchvolt-poc/target
-          key: firmware-${{ runner.os }}-${{ hashFiles('Firmware/Rust/benchvolt-poc/Cargo.lock') }}
+            Firmware/Rust/benchvolt-pd/target
+          key: firmware-${{ runner.os }}-${{ hashFiles('Firmware/Rust/benchvolt-pd/Cargo.lock') }}
       - name: Build release firmware
         run: cargo build --release
       - name: Produce raw binary and check partition fit
         run: |
           OBJCOPY=$(find "$(rustc --print sysroot)" -name llvm-objcopy | head -1)
           "$OBJCOPY" -O binary \
-            target/thumbv6m-none-eabi/release/benchvolt-poc \
-            target/thumbv6m-none-eabi/release/benchvolt-poc.bin
-          SIZE=$(stat -c%s target/thumbv6m-none-eabi/release/benchvolt-poc.bin)
+            target/thumbv6m-none-eabi/release/benchvolt-pd \
+            target/thumbv6m-none-eabi/release/benchvolt-pd.bin
+          SIZE=$(stat -c%s target/thumbv6m-none-eabi/release/benchvolt-pd.bin)
           LIMIT=$((92 * 1024))
           echo "Firmware image: ${SIZE} bytes (partition limit ${LIMIT})"
           if [ "$SIZE" -gt "$LIMIT" ]; then
@@ -51,8 +51,8 @@ jobs:
         with:
           name: benchvolt-firmware
           path: |
-            Firmware/Rust/benchvolt-poc/target/thumbv6m-none-eabi/release/benchvolt-poc
-            Firmware/Rust/benchvolt-poc/target/thumbv6m-none-eabi/release/benchvolt-poc.bin
+            Firmware/Rust/benchvolt-pd/target/thumbv6m-none-eabi/release/benchvolt-pd
+            Firmware/Rust/benchvolt-pd/target/thumbv6m-none-eabi/release/benchvolt-pd.bin
           if-no-files-found: error
 
   c-firmware:
@@ -128,11 +128,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          BIN=$(find dist -name benchvolt-poc.bin | head -1)
+          BIN=$(find dist -name benchvolt-pd.bin | head -1)
           SIZE=$(stat -c%s "$BIN")
-          NOTES="Rolling build of main at ${GITHUB_SHA}. Image size: ${SIZE} bytes (92 KiB partition). Flash from the desktop GUI's firmware update tab, or with Firmware/Rust/benchvolt-poc/tools/flash_poc.py."
+          NOTES="Rolling build of main at ${GITHUB_SHA}. Image size: ${SIZE} bytes (92 KiB partition). Flash from the desktop GUI's firmware update tab, or with Firmware/Rust/benchvolt-pd/tools/flash_firmware.py."
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest "$BIN#benchvolt-poc.bin (application image, flash via GUI or flash_poc.py)" \
+          gh release create latest "$BIN#benchvolt-pd.bin (application image, flash via GUI or flash_firmware.py)" \
             "dist/c/bootloader.bin#bootloader.bin (flash once via ST-Link/DFU at 0x08000000)" \
             "dist/c/usb_power_source.bin#usb_power_source.bin (legacy C application, alternative to the Rust image; flash via bootloader at 0x08008000)" \
             --title "Latest firmware (main)" \
@@ -152,8 +152,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            Firmware/Rust/benchvolt-poc/target
-          key: tests-${{ runner.os }}-${{ hashFiles('Firmware/Rust/benchvolt-poc/Cargo.lock') }}
+            Firmware/Rust/benchvolt-pd/target
+          key: tests-${{ runner.os }}-${{ hashFiles('Firmware/Rust/benchvolt-pd/Cargo.lock') }}
       - name: Run test suite
         run: cargo test --target x86_64-unknown-linux-gnu --no-default-features
 

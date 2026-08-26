@@ -398,9 +398,19 @@ where
             Some(value) => write!(&mut text, "{}.{:02} W", value / 100, value % 100).ok(),
             None => text.push_str("--.-- W").ok(),
         };
-        // A typical "XX.XX W" is 89 px wide; starting at 116 centers it.
-        self.clear_detail_region(106, 88, 150, 35);
-        let mut cursor = 116;
+        // Center dynamically: short values like "0.53 W" would sit visibly
+        // left of center if drawn from a fixed start column.
+        let width: i32 = text
+            .chars()
+            .map(|character| match character {
+                '0'..='9' | '-' => 17,
+                '.' => 6,
+                'W' => 10,
+                _ => 5,
+            })
+            .sum();
+        self.clear_detail_region(85, 88, 150, 35);
+        let mut cursor = 160 - width / 2;
         for character in text.chars() {
             match character {
                 '0'..='9' | '-' => {
@@ -561,13 +571,19 @@ where
         .ok();
     }
 
-    fn draw_detail_screen(&mut self, state: &AppState, index: usize) {
-        let channel = &state.channels[index];
-        let projection = detail_projection(channel, state.focus);
-        self.display.clear(Rgb565::BLACK).ok();
-
+    /// Header with the channel's nominal (setpoint) voltage, e.g.
+    /// "Channel 3 3.30V".
+    fn draw_detail_title(&mut self, index: usize, projection: DetailProjection) {
+        self.clear_detail_region(0, 0, 224, 22);
         let mut title: String<32> = String::new();
-        write!(&mut title, "Channel {}", index + 1).ok();
+        write!(
+            &mut title,
+            "Channel {} {}.{:02}V",
+            index + 1,
+            projection.setpoint_centivolts / 100,
+            projection.setpoint_centivolts % 100
+        )
+        .ok();
         Text::with_baseline(
             title.as_str(),
             Point::new(4, 1),
@@ -576,6 +592,14 @@ where
         )
         .draw(&mut self.display)
         .ok();
+    }
+
+    fn draw_detail_screen(&mut self, state: &AppState, index: usize) {
+        let channel = &state.channels[index];
+        let projection = detail_projection(channel, state.focus);
+        self.display.clear(Rgb565::BLACK).ok();
+
+        self.draw_detail_title(index, projection);
         self.draw_temperature(state);
         if index >= 3 {
             self.draw_detail_mode(projection);
@@ -689,17 +713,29 @@ where
         .ok();
     }
 
-    fn draw_usb_pd_input(&mut self, state: &AppState) {
-        let projection = sink_projection(state);
-        self.display.clear(Rgb565::BLACK).ok();
+    /// Header with the negotiated nominal input voltage when a contract is
+    /// active, e.g. "USB PD Input 20V".
+    fn draw_sink_title(&mut self, projection: SinkProjection) {
+        self.clear_detail_region(0, 0, 224, 22);
+        let mut title: String<32> = String::new();
+        title.push_str("USB PD Input").ok();
+        if let SinkPdStatus::Ready(contract) = projection.pd_status {
+            write!(&mut title, " {}V", contract.millivolts / 1_000).ok();
+        }
         Text::with_baseline(
-            "USB PD Input",
+            title.as_str(),
             Point::new(4, 1),
             MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE),
             Baseline::Top,
         )
         .draw(&mut self.display)
         .ok();
+    }
+
+    fn draw_usb_pd_input(&mut self, state: &AppState) {
+        let projection = sink_projection(state);
+        self.display.clear(Rgb565::BLACK).ok();
+        self.draw_sink_title(projection);
         self.draw_temperature(state);
         self.draw_sink_voltage(projection);
         self.draw_sink_current(projection);
@@ -1339,6 +1375,10 @@ where
                     FramedValueDamage::Value => self.draw_detail_setpoint_value(new),
                     FramedValueDamage::None => {}
                 }
+                if old.setpoint_centivolts != new.setpoint_centivolts {
+                    // The header shows the nominal (setpoint) voltage.
+                    self.draw_detail_title(index, new);
+                }
                 match framed_value_damage(
                     old.limit_centiamps,
                     new.limit_centiamps,
@@ -1384,6 +1424,7 @@ where
                 }
                 if old.pd_status != new.pd_status {
                     self.draw_sink_pd_status(new);
+                    self.draw_sink_title(new);
                 }
             }
         }

@@ -22,7 +22,9 @@ done
 cd "$project_dir"
 
 echo "Rust host tests ($host_target)"
-cargo test --locked --lib --target "$host_target"
+# --tests matches CI: the integration and fuzz crates (and their shared mock
+# driver) must compile and pass too, not just the lib.
+cargo test --locked --lib --tests --target "$host_target"
 
 echo "Rust host lints"
 cargo clippy --locked --lib --target "$host_target" -- -D warnings

@@ -120,7 +120,8 @@ impl MockPowerDriver {
         self.ops
             .iter()
             .filter_map(|operation| match operation {
-                DriverOperation::Ch5Voltage(millivolts) => Some(*millivolts),
+                DriverOperation::Ch5Voltage(millivolts)
+                | DriverOperation::Ch5VoltageUnverified(millivolts) => Some(*millivolts),
                 _ => None,
             })
             .collect()
@@ -210,7 +211,7 @@ impl PowerDriver for MockPowerDriver {
                     Ok(())
                 }
             }
-            DriverOperation::Ch5Voltage(_) => {
+            DriverOperation::Ch5Voltage(_) | DriverOperation::Ch5VoltageUnverified(_) => {
                 if self.ch5_enable && self.ch5_configured {
                     Ok(())
                 } else {

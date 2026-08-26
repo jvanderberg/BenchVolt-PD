@@ -259,6 +259,41 @@ register order.
 It deliberately avoids read-clear alert registers and never transmits a PD
 message.
 
+## Invariants and the contribution pattern
+
+These are the rules every change must preserve. They are enforced three ways:
+reducer guards reject violating actions, the fuzz harness asserts them after
+every dispatch (`tests/common/mod.rs::assert_invariants` and
+`assert_bounded_slew`), and the coverage match in `tests/fuzz.rs`
+(`action_fuzz_coverage`) refuses to compile when an `Action` variant is
+neither fuzzed nor explicitly excluded with a reason.
+
+1. **Requested vs. physical.** `requested_enabled` records intent;
+   `physical_enabled` changes only in completion arms (`OutputApplied`,
+   `OutputFailed`, `GlobalShutdownApplied`). A failed shutdown must never
+   clear `physical_enabled`.
+2. **Token discipline.** Every enable/disable bumps the channel `operation`
+   counter; completion arms act only when the token matches the exact pending
+   transition. Never add a completion-shaped arm that skips the token compare.
+3. **Bounded slew.** While a channel is physically enabled, `drive_mv` moves
+   only through `RegulateChannel`'s 200 mV steps (or the AWG sampler for the
+   channel it owns). Setpoint edits store intent; they do not touch a live
+   drive.
+4. **Effects come from the planner.** Reducer arms change state only. If a
+   change needs hardware work, express it as state the
+   `FirmwareEffectPlanner` diff will notice - never call drivers from a
+   reducer or view.
+5. **Fail closed.** Any path that cannot verify hardware reached a safe state
+   escalates: verified `execute_global_shutdown`, then
+   `raw_emergency_shutdown`, then reset with a recorded reason.
+
+Adding an `Action` variant, step by step: write the reducer arm with its
+guards; the build then fails at `action_fuzz_coverage` until you either add
+the variant to `random_event` in `tests/fuzz.rs` (preferred) or exclude it
+with a written reason; if the variant touches `drive_mv`, tokens, or
+enable state, extend the invariant assertions rather than carving out an
+exemption; finish with `tools/check.sh`.
+
 ## Headless build and flash runbook
 
 Always run the complete gate immediately before a device upload and flash the

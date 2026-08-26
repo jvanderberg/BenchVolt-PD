@@ -331,8 +331,10 @@ impl Harness {
     /// effect planner, executor submission, completion feedback) and check
     /// every invariant afterwards.
     pub fn dispatch(&mut self, action: Action) -> bool {
+        let before = DriveSnapshot::capture(self.app.state());
         let changed = dispatch_app(&mut self.app, &mut self.executor, action);
         assert_invariants(self);
+        assert_bounded_slew(&before, self.app.state());
         changed
     }
 
@@ -559,5 +561,64 @@ pub fn assert_invariants(harness: &Harness) {
             !driver.physically_energized(),
             "state claims outputs off but hardware is energized"
         );
+    }
+}
+
+/// Per-channel drive state captured before a dispatch, for behavioral
+/// invariants that constrain *transitions* rather than single states.
+pub struct DriveSnapshot {
+    drive_mv: [u16; 5],
+    physical: [bool; 5],
+    stable: [bool; 5],
+    awg_hot_channel: Option<u8>,
+}
+
+impl DriveSnapshot {
+    pub fn capture(state: &AppState) -> Self {
+        let awg_hot_channel = matches!(
+            state.awg_status,
+            benchvolt_pd::app::AwgStatus::Starting | benchvolt_pd::app::AwgStatus::Running
+        )
+        .then(|| state.active_awg_channel());
+        Self {
+            drive_mv: core::array::from_fn(|index| state.channels[index].drive_mv),
+            physical: core::array::from_fn(|index| state.channels[index].physical_enabled),
+            stable: core::array::from_fn(|index| {
+                state.channels[index].transition
+                    == benchvolt_pd::app::OutputTransition::Stable
+            }),
+            awg_hot_channel,
+        }
+    }
+}
+
+/// INVARIANT (bounded slew): while a channel is physically enabled and not
+/// owned by a starting/running AWG, no single dispatch may move its physical
+/// drive by more than one 200 mV control step. Every reducer arm - present
+/// or future - that touches `drive_mv` is checked here on every fuzz and
+/// integration dispatch.
+pub fn assert_bounded_slew(before: &DriveSnapshot, after: &AppState) {
+    const SLEW_STEP_MV: u16 = 200;
+    let awg_hot_after = matches!(
+        after.awg_status,
+        benchvolt_pd::app::AwgStatus::Starting | benchvolt_pd::app::AwgStatus::Running
+    )
+    .then(|| after.active_awg_channel());
+    for channel in 0..5usize {
+        let output = &after.channels[channel];
+        let guarded = before.physical[channel]
+            && output.physical_enabled
+            && before.stable[channel]
+            && output.transition == benchvolt_pd::app::OutputTransition::Stable
+            && before.awg_hot_channel != Some(channel as u8)
+            && awg_hot_after != Some(channel as u8);
+        if guarded {
+            let delta = output.drive_mv.abs_diff(before.drive_mv[channel]);
+            assert!(
+                delta <= SLEW_STEP_MV,
+                "channel {channel} drive jumped {delta} mV in one dispatch \
+                 (limit {SLEW_STEP_MV}); live drives must move via bounded steps"
+            );
+        }
     }
 }

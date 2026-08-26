@@ -38,10 +38,16 @@ impl LoadAccumulator {
         let result = if self.valid && self.samples != 0 {
             let samples = u64::from(self.samples);
             LoadMeasurement {
-                milliamps_rms: integer_sqrt(self.current_squared_sum / samples)
-                    .min(u64::from(u16::MAX)) as u16,
-                milliwatts_average: (self.power_microwatts_sum / samples / 1_000)
-                    .min(u64::from(u32::MAX)) as u32,
+                milliamps_rms: integer_sqrt(
+                    crate::math::div_rem_u64(self.current_squared_sum, samples).0,
+                )
+                .min(u64::from(u16::MAX)) as u16,
+                milliwatts_average: crate::math::div_rem_u64(
+                    self.power_microwatts_sum,
+                    samples * 1_000,
+                )
+                .0
+                .min(u64::from(u32::MAX)) as u32,
                 valid: true,
             }
         } else {
@@ -64,7 +70,7 @@ fn integer_sqrt(value: u64) -> u64 {
     }
     let mut estimate = 1u64 << (64 - u64::from(value.leading_zeros())).div_ceil(2);
     loop {
-        let next = (estimate + value / estimate) / 2;
+        let next = (estimate + crate::math::div_rem_u64(value, estimate).0) >> 1;
         if next >= estimate {
             return estimate;
         }

@@ -1,10 +1,11 @@
 use crate::app::{AwgConfig, AwgWaveform};
+use crate::math::div_rem_u64;
 
 pub const TICKS_PER_SECOND: u32 = 2_000;
 
 pub struct Scheduler {
     phase: u32,
-    phase_remainder: u64,
+    phase_remainder: u32,
     last_phase_tick: u16,
     next_update_tick: u16,
     active: bool,
@@ -69,16 +70,18 @@ impl Scheduler {
         // example, 1 Hz wraps at 1000 ms rather than one service tick later).
         let phase_denominator = u64::from(TICKS_PER_SECOND) * 1_000;
         let cycle_numerator = u64::from(config.frequency_millihz) * u64::from(elapsed);
-        let fractional_cycle_numerator = cycle_numerator % phase_denominator;
-        let scaled = (fractional_cycle_numerator << 32) + self.phase_remainder;
-        self.phase = self.phase.wrapping_add((scaled / phase_denominator) as u32);
-        self.phase_remainder = scaled % phase_denominator;
+        let (_, fractional_cycle_numerator) = div_rem_u64(cycle_numerator, phase_denominator);
+        let scaled = (fractional_cycle_numerator << 32) + u64::from(self.phase_remainder);
+        let (step, remainder) = div_rem_u64(scaled, phase_denominator);
+        self.phase = self.phase.wrapping_add(step as u32);
+        self.phase_remainder = remainder as u32;
         let x = (self.phase >> 16) as u16;
         let normalized = match config.waveform {
             AwgWaveform::Square => {
                 // Begin each cycle LOW, then remain HIGH for the configured
                 // percentage. This preserves the existing 50% phase convention.
-                let high_threshold = (u64::from(100 - config.duty_percent) << 32) / 100;
+                let (high_threshold, _) =
+                    div_rem_u64(u64::from(100 - config.duty_percent) << 32, 100);
                 if u64::from(self.phase) >= high_threshold {
                     u16::MAX
                 } else {

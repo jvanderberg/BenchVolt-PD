@@ -37,10 +37,12 @@ impl MeasurementAccumulator {
     fn take(&mut self) -> Measurement {
         let result = if self.valid && self.samples > 0 {
             Measurement {
-                millivolts: (self.millivolts / u64::from(self.samples)).min(u64::from(u16::MAX))
-                    as u16,
-                milliamps: (self.milliamps / u64::from(self.samples)).min(u64::from(u16::MAX))
-                    as u16,
+                millivolts: crate::math::div_rem_u64(self.millivolts, u64::from(self.samples))
+                    .0
+                    .min(u64::from(u16::MAX)) as u16,
+                milliamps: crate::math::div_rem_u64(self.milliamps, u64::from(self.samples))
+                    .0
+                    .min(u64::from(u16::MAX)) as u16,
                 valid: true,
             }
         } else {

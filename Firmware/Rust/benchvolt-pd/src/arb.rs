@@ -394,7 +394,8 @@ impl Scheduler {
             }
             overrun -= dwell;
             if self.period_ticks != 0 && overrun >= self.period_ticks {
-                let skipped_cycles = overrun / self.period_ticks;
+                let (skipped_cycles, leftover) =
+                    crate::math::div_rem_u64(overrun, self.period_ticks);
                 if start.repetitions != 0
                     && u64::from(self.cycles) + skipped_cycles >= u64::from(start.repetitions)
                 {
@@ -403,7 +404,7 @@ impl Scheduler {
                 }
                 self.cycles = self.cycles.saturating_add(skipped_cycles as u32);
                 self.skipped_cycles = self.skipped_cycles.saturating_add(skipped_cycles as u32);
-                overrun %= self.period_ticks;
+                overrun = leftover;
             }
         }
     }

@@ -17,6 +17,7 @@ pub mod dispatch;
 pub mod early_shutdown;
 pub mod input_policy;
 pub mod limits;
+pub mod math;
 pub mod load;
 pub mod measurement;
 pub mod monitoring;

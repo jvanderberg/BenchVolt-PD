@@ -6,7 +6,7 @@ pub const AWG_ITEM_COUNT: u8 = 8;
 
 pub const HELP_VISIBLE_LINES: u8 = 7;
 pub const HELP_SCROLL_STEP: u8 = 5;
-pub const HELP_TEXT: &str = "MAIN MENU\nPower - DC outputs\nAWG - CH4/CH5 waveforms\nSettings - save/restore\nSystem - info\nNAVIGATION\nHold - go back\nClick - move focus\nTurn - select or edit\nPOWER\nClick through Output, Voltage,\nCV/CC, and Current Limit.\nTurn to edit, click to finish.\nCV / CC\nCH4 and CH5 support CC.\nAWG\nCH4 or CH5, up to 120 Hz.\nSet Low, High, then Start.";
+pub const HELP_TEXT: &str = "MAIN MENU\nPower - DC outputs\nAWG - CH4/CH5 waveforms\nSettings - save/restore\nSystem - info\nNAVIGATION\nHold - go back\nClick - focus\nTurn - select / edit\nPOWER\nClick: Output, Voltage,\nCV/CC, and Current Limit.\nTurn to edit, click to finish.\nCV / CC\nCH4 and CH5 support CC.\nAWG\nCH4 or CH5, up to 120 Hz.\nSet Low, High, Start.";
 
 const fn line_count(text: &str) -> u8 {
     let bytes = text.as_bytes();

@@ -102,11 +102,23 @@ where
     }
 }
 
+/// A blank row separates Apply/Cancel from the PDO list; a full seven-PDO
+/// list needs that space back to stay on the 170 px panel.
+fn row_y(state: &AppState, index: usize) -> i32 {
+    let mut y = 30 + index as i32 * 15;
+    if index >= usize::from(state.pd_source_count)
+        && usize::from(state.pd_source_count) < benchvolt_pd::app::PD_SOURCE_MAX_PDOS
+    {
+        y += 15;
+    }
+    y
+}
+
 fn draw_row<D>(view: &mut BenchVoltView<D>, state: &AppState, index: usize)
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let y = 30 + index as i32 * 15;
+    let y = row_y(state, index);
     let selected = usize::from(state.menu_selection) == index;
     let count = usize::from(state.pd_source_count);
     view.fill_rect(

@@ -141,11 +141,23 @@ impl<const N: usize> PaintQueue<N> {
         }
     }
 
+    /// Newly pushed commands only try to merge into the most recent few
+    /// entries. This scan runs inside an interrupt-free section: unbounded,
+    /// with its O(len) overlap check per candidate, it reaches tens of
+    /// thousands of iterations against a full queue — milliseconds of
+    /// interrupts-off time PER PUSH. A sustained push burst then starves the
+    /// DMA drain ISR below the enqueue deadline and latches a false display
+    /// failure (observed on hardware from the PD Source screen's repaints).
+    /// Raster-order span coalescing — the merging that matters — happens
+    /// within the last handful of entries.
+    const MERGE_SCAN_DEPTH: usize = 8;
+
     pub fn push(&mut self, command: PaintCommand) -> Result<(), PaintCommand> {
         if command.width == 0 || command.height == 0 {
             return Ok(());
         }
-        for offset in (0..self.len).rev() {
+        let scan_start = self.len - self.len.min(Self::MERGE_SCAN_DEPTH);
+        for offset in (scan_start..self.len).rev() {
             let index = (self.head + offset) % N;
             let Some(merged) = merge(self.commands[index].decode(), command) else {
                 continue;
@@ -424,6 +436,26 @@ mod tests {
         assert_eq!(queue.len(), 2);
         assert!(queue.pop().unwrap().pixel_count() <= MAX_COALESCED_PIXELS);
         assert!(queue.pop().unwrap().pixel_count() <= MAX_COALESCED_PIXELS);
+    }
+
+    #[test]
+    fn merge_scan_is_bounded_so_pushes_stay_cheap_under_interrupt_free() {
+        let mut queue = PaintQueue::<64>::new();
+        queue.push(span(0, 0, 4)).unwrap();
+        // Bury the mergeable entry deeper than the scan depth (staggered so
+        // the fillers cannot merge with each other).
+        for row in 1..=PaintQueue::<64>::MERGE_SCAN_DEPTH as u16 {
+            queue.push(span(100 + row * 3, row * 2, 1)).unwrap();
+        }
+        queue.push(span(4, 0, 4)).unwrap();
+        // No merge with the buried entry: it stays a separate command.
+        assert_eq!(queue.len(), 2 + PaintQueue::<64>::MERGE_SCAN_DEPTH);
+
+        // Within the scan depth the raster-order case still coalesces.
+        let mut queue = PaintQueue::<64>::new();
+        queue.push(span(0, 0, 4)).unwrap();
+        queue.push(span(4, 0, 4)).unwrap();
+        assert_eq!(queue.len(), 1);
     }
 
     #[test]

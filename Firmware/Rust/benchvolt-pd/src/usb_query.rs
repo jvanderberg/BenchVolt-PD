@@ -169,7 +169,7 @@ pub fn dispatch_command(
         write!(
             &mut response,
             "CH{},{},{},{},{},{}\r\n",
-            state.awg.channel + 1,
+            u32::from(state.awg.channel) + 1,
             match state.awg.waveform {
                 AwgWaveform::Square => "SQU",
                 AwgWaveform::Triangle => "TRI",
@@ -177,7 +177,7 @@ pub fn dispatch_command(
                 AwgWaveform::Sine => "SIN",
             },
             state.awg.frequency_millihz,
-            state.awg.duty_percent,
+            u32::from(state.awg.duty_percent),
             state.awg.low_mv,
             state.awg.high_mv,
         )
@@ -190,7 +190,9 @@ pub fn dispatch_command(
             Some(contract) => write!(
                 &mut response,
                 "{},{},{}\r\n",
-                contract.source_position, contract.millivolts, contract.operating_milliamps,
+                u32::from(contract.source_position),
+                contract.millivolts,
+                contract.operating_milliamps,
             )
             .ok(),
             None => response.write_str("NONE\r\n").ok(),
@@ -222,13 +224,13 @@ pub fn dispatch_command(
         write!(
             &mut response,
             "A{} R{},{} P{} G{} O{} V{} T{},{} N{}\r\n",
-            u8::from(snapshot.active),
+            u32::from(snapshot.active),
             snapshot.last.millivolts,
             snapshot.last.milliamps,
             snapshot.peak_milliamps,
-            snapshot.grace_remaining,
-            snapshot.overcurrent_samples,
-            snapshot.voltage_samples,
+            u32::from(snapshot.grace_remaining),
+            u32::from(snapshot.overcurrent_samples),
+            u32::from(snapshot.voltage_samples),
             snapshot.trip.millivolts,
             snapshot.trip.milliamps,
             snapshot.samples_since_enable,
@@ -311,8 +313,8 @@ pub fn dispatch_command(
             write!(
                 &mut response,
                 "OP{} ERR{} RETRIES{}\r\n",
-                diagnostics.hw_last_operation,
-                diagnostics.hw_last_error,
+                u32::from(diagnostics.hw_last_operation),
+                u32::from(diagnostics.hw_last_error),
                 diagnostics.hw_retry_count,
             )
             .ok();
@@ -326,10 +328,10 @@ pub fn dispatch_command(
                 diagnostics.display_label,
                 diagnostics.display_queued,
                 diagnostics.display_high_water,
-                u8::from(diagnostics.display_active),
-                u8::from(diagnostics.display_overflowed),
-                u8::from(diagnostics.display_failed),
-                u8::from(diagnostics.display_ready_for_seal),
+                u32::from(diagnostics.display_active),
+                u32::from(diagnostics.display_overflowed),
+                u32::from(diagnostics.display_failed),
+                u32::from(diagnostics.display_ready_for_seal),
             )
             .ok();
             finish(out, &response)
@@ -371,7 +373,7 @@ pub fn dispatch_command(
                 write!(
                     &mut response,
                     "READY,PDO{},{}mV,{}mA,MAX{}mA\r\n",
-                    contract.source_position,
+                    u32::from(contract.source_position),
                     contract.millivolts,
                     contract.operating_milliamps,
                     contract.maximum_milliamps,
@@ -397,7 +399,7 @@ pub fn dispatch_command(
         }
         b"SYST:LOOP?" => {
             let mut response = Response::new_empty();
-            write!(&mut response, "{}\r\n", diagnostics.loop_gap_ticks).ok();
+            write!(&mut response, "{}\r\n", u32::from(diagnostics.loop_gap_ticks)).ok();
             finish(out, &response)
         }
         b"SYST:TICK?" => {
@@ -507,7 +509,7 @@ pub fn dispatch_command(
                     write!(
                         &mut response,
                         "CH{},{} V:{} I:{} E:{} D:{}\r\n",
-                        channel + 1,
+                        u32::from(channel) + 1,
                         focus,
                         output.setpoint_mv,
                         output.current_limit_ma,

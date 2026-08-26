@@ -196,8 +196,9 @@ setting is focused to adjust it in 10 mV or 10 mA steps. Settings are locked
 only during an output transition. Live CH4/CH5 voltage changes pass through
 verified hardware side effects; software current thresholds change immediately.
 With no focus, rotation navigates
-screens; holding for 500 ms returns to the main menu immediately without
-waiting for release. Encoder acceleration tracks successive detents over real
+screens; holding for 500 ms navigates back one level immediately without
+waiting for release (channel detail and USB-PD input screens return to the
+DC overview; everything else returns to the main menu). Encoder acceleration tracks successive detents over real
 elapsed time and ramps through 2x/4x/8x/16x, while an isolated detent retains
 10 mV/10 mA precision.
 

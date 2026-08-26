@@ -134,7 +134,7 @@ impl ButtonTracker {
                     action = Some(Action::RequestReboot);
                 } else if held_ms >= OVERVIEW_HOLD_MS && !self.overview_hold_fired {
                     self.overview_hold_fired = true;
-                    action = Some(Action::GoMainMenu);
+                    action = Some(Action::NavigateBack);
                 }
             }
         } else if !self.high {
@@ -142,7 +142,13 @@ impl ButtonTracker {
                 let held_ms = tick.wrapping_sub(pressed_at);
                 self.last_press_tick = tick;
                 if held_ms >= OVERVIEW_HOLD_MS {
-                    action = Some(Action::GoMainMenu);
+                    // Fire only if the in-hold sample did not already: back
+                    // navigation is hierarchical, so a duplicate would step
+                    // up two levels (the old always-main-menu target made
+                    // the duplicate harmlessly idempotent).
+                    if !self.overview_hold_fired {
+                        action = Some(Action::NavigateBack);
+                    }
                 } else if held_ms >= BUTTON_CLICK_MIN_MS {
                     action = Some(Action::NextControl);
                 }
@@ -251,7 +257,7 @@ mod tests {
         assert!(button.sample(200, false).is_none());
         assert!(matches!(
             button.sample(700, false),
-            Some(Action::GoMainMenu)
+            Some(Action::NavigateBack)
         ));
         assert!(button.sample(701, false).is_none());
         assert!(matches!(
@@ -287,10 +293,18 @@ mod tests {
         assert!(button.sample(259, false).is_none());
         assert!(matches!(
             button.sample(759, false),
-            Some(Action::GoMainMenu)
+            Some(Action::NavigateBack)
         ));
-        // This duplicate on release is legacy behavior, captured deliberately
-        // so changing it later is an explicit UI decision rather than refactor drift.
-        assert!(matches!(button.sample(760, true), Some(Action::GoMainMenu)));
+        // The legacy duplicate fire on release is gone: back navigation is
+        // hierarchical now, so a duplicate would step up two levels.
+        assert!(button.sample(760, true).is_none());
+
+        // A release crossing the hold threshold between samples still fires
+        // exactly once.
+        assert!(button.sample(900, false).is_none());
+        assert!(matches!(
+            button.sample(1_450, true),
+            Some(Action::NavigateBack)
+        ));
     }
 }

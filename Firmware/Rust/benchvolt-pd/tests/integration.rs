@@ -305,7 +305,7 @@ fn pd_source_apply_flow_arms_guards_and_reports_the_outcome() {
     assert!(!harness.state().pd_source_stale);
 
     // The back gesture discards the armed choice and the banner.
-    harness.dispatch(Action::GoMainMenu);
+    harness.dispatch(Action::NavigateBack);
     assert!(harness.state().pd_source_armed.is_none());
     assert!(harness.state().pd_banner_mv.is_none());
 }

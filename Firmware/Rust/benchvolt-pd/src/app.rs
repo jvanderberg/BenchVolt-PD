@@ -436,7 +436,7 @@ pub enum Action {
     NextScreen,
     PreviousScreen,
     GoOverview,
-    GoMainMenu,
+    NavigateBack,
     RequestReboot,
     BootRecoveryStatus(bool),
     NavigateMenu(i8),
@@ -569,16 +569,25 @@ impl Reducer for AppReducer {
                 next.focus = ControlFocus::None;
                 true
             }
-            Action::GoMainMenu if state.screen == Screen::MainMenu => false,
-            Action::GoMainMenu => {
-                next.screen = Screen::MainMenu;
+            Action::NavigateBack if state.screen == Screen::MainMenu => false,
+            Action::NavigateBack => {
                 next.focus = ControlFocus::None;
-                next.menu_selection = 0;
-                next.profile_status = ProfileStatus::Idle;
-                next.pd_source_armed = None;
-                next.pd_banner_mv = None;
-                if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
-                    next.awg_status = AwgStatus::StopRequested;
+                match state.screen {
+                    // The DC detail screens step back to the channel list;
+                    // every other screen returns to the main menu.
+                    Screen::Channel(_) | Screen::UsbPdInput => {
+                        next.screen = Screen::Overview;
+                    }
+                    _ => {
+                        next.screen = Screen::MainMenu;
+                        next.menu_selection = 0;
+                        next.profile_status = ProfileStatus::Idle;
+                        next.pd_source_armed = None;
+                        next.pd_banner_mv = None;
+                        if !matches!(state.awg_status, AwgStatus::Stopped | AwgStatus::Fault) {
+                            next.awg_status = AwgStatus::StopRequested;
+                        }
+                    }
                 }
                 true
             }
@@ -1800,6 +1809,28 @@ mod tests {
     }
 
     #[test]
+    fn back_navigation_is_hierarchical_on_the_dc_screens() {
+        let mut state = AppState::new(true, None);
+        state.screen = Screen::Channel(2);
+        state.focus = ControlFocus::CurrentLimit;
+        state = AppReducer::reduce(&state, Action::NavigateBack);
+        assert!(state.screen == Screen::Overview);
+        assert!(state.focus == ControlFocus::None);
+        state = AppReducer::reduce(&state, Action::NavigateBack);
+        assert!(state.screen == Screen::MainMenu);
+        assert!(AppReducer::reduce(&state, Action::NavigateBack) == state);
+
+        state.screen = Screen::UsbPdInput;
+        state = AppReducer::reduce(&state, Action::NavigateBack);
+        assert!(state.screen == Screen::Overview);
+
+        // Menu-family screens still return straight to the main menu.
+        state.screen = Screen::PdSource;
+        state = AppReducer::reduce(&state, Action::NavigateBack);
+        assert!(state.screen == Screen::MainMenu);
+    }
+
+    #[test]
     fn dc_screen_cycle_keeps_pd_diagnostics_last() {
         let mut state = AppState::new(true, Some(25 * 16));
         state.screen = Screen::Overview;
@@ -1842,7 +1873,7 @@ mod tests {
         state = AppReducer::reduce(&state, Action::NavigateMenu(1));
         assert_eq!(state.help_scroll, 5);
         state = AppReducer::reduce(&state, Action::NavigateMenu(12));
-        assert_eq!(state.help_scroll, 10);
+        assert_eq!(state.help_scroll, HELP_MAX_SCROLL.min(10));
         state.help_scroll = 25;
         state = AppReducer::reduce(&state, Action::NavigateMenu(1));
         assert_eq!(state.help_scroll, HELP_MAX_SCROLL);

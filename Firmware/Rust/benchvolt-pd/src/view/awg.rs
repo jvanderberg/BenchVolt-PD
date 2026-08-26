@@ -90,7 +90,7 @@ where
     );
     let mut value: String<32> = String::new();
     match index {
-        0 => write!(&mut value, "CH{}", state.awg.channel + 1).ok(),
+        0 => write!(&mut value, "CH{}", u32::from(state.awg.channel) + 1).ok(),
         1 => value
             .push_str(match state.awg.waveform {
                 AwgWaveform::Square => "SQUARE",
@@ -108,7 +108,7 @@ where
         .ok(),
         3 => {
             if state.awg.waveform == AwgWaveform::Square {
-                write!(&mut value, "{}%", state.awg.duty_percent).ok()
+                write!(&mut value, "{}%", u32::from(state.awg.duty_percent)).ok()
             } else {
                 value.push_str("--").ok()
             }

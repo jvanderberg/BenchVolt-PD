@@ -741,7 +741,7 @@ fn main() -> ! {
                     }
                     arb_runtime::write(chunk);
                     let mut response: String<32> = String::new();
-                    write!(&mut response, "OK:ACK:CH{}\r\n", chunk.channel + 1).ok();
+                    write!(&mut response, "OK:ACK:CH{}\r\n", u32::from(chunk.channel) + 1).ok();
                     queue_usb_response(response.as_bytes());
                 }
                 UsbIntent::ArbStart(start) => {
@@ -1156,7 +1156,7 @@ fn main() -> ! {
                 write!(
                     &mut response,
                     "OK:CH{}_ARB_STARTED_PTS:{}\r\n",
-                    start.channel + 1,
+                    u32::from(start.channel) + 1,
                     start.count
                 )
                 .ok();

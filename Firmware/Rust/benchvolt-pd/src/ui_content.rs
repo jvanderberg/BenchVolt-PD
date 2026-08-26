@@ -6,7 +6,7 @@ pub const AWG_ITEM_COUNT: u8 = 8;
 
 pub const HELP_VISIBLE_LINES: u8 = 7;
 pub const HELP_SCROLL_STEP: u8 = 5;
-pub const HELP_TEXT: &str = "MAIN MENU\nPower - DC outputs\nAWG - CH4/CH5 waveforms\nSettings - save/restore\nSystem - info\nNAVIGATION\nHold - go back\nClick - focus\nTurn - select / edit\nPOWER\nClick: Output, Voltage,\nCV/CC, and Current Limit.\nTurn to edit, click to finish.\nCV / CC\nCH4 and CH5 support CC.\nAWG\nCH4 or CH5, up to 120 Hz.\nSet Low, High, Start.";
+pub const HELP_TEXT: &str = "MAIN MENU\nPower - DC outputs\nAWG - waveforms\nSettings - save/restore\nSystem - info\nNAVIGATION\nHold - go back\nClick - focus\nTurn - select / edit\nPOWER\nClick: Output, Voltage,\nCV/CC, and Current Limit.\nTurn to edit, click to finish.\nAWG\nCH4/CH5, CC, up to 120 Hz.\nSet Low, High, Start.";
 
 const fn line_count(text: &str) -> u8 {
     let bytes = text.as_bytes();
@@ -35,9 +35,9 @@ pub fn help_footer(scroll: u8) -> String<40> {
     write!(
         &mut footer,
         "TURN scroll  CLICK back  {}-{}/{}",
-        scroll + 1,
-        (scroll + HELP_VISIBLE_LINES).min(HELP_MAX_SCROLL + HELP_VISIBLE_LINES),
-        HELP_MAX_SCROLL + HELP_VISIBLE_LINES,
+        u32::from(scroll) + 1,
+        u32::from((scroll + HELP_VISIBLE_LINES).min(HELP_MAX_SCROLL + HELP_VISIBLE_LINES)),
+        u32::from(HELP_MAX_SCROLL + HELP_VISIBLE_LINES),
     )
     .ok();
     footer
@@ -53,26 +53,26 @@ mod tests {
     fn menu_counts_and_help_bounds_come_from_the_painted_content() {
         assert_eq!(MAIN_MENU_ITEMS.len(), 6);
         assert_eq!(HELP_TEXT.lines().count(), usize::from(HELP_LINE_COUNT));
-        assert_eq!(HELP_MAX_SCROLL, 11);
+        assert_eq!(HELP_MAX_SCROLL, 9);
         assert_eq!(HELP_MAX_SCROLL + HELP_VISIBLE_LINES, HELP_LINE_COUNT);
     }
 
     #[test]
-    fn help_headings_are_exactly_the_five_section_titles() {
+    fn help_headings_are_exactly_the_four_section_titles() {
         let headings: std::vec::Vec<&str> = HELP_TEXT
             .lines()
             .filter(|line| is_help_heading(line))
             .collect();
         assert_eq!(
             headings,
-            ["MAIN MENU", "NAVIGATION", "POWER", "CV / CC", "AWG"]
+            ["MAIN MENU", "NAVIGATION", "POWER", "AWG"]
         );
     }
 
     #[test]
     fn maximum_help_footer_is_complete_and_fits_the_screen() {
         let footer = help_footer(HELP_MAX_SCROLL);
-        assert_eq!(footer.as_str(), "TURN scroll  CLICK back  12-18/18");
+        assert_eq!(footer.as_str(), "TURN scroll  CLICK back  10-16/16");
         assert!(footer.len() * 8 <= 272);
     }
 }

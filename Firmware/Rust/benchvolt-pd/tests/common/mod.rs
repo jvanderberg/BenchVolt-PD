@@ -500,7 +500,11 @@ impl Harness {
             self.state().awg_status,
             AwgStatus::Stopped | AwgStatus::Fault
         ) {
-            self.dispatch(Action::GoMainMenu);
+            // Back navigation is hierarchical; from a DC detail screen the
+            // first step lands on Overview, the second on the main menu
+            // (which is what requests the AWG stop).
+            self.dispatch(Action::NavigateBack);
+            self.dispatch(Action::NavigateBack);
             self.tick(50);
         }
         let ok = execute_global_shutdown(&mut self.executor).is_ok();

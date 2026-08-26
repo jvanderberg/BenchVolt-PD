@@ -59,7 +59,7 @@ pub fn pd_contract_label(contract: crate::pd::Contract) -> String<16> {
     write!(
         &mut label,
         "P{} {}V {}.{}A",
-        contract.source_position,
+        u32::from(contract.source_position),
         contract.millivolts / 1_000,
         contract.operating_milliamps / 1_000,
         contract.operating_milliamps % 1_000 / 100,

@@ -262,15 +262,20 @@ pub(crate) fn pdo_apply_step(
     let Some(request) = app.state().pd_apply_request else {
         return;
     };
+    // TRANSIENT conditions defer the apply — the request stays armed and is
+    // retried next pass — they must NOT consume it as a failure. The screen
+    // entry's own capability read opens the settle window, so an Apply
+    // clicked within a second of entry would otherwise always latch the
+    // PD ERROR state (observed on hardware). While deferred, the reducer
+    // keeps blocking output enables, so the admission cannot rot.
+    if ls.pd_disturbed || power.is_busy() {
+        return;
+    }
     let outputs_physically_off = app.state().outputs_physically_off();
-    // Re-check the full admission at service time: the STUSB NVM program
-    // below must not run with the contract lost or the bus still settling
-    // from a recent Get_Source_Cap (the source may be about to hard-reset
-    // VBUS in response).
-    let mut ok = app.state().outputs_inactive()
-        && app.state().pd_contract.is_some()
-        && !ls.pd_disturbed
-        && !power.is_busy();
+    // HARD conditions fail the apply: the STUSB NVM program below must not
+    // run with the contract lost, and outputs cannot have appeared while
+    // the request was pending.
+    let mut ok = app.state().outputs_inactive() && app.state().pd_contract.is_some();
     if ok {
         let settings = PersistentSettings::from_state(app.state());
         ok = persist_settings(

@@ -1,7 +1,7 @@
 use crate::benchvolt_wait_for_flash_ready;
 use benchvolt_pd::settings::{
     decode as decode_settings, encode as encode_settings, PersistentSettings, RecordKind,
-    SettingsRecord, RECORD_SIZE,
+    SettingsRecord, RECORD_SIZE, SEQUENCE_MASK,
 };
 
 pub(crate) const BOOT_METADATA_ADDR: usize = 0x0801_F800;
@@ -138,26 +138,41 @@ fn program_settings_slot(slot: usize, record: SettingsRecord) -> bool {
     ok && decode_settings(&read_settings_slot(slot)) == Some(record)
 }
 
+/// Compaction erases the ONLY settings page before rewriting the live
+/// records from RAM, so it refuses to start once the program-failure budget
+/// is spent (a flash that rejects programs must keep its existing records),
+/// and each rewrite failure is charged against the budget with a bounded
+/// skip-and-retry so one marginal slot does not abandon the remaining
+/// records. Returns false when any record failed to land; RAM keeps every
+/// record either way, so the loss surfaces only at the next boot.
 pub(crate) fn compact_settings_store(store: &mut SettingsStore) -> bool {
+    if store.program_failures >= PROGRAM_FAILURE_BUDGET {
+        return false;
+    }
     let latest = store.latest;
     let profiles = store.profiles;
     if !erase_flash_page(SETTINGS_ADDR) {
         return false;
     }
     store.next_slot = 0;
-    if let Some(record) = latest {
-        if !program_settings_slot(0, record) {
-            return false;
+    let mut all_programmed = true;
+    for record in core::iter::once(latest).chain(profiles).flatten() {
+        let mut programmed = false;
+        while store.next_slot < SETTINGS_SLOTS
+            && store.program_failures < PROGRAM_FAILURE_BUDGET
+        {
+            if program_settings_slot(store.next_slot, record) {
+                store.program_failures = 0;
+                store.next_slot += 1;
+                programmed = true;
+                break;
+            }
+            store.program_failures += 1;
+            store.next_slot += 1;
         }
-        store.next_slot = 1;
+        all_programmed &= programmed;
     }
-    for record in profiles.into_iter().flatten() {
-        if !program_settings_slot(store.next_slot, record) {
-            return false;
-        }
-        store.next_slot += 1;
-    }
-    true
+    all_programmed
 }
 
 const PROGRAM_FAILURE_BUDGET: u8 = 3;
@@ -181,14 +196,12 @@ pub(crate) fn persist_settings_record(
         return false;
     }
     if store.next_slot >= SETTINGS_SLOTS {
-        // Compaction erases the only settings page before rewriting it, so
-        // it is admitted only when the caller says the system is in its
-        // quiet window (loop healthy, outside the boot attach churn) and no
-        // program failures suggest the rewrite would be lost.
-        if !allow_compaction
-            || store.program_failures != 0
-            || !compact_settings_store(store)
-        {
+        // Compaction is admitted only in the caller's quiet window (loop
+        // healthy, outside the boot attach churn). compact_settings_store
+        // itself enforces the failure budget, so a transient failure that
+        // happened to land on the final slot still gets its remaining
+        // retries instead of deadlocking persistence for the session.
+        if !allow_compaction || !compact_settings_store(store) {
             return false;
         }
     }
@@ -197,7 +210,7 @@ pub(crate) fn persist_settings_record(
             RecordKind::Autosave => store.latest,
             RecordKind::Profile(slot) => store.profiles[usize::from(slot)],
         }
-        .map(|record| record.sequence.wrapping_add(1))
+        .map(|record| record.sequence.wrapping_add(1) & SEQUENCE_MASK)
         .unwrap_or(1),
         kind,
         settings,

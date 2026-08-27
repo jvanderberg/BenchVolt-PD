@@ -150,7 +150,15 @@ pub(crate) fn pd_step(
             ),
             PdServiceEvent::Pd(benchvolt_pd::pd::PdEvent::Lost(error)) => {
                 // Observed contract churn: hold NVM writes until it settles.
-                ls.mark_pd_disturbed();
+                // Only when a contract actually existed — the read-only
+                // passive-discovery poll on a non-PD source emits Lost every
+                // 500 ms (< the 1 s settle window) and perturbs nothing;
+                // marking on it would latch the flag forever and permanently
+                // refuse SYST:PD:NEGOTIATE, the legacy-source recovery
+                // command whose whole purpose is the no-contract case.
+                if app.state().pd_contract.is_some() {
+                    ls.mark_pd_disturbed();
+                }
                 (
                     Action::PdFailed(error),
                     Some(benchvolt_pd::pd::PdEvent::Lost(error)),
@@ -283,12 +291,16 @@ pub(crate) fn pdo_apply_step(
         }
     }
     if ok {
-        // The reprofile re-advertises capabilities: negotiation in flight.
-        ls.mark_pd_disturbed();
+        // The reprofile re-advertises capabilities: negotiation in flight,
+        // and the source's hard-reset answer can lag by seconds — hold the
+        // NVM-write lockout for the same 5 s the settle-timeout below
+        // models, not just the standard 1 s window.
+        ls.pd_disturbed = true;
+        ls.pd_quiet_after = monotonic_ms().wrapping_add(5_000);
         // Arm the settle-timeout completion for the journaled flag (a
         // same-contract renegotiation emits no PD event to clear it).
         ls.pdo_settle_armed = true;
-        ls.pdo_settle_after = monotonic_ms().wrapping_add(5_000);
+        ls.pdo_settle_after = ls.pd_quiet_after;
     }
     dispatch_app(app, power, Action::PdoApplyFinished(ok));
 }

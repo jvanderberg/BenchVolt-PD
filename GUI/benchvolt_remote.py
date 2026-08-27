@@ -92,8 +92,10 @@ class BenchVoltRemote:
         self.send_scpi(f"SOUR:VOLT:CH{channel} {voltage:.2f}")
 
     def set_pdo(self, slot, v_mv, i_ma):
-        """Sets a specific PDO slot with target voltage (mV) and current (mA)."""
-        self.send_scpi(f"SOUR:PDO:SET {slot} {v_mv} {i_ma}")
+        """Sets a specific PDO slot with target voltage (mV) and current (mA).
+        Returns the firmware reply; the firmware answers ERR:BUSY for about a
+        second after any PDO list query while the PD bus settles."""
+        return self.query(f"SOUR:PDO:SET {slot} {v_mv} {i_ma}")
 
     def get_build_date(self):
         """Queries the firmware build date and time."""

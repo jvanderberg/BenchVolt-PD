@@ -2,6 +2,10 @@ use crate::app::{AppState, AwgConfig, AwgSource, AwgWaveform, RegulationMode, Te
 use crate::limits::{CH5_MAX_VOLTAGE_MV, CH5_MIN_VOLTAGE_MV};
 
 pub const RECORD_SIZE: usize = 48;
+/// Sequence numbers occupy 30 bits of the record; the top two bits tag the
+/// record kind. Incrementers must wrap within this mask or the post-program
+/// read-back verify (which compares decoded, masked values) mismatches.
+pub const SEQUENCE_MASK: u32 = 0x3fff_ffff;
 const MAGIC: u32 = 0x4256_5333;
 const COMMIT: u32 = 0x434f_4d54;
 
@@ -159,7 +163,7 @@ pub fn encode(record: SettingsRecord) -> [u8; RECORD_SIZE] {
         RecordKind::Profile(slot @ 0..=2) => u32::from(slot) + 1,
         RecordKind::Profile(_) => 0,
     };
-    let tagged_sequence = (record.sequence & 0x3fff_ffff) | (kind << 30);
+    let tagged_sequence = (record.sequence & SEQUENCE_MASK) | (kind << 30);
     bytes[4..8].copy_from_slice(&tagged_sequence.to_le_bytes());
     for (index, limit) in record.settings.current_limits_ma.iter().enumerate() {
         let offset = 8 + index * 2;
@@ -226,7 +230,7 @@ pub fn decode(bytes: &[u8; RECORD_SIZE]) -> Option<SettingsRecord> {
         _ => return None,
     };
     let record = SettingsRecord {
-        sequence: tagged_sequence & 0x3fff_ffff,
+        sequence: tagged_sequence & SEQUENCE_MASK,
         kind,
         settings: PersistentSettings {
             current_limits_ma: core::array::from_fn(|index| half(8 + index * 2)),

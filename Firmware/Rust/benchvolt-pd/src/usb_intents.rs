@@ -164,6 +164,12 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
             }
         }
         UsbIntent::PdDiagnostics => {
+            // Read-only, but ~2.5-4 ms of blocking soft I2C: never while the
+            // 2 kHz waveform sampler owns the loop.
+            if awg_engine_busy(ctx) {
+                queue_usb_response(b"ERR:BUSY\r\n");
+                return;
+            }
             let result = benchvolt_pd::pd::read_diagnostics(&mut SoftPdBus::new(
                 ctx.pd_bus,
                 ctx.power.delay_mut(),
@@ -216,6 +222,7 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
             if ctx.pd_service.command_pending()
                 || !ctx.app.state().outputs_inactive()
                 || awg_engine_busy(ctx)
+                || ctx.ls.pd_disturbed
             {
                 queue_usb_response(b"UI_PDO_LIST_START\r\nERR:BUSY\r\nUI_PDO_LIST_END\r\n");
                 return;

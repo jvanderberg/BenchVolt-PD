@@ -1404,7 +1404,10 @@ class BenchVoltUI(ctk.CTk):
             return
 
         raw_list = self.remote.query_pdo_list()
-        if not raw_list:
+        # A busy/error row inside the markers means the firmware refused the
+        # read (outputs on, or the PD bus still settling); keep the previous
+        # list instead of wiping the dropdown and its apply-map.
+        if not raw_list or any(line.startswith("ERR") for line in raw_list):
             return
         contract = self.remote.get_pd_contract()
         self.after(0, lambda: self._apply_pdo_list(raw_list, contract))
@@ -1498,15 +1501,24 @@ class BenchVoltUI(ctk.CTk):
         selected_text = self.pdo_menu.get()
         if hasattr(self, 'current_pdo_data') and selected_text in self.current_pdo_data:
             v_mv, i_ma = self.current_pdo_data[selected_text]
-            self.remote.set_pdo(3, v_mv, i_ma)
-            print(f"Applying PD Profile: Slot 3 | {v_mv}mV | {i_ma}mA")
+            reply = self.remote.set_pdo(3, v_mv, i_ma)
+            if reply and "ERR" in reply:
+                # Typically ERR:BUSY while the PD bus settles after a list
+                # query; surface it instead of silently doing nothing.
+                print(f"PDO apply refused ({reply.strip()}) - retry in a second")
+                self.pd_info.configure(text="PD BUSY - retry", text_color="#f39c12")
+            else:
+                print(f"Applying PD Profile: Slot 3 | {v_mv}mV | {i_ma}mA")
 
     def send_manual_pdo(self):
         try:
             v_mv = int(self.man_v_entry.get())
             i_ma = int(self.man_i_entry.get())
-            self.remote.set_pdo(3, v_mv, i_ma)
-            print(f"Applying Manual PD Profile: Slot 3 | {v_mv}mV | {i_ma}mA")
+            reply = self.remote.set_pdo(3, v_mv, i_ma)
+            if reply and "ERR" in reply:
+                print(f"Manual PDO apply refused ({reply.strip()}) - retry in a second")
+            else:
+                print(f"Applying Manual PD Profile: Slot 3 | {v_mv}mV | {i_ma}mA")
         except ValueError:
             print("Error: Manual PDO values are not valid integers!")
 

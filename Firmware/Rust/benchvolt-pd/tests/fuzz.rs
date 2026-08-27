@@ -235,10 +235,10 @@ fn random_event(harness: &mut Harness, rng: &mut Rng) {
             });
         }
         23 => {
-            harness.dispatch(if rng.below(2) == 0 {
-                Action::PdoApplyFinished(rng.below(2) == 0)
-            } else {
-                Action::PdoApplySettled
+            harness.dispatch(match rng.below(3) {
+                0 => Action::PdoApplyFinished(rng.below(2) == 0),
+                1 => Action::PdoApplySettled,
+                _ => Action::PdSourceRefresh,
             });
         }
         _ => harness.tick(rng.below(50) as u32),
@@ -292,7 +292,8 @@ fn action_fuzz_coverage(action: &Action) -> Coverage {
         | Action::HardwareSettingFailed { .. }
         | Action::PdSourceListLoaded { .. }
         | Action::PdoApplyFinished(_)
-        | Action::PdoApplySettled => Fuzzed,
+        | Action::PdoApplySettled
+        | Action::PdSourceRefresh => Fuzzed,
 
         // Emitted by the harness itself while fuzz runs: tick() drives the
         // protection/measurement/AWG service paths exactly like main.rs.

@@ -278,7 +278,7 @@ fn main() -> ! {
             cadence.healthy_for(3_000),
         );
         loop_steps::maintenance_step(
-            &app,
+            &mut app,
             &mut power_driver,
             &mut pd_bus,
             &cadence,

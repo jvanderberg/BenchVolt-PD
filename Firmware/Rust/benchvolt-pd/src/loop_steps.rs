@@ -587,7 +587,7 @@ pub(crate) fn persistence_step(
 /// 3. the STUSB4500 USB_COMM_CAPABLE NVM check, so PD requests declare USB
 ///    data support and macOS keeps the port's data connection alive.
 pub(crate) fn maintenance_step(
-    app: &FirmwareApp,
+    app: &mut FirmwareApp,
     power: &mut FirmwarePower,
     pd_bus: &mut PdI2c,
     cadence: &ServiceCadence,
@@ -610,6 +610,11 @@ pub(crate) fn maintenance_step(
             let settings = PersistentSettings::from_state(app.state());
             if persist_settings(settings_store, settings, true, true) {
                 settings_effect.mark_saved(settings);
+                // The apply-in-progress note is out of flash, so an
+                // automatic capability read can no longer boot-loop a
+                // source that hard-resets on Get_Source_Cap: reload the
+                // list the reboot landed the user in front of.
+                dispatch_app(app, power, Action::PdSourceRefresh);
             }
         }
     }

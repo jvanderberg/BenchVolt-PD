@@ -656,6 +656,25 @@ fn pd_source_screen_arms_applies_and_cancels_under_the_outputs_off_rule() {
 }
 
 #[test]
+fn pd_source_refresh_reloads_the_list_after_an_apply_reboot() {
+    // The apply reboot lands directly on the PD Source screen with an
+    // empty list and the result banner; once the loop has cleared the
+    // journaled flag from flash it fires PdSourceRefresh so the list
+    // enumerates again without the user leaving and re-entering.
+    let mut state = AppState::new(true, None);
+    state.screen = Screen::PdSource;
+    state.pd_banner_mv = Some(15_000);
+    let refreshed = AppReducer::reduce(&state, Action::PdSourceRefresh);
+    assert!(refreshed.pd_source_stale);
+    assert_eq!(refreshed.pd_banner_mv, Some(15_000));
+    // Already-stale and off-screen refreshes are no-ops.
+    assert!(AppReducer::reduce(&refreshed, Action::PdSourceRefresh) == refreshed);
+    let mut elsewhere = AppState::new(true, None);
+    elsewhere.screen = Screen::Overview;
+    assert!(AppReducer::reduce(&elsewhere, Action::PdSourceRefresh) == elsewhere);
+}
+
+#[test]
 fn pd_source_list_reload_clamps_the_armed_row_and_cursor() {
     let mut state = AppState::new(true, None);
     state.screen = Screen::PdSource;

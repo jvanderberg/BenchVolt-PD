@@ -532,6 +532,12 @@ pub enum Action {
     /// flag is done. Clearing it in RAM lets the next journal write clear
     /// flash, preventing a spurious banner boot.
     PdoApplySettled,
+    /// Ask the PD Source screen to reload its list. Fired by the loop once
+    /// the journaled apply flag has been cleared from flash after an
+    /// apply-induced reboot: only then is an automatic capability read safe,
+    /// because a source that answers it with a VBUS hard reset now produces
+    /// a normal next boot instead of a boot loop.
+    PdSourceRefresh,
 }
 
 pub struct AppReducer;
@@ -1685,6 +1691,15 @@ impl Reducer for AppReducer {
             Action::PdoApplySettled if state.pdo_apply_pending_mv == 0 => false,
             Action::PdoApplySettled => {
                 next.pdo_apply_pending_mv = 0;
+                true
+            }
+            Action::PdSourceRefresh
+                if state.screen != Screen::PdSource || state.pd_source_stale =>
+            {
+                false
+            }
+            Action::PdSourceRefresh => {
+                next.pd_source_stale = true;
                 true
             }
             Action::PdoApplyFinished(_) if state.pd_apply_request.is_none() => false,

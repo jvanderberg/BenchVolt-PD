@@ -11,6 +11,49 @@ use reducto::EffectApp;
 
 use crate::boot::{persist_settings_record, SettingsStore};
 
+/// The single confirmed global-shutdown idiom (README invariant #5): run the
+/// verified all-off sequence; on failure escalate to the raw register-level
+/// emergency shutdown; dispatch the matching completion either way so state
+/// never lies about the hardware. Every synchronous shutdown site funnels
+/// through here — returns whether the verified shutdown succeeded so callers
+/// can choose their follow-up (USB reply, next sequence step).
+pub(crate) fn confirmed_global_shutdown<V, D, const Q: usize>(
+    app: &mut EffectApp<AppReducer, V, FirmwareEffectPlanner, Q>,
+    power_driver: &mut PowerExecutor<D>,
+) -> bool
+where
+    V: reducto::View<State = AppState>,
+    D: PowerDriver,
+{
+    if execute_global_shutdown(power_driver).is_ok() {
+        dispatch_app(app, power_driver, Action::GlobalShutdownApplied);
+        true
+    } else {
+        unsafe { benchvolt_pd::early_shutdown::raw_emergency_shutdown() };
+        dispatch_app(app, power_driver, Action::GlobalShutdownFailed);
+        false
+    }
+}
+
+/// Confirmed AWG stop: verified shutdown, then acknowledge the stopped
+/// engine. Returns the USB reply bytes so the three remote stop paths stay
+/// one line each.
+pub(crate) fn stop_awg_confirmed<V, D, const Q: usize>(
+    app: &mut EffectApp<AppReducer, V, FirmwareEffectPlanner, Q>,
+    power_driver: &mut PowerExecutor<D>,
+) -> &'static [u8]
+where
+    V: reducto::View<State = AppState>,
+    D: PowerDriver,
+{
+    if confirmed_global_shutdown(app, power_driver) {
+        dispatch_app(app, power_driver, Action::AwgStopped);
+        b"OK\r\n"
+    } else {
+        b"ERR:HARDWARE\r\n"
+    }
+}
+
 /// A request the reducer rejected because the channel is mid-transition or
 /// AWG is active failed for a transient reason, not a hardware fault.
 fn transiently_busy(state: &AppState, channel: u8) -> bool {
@@ -152,14 +195,13 @@ where
         }
         ProfileRequest::Load(slot) => {
             if let Some(record) = settings_store.profiles[usize::from(slot)] {
-                if execute_global_shutdown(power_driver).is_ok() {
+                if confirmed_global_shutdown(app, power_driver) {
                     dispatch_app(
                         app,
                         power_driver,
                         Action::ApplyProfile(record.settings, ProfileStatus::Loaded(slot)),
                     );
                 } else {
-                    dispatch_app(app, power_driver, Action::GlobalShutdownFailed);
                     dispatch_app(
                         app,
                         power_driver,
@@ -175,7 +217,7 @@ where
             }
         }
         ProfileRequest::FactoryDefaults => {
-            if execute_global_shutdown(power_driver).is_ok() {
+            if confirmed_global_shutdown(app, power_driver) {
                 let defaults = AppState::new(app.state().recovery_armed, None);
                 dispatch_app(
                     app,
@@ -187,7 +229,6 @@ where
                 );
                 factory_defaults_applied = true;
             } else {
-                dispatch_app(app, power_driver, Action::GlobalShutdownFailed);
                 dispatch_app(
                     app,
                     power_driver,

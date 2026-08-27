@@ -16,7 +16,7 @@ where
 {
     view.clear_screen();
     view.text20("PD Source", 6, 3, Rgb565::WHITE);
-    view.fill_rect(0, 27, 320, 1, Rgb565::new(8, 16, 16));
+    view.fill_rect(0, 27, 320, 1, super::DIVIDER);
     draw_content(view, state);
 }
 
@@ -127,7 +127,7 @@ where
         230,
         15,
         if selected {
-            Rgb565::new(0, 18, 24)
+            super::SELECTION_FILL
         } else {
             Rgb565::BLACK
         },

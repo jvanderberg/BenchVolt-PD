@@ -1,6 +1,6 @@
 use benchvolt_pd::app::Measurement;
 use embedded_hal::adc::Channel;
-use stm32f0xx_hal::{adc::Adc as HalAdc, pac, rcc::Rcc};
+use stm32f0xx_hal::{adc::Adc as HalAdc, gpio, pac, rcc::Rcc};
 
 // At 48 MHz this permits roughly 500 us per hardware transition. A normal
 // 71.5-cycle conversion completes far sooner, while a failed ADC cannot hold
@@ -139,5 +139,41 @@ where
             milliamps: 0,
             valid: false,
         },
+    }
+}
+
+/// Every analog input the foreground loop samples, bundled with the bounded
+/// ADC so the measurement pass is one call from the loop.
+pub(crate) struct AdcBank {
+    pub(crate) adc: BoundedAdc,
+    pub(crate) ch1_voltage: gpio::gpioc::PC5<gpio::Analog>,
+    pub(crate) ch1_current: gpio::gpioa::PA3<gpio::Analog>,
+    pub(crate) ch2_voltage: gpio::gpioc::PC4<gpio::Analog>,
+    pub(crate) ch2_current: gpio::gpioa::PA2<gpio::Analog>,
+    pub(crate) ch3_voltage: gpio::gpioa::PA7<gpio::Analog>,
+    pub(crate) ch3_current: gpio::gpioa::PA1<gpio::Analog>,
+    pub(crate) ch4_voltage: gpio::gpiob::PB0<gpio::Analog>,
+    pub(crate) ch4_current: gpio::gpioa::PA4<gpio::Analog>,
+    pub(crate) ch5_voltage: gpio::gpiob::PB1<gpio::Analog>,
+    pub(crate) ch5_current: gpio::gpioa::PA5<gpio::Analog>,
+    pub(crate) sink_voltage: gpio::gpioc::PC0<gpio::Analog>,
+    pub(crate) sink_current: gpio::gpioa::PA0<gpio::Analog>,
+}
+
+impl AdcBank {
+    /// One protection-grade sample of all five outputs, with each channel's
+    /// voltage-divider scale applied.
+    pub(crate) fn read_outputs(&mut self) -> [Measurement; 5] {
+        [
+            read_channel_measurement(&mut self.adc, &mut self.ch1_voltage, &mut self.ch1_current, 1, 1),
+            read_channel_measurement(&mut self.adc, &mut self.ch2_voltage, &mut self.ch2_current, 1, 1),
+            read_channel_measurement(&mut self.adc, &mut self.ch3_voltage, &mut self.ch3_current, 1, 1),
+            read_channel_measurement(&mut self.adc, &mut self.ch4_voltage, &mut self.ch4_current, 2, 1),
+            read_channel_measurement(&mut self.adc, &mut self.ch5_voltage, &mut self.ch5_current, 78, 10),
+        ]
+    }
+
+    pub(crate) fn read_sink(&mut self) -> Measurement {
+        read_channel_measurement(&mut self.adc, &mut self.sink_voltage, &mut self.sink_current, 67, 10)
     }
 }

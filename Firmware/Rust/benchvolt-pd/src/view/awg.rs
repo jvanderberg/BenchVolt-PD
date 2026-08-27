@@ -16,7 +16,7 @@ where
 {
     view.clear_screen();
     view.text20("AWG", 6, 3, Rgb565::WHITE);
-    view.fill_rect(0, 27, 320, 1, Rgb565::new(8, 16, 16));
+    view.fill_rect(0, 27, 320, 1, super::DIVIDER);
     for index in 0..8 {
         draw_row(view, state, index);
     }
@@ -48,7 +48,7 @@ where
         190,
         16,
         if selected {
-            Rgb565::new(0, 18, 24)
+            super::SELECTION_FILL
         } else {
             Rgb565::BLACK
         },
@@ -83,7 +83,7 @@ where
         92,
         16,
         if selected {
-            Rgb565::new(0, 18, 24)
+            super::SELECTION_FILL
         } else {
             Rgb565::BLACK
         },

@@ -33,6 +33,11 @@ use reducto::View;
 use benchvolt_pd::app::{AppState, Screen, TemperatureUnit};
 use benchvolt_pd::view_projection::{seven_segment_mask, temperature_projection, TemperatureProjection};
 
+/// Shared palette: the row-selection highlight and the divider/grid tone
+/// used identically by every menu-style screen.
+pub(crate) const SELECTION_FILL: Rgb565 = Rgb565::new(0, 18, 24);
+pub(crate) const DIVIDER: Rgb565 = Rgb565::new(8, 16, 16);
+
 pub struct BenchVoltView<D> {
     display: D,
 }
@@ -298,7 +303,7 @@ where
     fn draw_menu(&mut self, title: &str, items: &[&str], state: &AppState) {
         self.clear_screen();
         self.text20(title, 6, 3, Rgb565::WHITE);
-        self.fill_rect(0, 27, 320, 1, Rgb565::new(8, 16, 16));
+        self.fill_rect(0, 27, 320, 1, DIVIDER);
         for (index, item) in items.iter().enumerate() {
             self.draw_menu_item(item, index, usize::from(state.menu_selection) == index);
         }
@@ -313,7 +318,7 @@ where
             310,
             22,
             if selected {
-                Rgb565::new(0, 18, 24)
+                SELECTION_FILL
             } else {
                 Rgb565::BLACK
             },

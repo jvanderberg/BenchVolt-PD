@@ -34,6 +34,21 @@ pub struct OutputModes {
     pub set: u32,
 }
 
+/// Turn off every independent output control without relying on initialized
+/// drivers, interrupts, or either I2C bus.
+///
+/// # Safety
+/// Performs raw volatile writes to fixed GPIO registers; only meaningful on
+/// the target hardware after the GPIO clocks are enabled (the firmware's
+/// `prepare_emergency_shutdown` does that before anything can fail).
+pub unsafe fn raw_emergency_shutdown() {
+    for port in PORTS {
+        unsafe {
+            core::ptr::write_volatile(port.bsrr, u32::from(port.pin_mask) << 16);
+        }
+    }
+}
+
 pub const fn output_modes(pin_mask: u16) -> OutputModes {
     let mut clear = 0;
     let mut set = 0;

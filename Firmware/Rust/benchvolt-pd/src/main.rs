@@ -1,3 +1,9 @@
+//! Firmware entry point: hardware bring-up followed by the foreground loop.
+//! The loop below is deliberately a thin orchestration — every step's policy
+//! lives in `loop_steps` (periodic services), `usb_intents` (USB command
+//! execution), or `runtime` (dispatch and shutdown idioms), so reading the
+//! `loop` block is a complete map of what one pass does and in what order.
+
 #![no_main]
 #![no_std]
 
@@ -7,48 +13,42 @@ mod boot;
 mod diagnostics;
 mod display_dma;
 mod input;
+mod loop_steps;
 mod reset_marker;
 mod runtime;
+mod types;
+mod usb_intents;
 mod usb_protocol;
 mod usb_transport;
 mod view;
 
-use core::fmt::Write as _;
-
-use benchvolt_pd::app::{Action, AppReducer, AppState, AwgSource, AwgStatus, Screen};
+use benchvolt_pd::app::{AppState, AwgStatus};
 use benchvolt_pd::arb::UploadSession as ArbUploadSession;
 use benchvolt_pd::cadence::ServiceCadence;
+use benchvolt_pd::early_shutdown::raw_emergency_shutdown;
 use benchvolt_pd::input_policy::{encoder_action, ButtonTracker};
 use benchvolt_pd::measurement::MeasurementWindows;
-use benchvolt_pd::monitoring::{ProtectionService, TpsStatusObservation};
-use benchvolt_pd::pd::{Service as PdService, ServiceEvent as PdServiceEvent};
-use benchvolt_pd::power::{execute_global_shutdown, FirmwareEffectPlanner, PowerExecutor, Rail};
+use benchvolt_pd::monitoring::ProtectionService;
+use benchvolt_pd::pd::Service as PdService;
+use benchvolt_pd::power::{execute_global_shutdown, PowerExecutor};
 use benchvolt_pd::reset_cause::ResetReason;
 use benchvolt_pd::settings::{PersistentSettings, SettingsDebouncer};
-use benchvolt_pd::usb_command::{
-    output_completion_response, pd_completion_response, pd_diagnostics_response, UsbIntent,
-};
-use benchvolt_pd::usb_output::{Admission, OutputTransaction, RequestResult};
-use benchvolt_pd::waveform::{Directive as WaveformDirective, Service as WaveformService};
+use benchvolt_pd::usb_output::OutputTransaction;
+use benchvolt_pd::waveform::Service as WaveformService;
 use board::{
-    adc::{read_channel_measurement, BoundedAdc},
+    adc::{AdcBank, BoundedAdc},
     i2c::{SoftI2c, SoftPdBus},
     power::HardwarePowerDriver,
 };
-use boot::{
-    compact_settings_store, erase_flash_page, load_settings_store, persist_settings,
-    BOOT_METADATA_ADDR, SETTINGS_SLOTS,
-};
+use boot::{compact_settings_store, load_settings_store, persist_settings, SETTINGS_SLOTS};
 use cortex_m_rt::{entry, exception, ExceptionFrame};
 use display_interface_spi::SPIInterface;
 use embedded_hal::digital::v2::InputPin;
-use heapless::String;
 use input::{monotonic_ms, take_encoder_adjustment};
+use loop_steps::LoopState;
 use mipidsi::{Builder, ColorInversion, ModelOptions, Orientation};
 use reducto::EffectApp;
-use runtime::{
-    dispatch_app, service_profile_request, set_current_limit, set_regulation_mode, set_voltage,
-};
+use runtime::{dispatch_app, service_profile_request};
 use stm32f0xx_hal::{
     delay::Delay,
     pac,
@@ -56,21 +56,10 @@ use stm32f0xx_hal::{
     rcc::{HSEBypassMode, USBClockSource},
     spi::{Mode, Phase, Polarity, Spi},
 };
-use usb_protocol::handle_usb_command;
-use usb_transport::{queue_usb_response, take_usb_command};
+use usb_intents::UsbCtx;
 use view::BenchVoltView;
 
 const FLASH_READY_SPINS: u32 = 12_000_000;
-
-/// Turn off every independent output control without relying on initialized
-/// drivers, interrupts, or either I2C bus.
-unsafe fn raw_emergency_shutdown() {
-    for port in benchvolt_pd::early_shutdown::PORTS {
-        unsafe {
-            core::ptr::write_volatile(port.bsrr, u32::from(port.pin_mask) << 16);
-        }
-    }
-}
 
 /// Make the raw shutdown path effective before watchdog and clock setup can
 /// fail: clock the GPIO banks, latch every enable low, then select output mode.
@@ -94,7 +83,7 @@ unsafe fn prepare_emergency_shutdown() {
     }
 }
 
-fn emergency_reset(reason: ResetReason) -> ! {
+pub(crate) fn emergency_reset(reason: ResetReason) -> ! {
     cortex_m::interrupt::disable();
     unsafe { raw_emergency_shutdown() };
     unsafe { reset_marker::record(reason) };
@@ -161,10 +150,6 @@ fn benchvolt_wait_for_flash_ready(status: *const u32) -> bool {
         core::hint::spin_loop();
     }
     false
-}
-
-fn monotonic_awg_tick() -> u16 {
-    unsafe { (*pac::TIM14::ptr()).cnt.read().cnt().bits() }
 }
 
 fn benchvolt_display_offset(_: &ModelOptions) -> (u16, u16) {
@@ -314,18 +299,18 @@ fn main() -> ! {
     dp.EXTI.pr.write(|w| w.pr12().set_bit());
 
     let (
-        mut ch1_current,
-        mut ch2_current,
-        mut ch3_current,
-        mut ch4_current,
-        mut ch5_current,
-        mut ch1_voltage,
-        mut ch2_voltage,
-        mut ch3_voltage,
-        mut ch4_voltage,
-        mut ch5_voltage,
-        mut sink_current,
-        mut sink_voltage,
+        ch1_current,
+        ch2_current,
+        ch3_current,
+        ch4_current,
+        ch5_current,
+        ch1_voltage,
+        ch2_voltage,
+        ch3_voltage,
+        ch4_voltage,
+        ch5_voltage,
+        sink_current,
+        sink_voltage,
     ) = cortex_m::interrupt::free(|cs| {
         (
             gpioa.pa3.into_analog(cs),
@@ -342,9 +327,24 @@ fn main() -> ! {
             gpioc.pc0.into_analog(cs),
         )
     });
-    let mut adc = match BoundedAdc::new(dp.ADC, &mut rcc) {
+    let adc = match BoundedAdc::new(dp.ADC, &mut rcc) {
         Ok(adc) => adc,
         Err(()) => emergency_reset(ResetReason::AdcInitialization),
+    };
+    let mut adc_bank = AdcBank {
+        adc,
+        ch1_voltage,
+        ch1_current,
+        ch2_voltage,
+        ch2_current,
+        ch3_voltage,
+        ch3_current,
+        ch4_voltage,
+        ch4_current,
+        ch5_voltage,
+        ch5_current,
+        sink_voltage,
+        sink_current,
     };
 
     let (sck, miso, mosi, dc, rst, cs, scl, sda, aux_scl, aux_sda, pd_scl, pd_sda, _pd_alert) =
@@ -402,7 +402,7 @@ fn main() -> ! {
             // pathological charger converges to a normal boot instead of a
             // boot loop. If the clearing write fails the banner merely
             // sticks for another boot.
-            initial_state.screen = Screen::PdSource;
+            initial_state.screen = benchvolt_pd::app::Screen::PdSource;
             initial_state.pd_source_stale = true;
             initial_state.pd_banner_mv = Some(pending_mv);
             let mut cleared = record.settings;
@@ -413,7 +413,7 @@ fn main() -> ! {
     initial_state.profile_present =
         core::array::from_fn(|index| settings_store.profiles[index].is_some());
     let mut power_driver = PowerExecutor::new(power_driver, monotonic_ms());
-    let mut app = EffectApp::<AppReducer, _, FirmwareEffectPlanner, 8>::new(
+    let mut app: types::FirmwareApp = EffectApp::new(
         BenchVoltView::new(display_dma::QueuedDisplay::new()),
         initial_state,
     );
@@ -433,20 +433,10 @@ fn main() -> ! {
     let mut protection = ProtectionService::default();
     let mut waveform_service = WaveformService::new();
     let mut arb_upload = ArbUploadSession::new();
-    // Deferred SOUR:WAVE:CHn:RUN ack: reply only once the builtin engine is
-    // actually running (or has faulted), mirroring the ARB start contract.
-    let mut pending_awg_ack: Option<u8> = None;
-    // Second half of a staggered AWG load-readout update: painting both value
-    // rows in one pass floods the display queue and stalls the 2 kHz waveform
-    // sampler, so the power row is deferred to the next measurement tick.
-    // Elapsed time withheld from the PD service while a waveform is running.
-    let mut pd_deferred_elapsed_ms: u16 = 0;
-    let mut last_waveform_tick = monotonic_awg_tick();
     let mut settings_effect = SettingsDebouncer::new(PersistentSettings::from_state(app.state()));
     let mut pd_service = PdService::new(app.state().sink_current_limit_ma);
     let mut input_ticks = monotonic_ms();
     let mut service_tick = input_ticks;
-    let mut comm_capable_checked = false;
     let mut button = ButtonTracker::new(encoder_sw.is_high().unwrap_or(true));
     let mut encoder_accumulator = benchvolt_pd::input_policy::EncoderAccumulator {
         last_tick: input_ticks,
@@ -454,430 +444,33 @@ fn main() -> ! {
         velocity: 0,
     };
     let mut usb_output = OutputTransaction::new();
-    let mut display_failure_handled = false;
-    // Capability-read pacing. Get_Source_Cap triggers a renegotiation the
-    // bench charger sometimes answers with a VBUS hard reset, and reads
-    // fired close together (or overlapping the entry repaint / a previous
-    // read's still-settling renegotiation) reboot the board far more often
-    // than the identical read issued alone over USB. So: wait after entering
-    // the screen before the first read, and space the single retry well past
-    // any in-flight PD message sequence.
-    let mut pd_list_failures: u8 = 0;
-    let mut pd_list_not_before: u16 = 0;
-    let mut was_on_pd_source = false;
+    let mut ls = LoopState {
+        pd_deferred_elapsed_ms: 0,
+        comm_capable_checked: false,
+        display_failure_handled: false,
+        pd_list_failures: 0,
+        pd_list_not_before: 0,
+        was_on_pd_source: false,
+        pending_awg_ack: None,
+        last_waveform_tick: loop_steps::monotonic_awg_tick(),
+    };
 
     loop {
-        'usb_command: {
-            let Some(command) = take_usb_command() else {
-                break 'usb_command;
-            };
-            match handle_usb_command(
-                command.as_slice(),
-                app.state(),
-                protection.channel_monitors(),
-            ) {
-                UsbIntent::None => {}
-                UsbIntent::JumpToBootloader => {
-                    // A bootloader transition is also a global safety transition.
-                    // Attempt every independent off control before resetting, even
-                    // if one driver operation reports a failure.
-                    if execute_global_shutdown(&mut power_driver).is_err() {
-                        unsafe { raw_emergency_shutdown() };
-                        dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
-                        queue_usb_response(b"ERR:HARDWARE\r\n");
-                        break 'usb_command;
-                    }
-                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
-                    if !erase_flash_page(BOOT_METADATA_ADDR) {
-                        unsafe { raw_emergency_shutdown() };
-                        queue_usb_response(b"ERR:FLASH\r\n");
-                        break 'usb_command;
-                    }
-                    queue_usb_response(b"OK:JUMPING_TO_BOOTLOADER\r\n");
-                    unsafe { raw_emergency_shutdown() };
-                    cortex_m::asm::delay(4_800_000);
-                    emergency_reset(ResetReason::BootloaderRequest);
-                }
-                UsbIntent::Reboot => {
-                    dispatch_app(&mut app, &mut power_driver, Action::RequestReboot);
-                    queue_usb_response(b"OK:REBOOTING\r\n");
-                }
-                UsbIntent::SetOutput { channel, enabled } => {
-                    if enabled && display_dma::has_failed() {
-                        queue_usb_response(b"ERR:DISPLAY\r\n");
-                        break 'usb_command;
-                    }
-                    match usb_output.begin_request(
-                        channel,
-                        enabled,
-                        power_driver.is_busy(),
-                        pd_service.command_pending(),
-                    ) {
-                        Admission::Proceed => {}
-                        Admission::ProceedAfterCancellation => {
-                            queue_usb_response(b"ERR:CANCELLED\r\n");
-                        }
-                        Admission::Busy => {
-                            queue_usb_response(b"ERR:BUSY\r\n");
-                            break 'usb_command;
-                        }
-                    }
-                    if enabled
-                        && !matches!(
-                            app.state().awg_status,
-                            AwgStatus::Stopped | AwgStatus::Fault
-                        )
-                    {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    if !enabled
-                        && channel == app.state().active_awg_channel()
-                        && matches!(
-                            app.state().awg_status,
-                            AwgStatus::StartRequested
-                                | AwgStatus::Starting
-                                | AwgStatus::StopRequested
-                        )
-                    {
-                        // The AWG start/stop sequence owns the channel for a
-                        // bounded window; report busy instead of letting the
-                        // reducer's guard surface a bogus ERR:HARDWARE.
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    if !enabled
-                        && channel == app.state().active_awg_channel()
-                        && app.state().awg_status == AwgStatus::Running
-                    {
-                        if app.state().awg_source == AwgSource::Arbitrary {
-                            waveform_service.cancel_arbitrary(channel);
-                        }
-                        if execute_global_shutdown(&mut power_driver).is_ok() {
-                            dispatch_app(
-                                &mut app,
-                                &mut power_driver,
-                                Action::GlobalShutdownApplied,
-                            );
-                            dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
-                            queue_usb_response(b"OK\r\n");
-                        } else {
-                            unsafe { raw_emergency_shutdown() };
-                            dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
-                            queue_usb_response(b"ERR:HARDWARE\r\n");
-                        }
-                        break 'usb_command;
-                    }
-                    dispatch_app(
-                        &mut app,
-                        &mut power_driver,
-                        Action::SetOutputRequested { channel, enabled },
-                    );
-                    let output = &app.state().channels[usize::from(channel)];
-                    if let RequestResult::Complete(result) =
-                        usb_output.record_request(channel, enabled, output)
-                    {
-                        queue_usb_response(output_completion_response(result));
-                    }
-                }
-                UsbIntent::SetCurrentLimit { channel, milliamps } => {
-                    queue_usb_response(set_current_limit(
-                        &mut app,
-                        &mut power_driver,
-                        channel,
-                        milliamps,
-                    ));
-                }
-                UsbIntent::SetVoltage {
-                    channel,
-                    millivolts,
-                } => {
-                    queue_usb_response(set_voltage(
-                        &mut app,
-                        &mut power_driver,
-                        channel,
-                        millivolts,
-                    ));
-                }
-                UsbIntent::SetRegulationMode { channel, mode } => {
-                    queue_usb_response(set_regulation_mode(
-                        &mut app,
-                        &mut power_driver,
-                        channel,
-                        mode,
-                    ));
-                }
-                UsbIntent::SetSinkCurrentLimit(milliamps) => {
-                    if pd_service.command_pending() {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    dispatch_app(
-                        &mut app,
-                        &mut power_driver,
-                        Action::SetSinkCurrentLimit(milliamps),
-                    );
-                    if app.state().sink_current_limit_ma == milliamps {
-                        queue_usb_response(b"OK\r\n");
-                    } else {
-                        queue_usb_response(b"ERR:RANGE\r\n");
-                    }
-                }
-                UsbIntent::PdDiagnostics => {
-                    let result = benchvolt_pd::pd::read_diagnostics(&mut SoftPdBus::new(
-                        &mut pd_bus,
-                        power_driver.delay_mut(),
-                    ));
-                    match result {
-                        Ok(snapshot) => {
-                            let response = pd_diagnostics_response(snapshot);
-                            queue_usb_response(response.as_bytes());
-                        }
-                        Err(_) => queue_usb_response(b"ERR:PD:BUS\r\n"),
-                    }
-                }
-                UsbIntent::PdNegotiate => {
-                    let outputs_off = app.state().outputs_inactive();
-                    if pd_service.command_pending() || power_driver.is_busy() || !outputs_off {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    let result = benchvolt_pd::pd::configure_request_source_current(
-                        &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
-                    );
-                    match result {
-                        Ok(benchvolt_pd::pd::NvmUpdate::Updated) => {
-                            queue_usb_response(b"OK:PD:NVM_UPDATED:POWER_CYCLE\r\n")
-                        }
-                        Ok(benchvolt_pd::pd::NvmUpdate::AlreadyConfigured) => {
-                            let result = benchvolt_pd::pd::request_legacy_boot_contract(
-                                &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
-                            );
-                            queue_usb_response(pd_completion_response(result));
-                        }
-                        Err(_) => queue_usb_response(b"ERR:PD:NVM\r\n"),
-                    }
-                }
-                UsbIntent::PdList => {
-                    if pd_service.command_pending() {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    let result = benchvolt_pd::pd::read_source_capabilities(&mut SoftPdBus::new(
-                        &mut pd_bus,
-                        power_driver.delay_mut(),
-                    ));
-                    // The desktop GUI collects lines between these markers and
-                    // ignores any line that is not "index,mv,ma,mw".
-                    let mut listing: String<176> = String::new();
-                    listing.push_str("UI_PDO_LIST_START\r\n").ok();
-                    match result {
-                        Ok((raw_pdos, count)) => {
-                            // Unlike the original C firmware, list only valid
-                            // fixed-supply objects: some sources lead with a
-                            // malformed or augmented object whose blind field
-                            // extraction produced an unselectable phantom row.
-                            for (index, raw) in raw_pdos[..count].iter().enumerate() {
-                                let Some(pdo) =
-                                    benchvolt_pd::pd::decode_fixed_pdo(*raw, index as u8 + 1)
-                                else {
-                                    continue;
-                                };
-                                let millivolts = u32::from(pdo.millivolts);
-                                let milliamps = u32::from(pdo.milliamps);
-                                write!(
-                                    &mut listing,
-                                    "{},{},{},{}\r\n",
-                                    index as u32,
-                                    millivolts,
-                                    milliamps,
-                                    millivolts * milliamps / 1_000
-                                )
-                                .ok();
-                            }
-                        }
-                        Err(_) => {
-                            listing.push_str("ERR:PD:BUS\r\n").ok();
-                        }
-                    }
-                    queue_usb_response(listing.as_bytes());
-                    queue_usb_response(b"UI_PDO_LIST_END\r\n");
-                }
-                UsbIntent::PdoSet {
-                    slot,
-                    millivolts,
-                    milliamps,
-                } => {
-                    let outputs_off = app.state().outputs_inactive();
-                    if pd_service.command_pending() || power_driver.is_busy() || !outputs_off {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    let result = benchvolt_pd::pd::set_sink_pdo(
-                        &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
-                        slot,
-                        millivolts,
-                        milliamps,
-                    );
-                    match result {
-                        Ok(()) => queue_usb_response(b"OK:PD_PROFILED\r\n"),
-                        Err(benchvolt_pd::pd::PdError::NoSuitablePdo) => {
-                            queue_usb_response(b"ERR:PARAM_FORMAT\r\n")
-                        }
-                        Err(_) => queue_usb_response(b"ERR:PD_WRITE_FAILED\r\n"),
-                    }
-                }
-                UsbIntent::ArbData(chunk) => {
-                    if !matches!(
-                        app.state().awg_status,
-                        AwgStatus::Stopped | AwgStatus::Fault
-                    ) {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    if arb_upload.accept(chunk).is_err() {
-                        queue_usb_response(b"ERR:SEQUENCE\r\n");
-                        break 'usb_command;
-                    }
-                    arb_runtime::write(chunk);
-                    let mut response: String<32> = String::new();
-                    write!(&mut response, "OK:ACK:CH{}\r\n", u32::from(chunk.channel) + 1).ok();
-                    queue_usb_response(response.as_bytes());
-                }
-                UsbIntent::ArbStart(start) => {
-                    if !matches!(
-                        app.state().awg_status,
-                        AwgStatus::Stopped | AwgStatus::Fault
-                    ) {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    if !arb_upload.is_complete_for(start) {
-                        queue_usb_response(b"ERR:INCOMPLETE\r\n");
-                        break 'usb_command;
-                    }
-                    let bounds = arb_runtime::validate(start);
-                    let Some((initial_mv, low_mv, high_mv)) = bounds else {
-                        queue_usb_response(b"ERR:RANGE\r\n");
-                        break 'usb_command;
-                    };
-                    dispatch_app(
-                        &mut app,
-                        &mut power_driver,
-                        Action::RequestArbStart {
-                            channel: start.channel,
-                            initial_mv,
-                            low_mv,
-                            high_mv,
-                        },
-                    );
-                    if app.state().awg_status == AwgStatus::StartRequested
-                        && app.state().awg_source == AwgSource::Arbitrary
-                    {
-                        arb_runtime::reset_status();
-                        // The buffer now belongs to this run; require a fresh
-                        // contiguous upload before it can be started again.
-                        arb_upload.invalidate();
-                        waveform_service.arm_arbitrary(start);
-                    } else {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                    }
-                }
-                UsbIntent::ArbStop(channel) => {
-                    waveform_service.cancel_arbitrary(channel);
-                    if app.state().awg_source == AwgSource::Arbitrary
-                        && app.state().active_awg_channel() == channel
-                        && !matches!(app.state().awg_status, AwgStatus::Stopped)
-                    {
-                        if execute_global_shutdown(&mut power_driver).is_ok() {
-                            dispatch_app(
-                                &mut app,
-                                &mut power_driver,
-                                Action::GlobalShutdownApplied,
-                            );
-                            dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
-                            waveform_service.stop_arbitrary();
-                            queue_usb_response(b"OK\r\n");
-                        } else {
-                            unsafe { raw_emergency_shutdown() };
-                            dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
-                            queue_usb_response(b"ERR:HARDWARE\r\n");
-                        }
-                    } else {
-                        queue_usb_response(b"OK\r\n");
-                    }
-                }
-                UsbIntent::AwgConfigure(config) => {
-                    if !matches!(
-                        app.state().awg_status,
-                        AwgStatus::Stopped | AwgStatus::Fault
-                    ) {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                        break 'usb_command;
-                    }
-                    dispatch_app(&mut app, &mut power_driver, Action::ConfigureAwg(config));
-                    if app.state().awg == config {
-                        queue_usb_response(b"OK\r\n");
-                    } else {
-                        queue_usb_response(b"ERR:RANGE\r\n");
-                    }
-                }
-                UsbIntent::AwgRun(channel) => {
-                    if app.state().awg.channel != channel {
-                        queue_usb_response(b"ERR:RANGE\r\n");
-                        break 'usb_command;
-                    }
-                    dispatch_app(&mut app, &mut power_driver, Action::RequestAwgStart);
-                    if app.state().awg_status == AwgStatus::StartRequested
-                        && app.state().awg_source == AwgSource::Builtin
-                    {
-                        pending_awg_ack = Some(channel);
-                    } else {
-                        queue_usb_response(b"ERR:BUSY\r\n");
-                    }
-                }
-                UsbIntent::AwgStop(channel) => {
-                    if app.state().awg_source == AwgSource::Builtin
-                        && app.state().awg.channel == channel
-                        && !matches!(app.state().awg_status, AwgStatus::Stopped)
-                    {
-                        pending_awg_ack = None;
-                        if execute_global_shutdown(&mut power_driver).is_ok() {
-                            dispatch_app(
-                                &mut app,
-                                &mut power_driver,
-                                Action::GlobalShutdownApplied,
-                            );
-                            dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
-                            queue_usb_response(b"OK\r\n");
-                        } else {
-                            unsafe { raw_emergency_shutdown() };
-                            dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
-                            queue_usb_response(b"ERR:HARDWARE\r\n");
-                        }
-                    } else {
-                        queue_usb_response(b"OK\r\n");
-                    }
-                }
-            }
-        }
+        usb_intents::service_usb_command(
+            &mut UsbCtx {
+                app: &mut app,
+                power: &mut power_driver,
+                pd_bus: &mut pd_bus,
+                pd_service: &mut pd_service,
+                waveform: &mut waveform_service,
+                arb_upload: &mut arb_upload,
+                usb_output: &mut usb_output,
+                pending_awg_ack: &mut ls.pending_awg_ack,
+            },
+            &protection,
+        );
 
-        // A display DMA failure during real rendering latches has_failed(),
-        // which keeps boot fail-closed without requiring a serial cable.
-        if display_dma::begin_full_render() {
-            app.render_full();
-            display_dma::finish_full_render();
-        }
-        if display_dma::has_failed() && !display_failure_handled {
-            display_failure_handled = true;
-            let _ = execute_global_shutdown(&mut power_driver);
-            unsafe { raw_emergency_shutdown() };
-            dispatch_app(
-                &mut app,
-                &mut power_driver,
-                Action::BootRecoveryStatus(false),
-            );
-        }
+        loop_steps::render_step(&mut app, &mut power_driver, &mut ls);
 
         if app.state().awg_status != AwgStatus::Running {
             power_driver.delay_ms(1u8);
@@ -887,71 +480,25 @@ fn main() -> ! {
         service_tick = input_ticks;
         let mut due = cadence.advance(elapsed_ms);
 
-        // While the AWG runs, the sampler owns the loop: the full monitoring
-        // scan (12 oversampled ADC reads, TPS health reads, the TMP1075
-        // temperature read, and the PD contract watchdog — each a
-        // multi-millisecond soft-I2C/ADC pass every 20-100 ms) puts visible
-        // flat spots into fast waveforms, so it is suspended for the duration
-        // of the run. What remains while hot: a single two-pin ADC read of
-        // the driven channel every 20 ms (feeding the RMS/power readout and
-        // that channel's software current protection), plus the converters'
-        // hardware OCP/OVP/SCP, which are always active. Everything resumes
-        // its normal cadence the moment the run ends.
+        // Hot mode: while a waveform runs, the 2 kHz sampler owns the loop
+        // and every multi-hundred-microsecond periodic service is suspended
+        // (see the README's waveform section for the full rationale).
         let awg_hot = app.state().awg_status == AwgStatus::Running;
         if awg_hot {
-            // While the AWG runs, the sampler owns the loop: every periodic
-            // service (oversampled ADC sweep, TPS/TMP1075 health reads, PD
-            // contract watchdog, display measurement sync) is a
-            // multi-hundred-microsecond pass that puts visible timing jitter
-            // into the waveform, so all of them are suspended for the run.
-            // That includes the 20 ms software overcurrent sample: a point
-            // sample of a deliberately moving current against a DC-style
-            // limit both false-trips on waveform peaks and misses events
-            // between samples. During a run, current protection is the
-            // converter's cycle-by-cycle hardware limit (OCP/SCP, ~3 A);
-            // the user-configured software limit re-arms the moment the run
-            // stops, as does every other suspended service.
             due.temperature = false;
             due.display_measurement = false;
             due.measurement = false;
         }
 
-        let outputs_off = app.state().outputs_inactive();
-        pd_deferred_elapsed_ms = pd_deferred_elapsed_ms.saturating_add(elapsed_ms);
-        let pd_events = if !awg_hot {
-            pd_service.tick(
-                core::mem::take(&mut pd_deferred_elapsed_ms),
-                input_ticks,
-                outputs_off,
-                app.state().sink_current_limit_ma,
-                app.state()
-                    .sink
-                    .valid
-                    .then_some(app.state().sink.millivolts),
-                &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
-            )
-        } else {
-            [None, None]
-        };
-        for event in pd_events.into_iter().flatten() {
-            let (action, pd_event) = match event {
-                PdServiceEvent::NegotiationStarted => (Action::PdNegotiationStarted, None),
-                PdServiceEvent::Pd(benchvolt_pd::pd::PdEvent::Negotiated(contract)) => (
-                    Action::PdNegotiated(contract),
-                    Some(benchvolt_pd::pd::PdEvent::Negotiated(contract)),
-                ),
-                PdServiceEvent::Pd(benchvolt_pd::pd::PdEvent::Lost(error)) => (
-                    Action::PdFailed(error),
-                    Some(benchvolt_pd::pd::PdEvent::Lost(error)),
-                ),
-            };
-            dispatch_app(&mut app, &mut power_driver, action);
-            if let Some(pd_event) = pd_event {
-                if let Some(result) = pd_service.take_command_completion(pd_event) {
-                    queue_usb_response(pd_completion_response(result));
-                }
-            }
-        }
+        loop_steps::pd_step(
+            &mut app,
+            &mut power_driver,
+            &mut pd_bus,
+            &mut pd_service,
+            &mut ls,
+            elapsed_ms,
+            awg_hot,
+        );
 
         let (direction, accelerated) = take_encoder_adjustment(&mut encoder_accumulator);
         if !display_dma::has_failed() {
@@ -959,7 +506,6 @@ fn main() -> ! {
                 dispatch_app(&mut app, &mut power_driver, action);
             }
         }
-
         let next_sw_high = encoder_sw.is_high().unwrap_or(button.is_high());
         if let Some(action) = button.sample(input_ticks, next_sw_high) {
             if !display_dma::has_failed() {
@@ -979,360 +525,49 @@ fn main() -> ! {
             ));
         }
 
-        // PD Source screen: one bounded capability read per entry. The read
-        // transmits Get_Source_Cap, and a Source_Capabilities message
-        // restarts negotiation — a brief SINK_READY exit the PD watchdog can
-        // see as contract loss, which is a global-shutdown trigger. So the
-        // read also waits for every output to be inactive (the banner
-        // explains), matching Apply's admission rule. Failures render an
-        // error row and are not retried until the next entry.
-        let on_pd_source = app.state().screen == Screen::PdSource;
-        if on_pd_source && !was_on_pd_source {
-            pd_list_not_before = monotonic_ms().wrapping_add(400);
-            pd_list_failures = 0;
-        }
-        was_on_pd_source = on_pd_source;
-        if on_pd_source
-            && app.state().pd_source_stale
-            && app.state().outputs_inactive()
-            && app.state().awg_status != AwgStatus::Running
-            && !pd_service.command_pending()
-            && benchvolt_pd::paint_queue::dma_deadline_reached(
-                monotonic_ms(),
-                pd_list_not_before,
-            )
-        {
-            let result = benchvolt_pd::pd::read_source_capabilities(&mut SoftPdBus::new(
-                &mut pd_bus,
-                power_driver.delay_mut(),
-            ));
-            if result.is_err() && pd_list_failures < 1 {
-                pd_list_failures += 1;
-                pd_list_not_before = monotonic_ms().wrapping_add(1_500);
-            } else {
-                pd_list_failures = 0;
-                let mut pdos = [benchvolt_pd::app::NO_PDO; benchvolt_pd::app::PD_SOURCE_MAX_PDOS];
-                let mut count = 0u8;
-                let error = match result {
-                    Ok((raw_pdos, raw_count)) => {
-                        for (index, raw) in raw_pdos[..raw_count].iter().enumerate() {
-                            // Same filtering as the USB PdList path, plus the
-                            // 20 V board input ceiling: never offer a row the
-                            // sink cannot request.
-                            let Some(pdo) =
-                                benchvolt_pd::pd::decode_fixed_pdo(*raw, index as u8 + 1)
-                            else {
-                                continue;
-                            };
-                            if pdo.millivolts <= 20_000 && usize::from(count) < pdos.len() {
-                                pdos[usize::from(count)] = pdo;
-                                count += 1;
-                            }
-                        }
-                        false
-                    }
-                    Err(_) => true,
-                };
-                dispatch_app(
-                    &mut app,
-                    &mut power_driver,
-                    Action::PdSourceListLoaded { pdos, count, error },
-                );
-            }
-        }
-
-        if let Some(request) = app.state().pd_apply_request {
-            // Journal the pending record before touching the STUSB: a
-            // downward contract transition cold-boots this VBUS-powered
-            // board, and that record is what routes the next boot back to
-            // the result banner.
-            let outputs_physically_off = app.state().outputs_physically_off();
-            let mut ok = app.state().outputs_inactive()
-                && !power_driver.is_busy()
-                && !pd_service.command_pending();
-            if ok {
-                let settings = PersistentSettings::from_state(app.state());
-                ok = persist_settings(&mut settings_store, settings, outputs_physically_off);
-                if ok {
-                    settings_effect.mark_saved(settings);
-                    ok = benchvolt_pd::pd::set_sink_pdo(
-                        &mut SoftPdBus::new(&mut pd_bus, power_driver.delay_mut()),
-                        3,
-                        request.millivolts,
-                        request.milliamps,
-                    )
-                    .is_ok();
-                }
-            }
-            dispatch_app(&mut app, &mut power_driver, Action::PdoApplyFinished(ok));
-        }
-
-        let waveform_status = app.state().awg_status;
-        let waveform_source = app.state().awg_source;
-        let waveform_config = app.state().awg;
-        let waveform_tick = monotonic_awg_tick();
-        diagnostics::record_loop_gap(waveform_tick.wrapping_sub(last_waveform_tick));
-        last_waveform_tick = waveform_tick;
-        let waveform_directive =
-            if waveform_status == AwgStatus::Running && waveform_source == AwgSource::Arbitrary {
-                arb_runtime::with_buffer(|buffer| {
-                    waveform_service.tick(
-                        waveform_status,
-                        waveform_source,
-                        waveform_config,
-                        waveform_tick,
-                        Some(buffer),
-                    )
-                })
-            } else {
-                waveform_service.tick(
-                    waveform_status,
-                    waveform_source,
-                    waveform_config,
-                    waveform_tick,
-                    None,
-                )
-            };
-        let arb_status = waveform_service.arb_status();
-        arb_runtime::update_status(arb_status);
-        match waveform_directive {
-            WaveformDirective::None => {}
-            WaveformDirective::Sample(millivolts) => {
-                dispatch_app(&mut app, &mut power_driver, Action::AwgSample(millivolts));
-            }
-            WaveformDirective::PrepareStart => {
-                if execute_global_shutdown(&mut power_driver).is_ok() {
-                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
-                    dispatch_app(&mut app, &mut power_driver, Action::AwgStartPrepared);
-                } else {
-                    unsafe { raw_emergency_shutdown() };
-                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
-                }
-            }
-            WaveformDirective::Stop => {
-                if execute_global_shutdown(&mut power_driver).is_ok() {
-                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
-                } else {
-                    unsafe { raw_emergency_shutdown() };
-                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
-                }
-            }
-            WaveformDirective::Finished | WaveformDirective::FailSafeShutdown => {
-                if execute_global_shutdown(&mut power_driver).is_ok() {
-                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownApplied);
-                    dispatch_app(&mut app, &mut power_driver, Action::AwgStopped);
-                } else {
-                    unsafe { raw_emergency_shutdown() };
-                    dispatch_app(&mut app, &mut power_driver, Action::GlobalShutdownFailed);
-                }
-            }
-            WaveformDirective::FaultShutdown => {
-                if execute_global_shutdown(&mut power_driver).is_err() {
-                    unsafe { raw_emergency_shutdown() };
-                }
-            }
-        }
-
-        if pending_awg_ack.is_some() {
-            if app.state().awg_status == AwgStatus::Running
-                && app.state().awg_source == AwgSource::Builtin
-            {
-                queue_usb_response(b"OK:WAVE_STARTED\r\n");
-                pending_awg_ack = None;
-            } else if matches!(
-                app.state().awg_status,
-                AwgStatus::Fault | AwgStatus::Stopped
-            ) {
-                queue_usb_response(b"ERR:HARDWARE\r\n");
-                pending_awg_ack = None;
-            }
-        }
-
-        if let Some(start) = waveform_service.pending_arb_ack() {
-            if app.state().awg_status == AwgStatus::Running
-                && app.state().awg_source == AwgSource::Arbitrary
-            {
-                let mut response: String<64> = String::new();
-                write!(
-                    &mut response,
-                    "OK:CH{}_ARB_STARTED_PTS:{}\r\n",
-                    u32::from(start.channel) + 1,
-                    start.count
-                )
-                .ok();
-                queue_usb_response(response.as_bytes());
-                waveform_service.take_pending_arb_ack();
-            } else if matches!(
-                app.state().awg_status,
-                AwgStatus::Fault | AwgStatus::Stopped
-            ) {
-                queue_usb_response(b"ERR:HARDWARE\r\n");
-                waveform_service.take_pending_arb_ack();
-            }
-        }
+        loop_steps::pd_source_list_step(
+            &mut app,
+            &mut power_driver,
+            &mut pd_bus,
+            &pd_service,
+            &mut ls,
+        );
+        loop_steps::pdo_apply_step(
+            &mut app,
+            &mut power_driver,
+            &mut pd_bus,
+            &pd_service,
+            &mut settings_store,
+            &mut settings_effect,
+        );
+        loop_steps::waveform_step(&mut app, &mut power_driver, &mut waveform_service, &mut ls);
+        loop_steps::awg_ack_step(&app, &mut waveform_service, &mut ls);
 
         if due.temperature {
-            let temperature = power_driver.read_temperature();
-            dispatch_app(
-                &mut app,
-                &mut power_driver,
-                Action::Temperature(temperature),
-            );
-            let fault = ProtectionService::temperature_fault(temperature);
-            if let Some(fault) = fault {
-                for action in ProtectionService::temperature_trip_actions(app.state(), fault)
-                    .into_iter()
-                    .flatten()
-                {
-                    dispatch_app(&mut app, &mut power_driver, action);
-                }
-                let _ = execute_global_shutdown(&mut power_driver);
-            }
+            loop_steps::temperature_step(&mut app, &mut power_driver);
         }
         if due.measurement {
-            for (rail, channels) in [(Rail::Dc1, [0u8, 1]), (Rail::Dc2, [2u8, 3])] {
-                let active = channels.into_iter().any(|channel| {
-                    let output = &app.state().channels[usize::from(channel)];
-                    output.requested_enabled || output.physical_enabled
-                });
-                let observation = if active {
-                    match power_driver.read_rail_status(rail) {
-                        Ok(status) => TpsStatusObservation::Value(status),
-                        Err(_) => TpsStatusObservation::ReadError,
-                    }
-                } else {
-                    TpsStatusObservation::Inactive
-                };
-                for action in protection
-                    .observe_shared_status(app.state(), rail, observation)
-                    .into_iter()
-                    .flatten()
-                {
-                    dispatch_app(&mut app, &mut power_driver, action);
-                }
-            }
-            let ch5_status = if app.state().channels[4].physical_enabled {
-                match power_driver.read_ch5_status() {
-                    Ok(status) => {
-                        diagnostics::record_ch5_tps_status(status);
-                        TpsStatusObservation::Value(status)
-                    }
-                    Err(_) => {
-                        diagnostics::record_ch5_tps_status(0xff);
-                        TpsStatusObservation::ReadError
-                    }
-                }
-            } else {
-                TpsStatusObservation::Inactive
-            };
-            if let Some(action) = protection.observe_ch5_status(app.state(), ch5_status) {
-                dispatch_app(&mut app, &mut power_driver, action);
-            }
-            let measurements = [
-                read_channel_measurement(&mut adc, &mut ch1_voltage, &mut ch1_current, 1, 1),
-                read_channel_measurement(&mut adc, &mut ch2_voltage, &mut ch2_current, 1, 1),
-                read_channel_measurement(&mut adc, &mut ch3_voltage, &mut ch3_current, 1, 1),
-                read_channel_measurement(&mut adc, &mut ch4_voltage, &mut ch4_current, 2, 1),
-                read_channel_measurement(&mut adc, &mut ch5_voltage, &mut ch5_current, 78, 10),
-            ];
-            let sink_measurement =
-                read_channel_measurement(&mut adc, &mut sink_voltage, &mut sink_current, 67, 10);
-            for rail in [Rail::Dc1, Rail::Dc2] {
-                for action in protection
-                    .observe_shared_current(app.state(), &measurements, rail)
-                    .into_iter()
-                    .flatten()
-                {
-                    dispatch_app(&mut app, &mut power_driver, action);
-                }
-            }
-            if let Some(action) = protection.observe_sink(app.state(), sink_measurement) {
-                dispatch_app(&mut app, &mut power_driver, action);
-            }
-            if !measurement_windows.record(app.state(), measurements, sink_measurement) {
-                cadence.invalidate_awg_window(&mut due);
-            }
-            for channel in 0..5u8 {
-                let measurement = measurements[usize::from(channel)];
-                if let Some(action) = protection.observe_channel(app.state(), channel, measurement)
-                {
-                    dispatch_app(&mut app, &mut power_driver, action);
-                }
-            }
-            for channel in 3..=4u8 {
-                if app.state().awg_status != AwgStatus::Running
-                    || channel != app.state().active_awg_channel()
-                {
-                    dispatch_app(
-                        &mut app,
-                        &mut power_driver,
-                        Action::RegulateChannel {
-                            channel,
-                            measurement: measurements[usize::from(channel)],
-                        },
-                    );
-                }
-            }
+            loop_steps::measurement_step(
+                &mut app,
+                &mut power_driver,
+                &mut protection,
+                &mut adc_bank,
+                &mut measurement_windows,
+                &mut cadence,
+                &mut due,
+            );
         }
         if due.display_measurement {
-            let (measurements, sink_measurement) = measurement_windows.take_display();
-            dispatch_app(
-                &mut app,
-                &mut power_driver,
-                Action::Measurements(measurements),
-            );
-            dispatch_app(
-                &mut app,
-                &mut power_driver,
-                Action::SinkMeasurement(sink_measurement),
-            );
+            loop_steps::display_measurement_step(&mut app, &mut power_driver, &mut measurement_windows);
         }
+
         // Safety observations above preempt a power-up stage that becomes due
         // in this same pass. One bounded stage can then advance before the
         // watchdog is fed, without blocking USB, PD, or protection cadence.
-        if let Some(action) = power_driver.service(monotonic_ms(), app.state()) {
-            dispatch_app(&mut app, &mut power_driver, action);
-            let output_completion = usb_output.observe_completion(&action);
-            if let Some(result) = output_completion {
-                queue_usb_response(output_completion_response(result));
-            }
-        }
-        if usb_output.cancel_if_idle(power_driver.is_busy()) {
-            queue_usb_response(b"ERR:CANCELLED\r\n");
-        }
+        loop_steps::executor_step(&mut app, &mut power_driver, &mut usb_output);
+        loop_steps::persistence_step(&app, &mut settings_effect, &mut settings_store, elapsed_ms);
+        loop_steps::comm_capable_step(&app, &mut power_driver, &mut pd_bus, &cadence, &mut ls);
 
-        let current_settings = PersistentSettings::from_state(app.state());
-        let outputs_stable = app.state().output_transitions_stable();
-        let outputs_physically_off = app.state().outputs_physically_off();
-        if let Some(settings) = settings_effect.tick(
-            current_settings,
-            outputs_stable,
-            outputs_physically_off,
-            elapsed_ms,
-        ) {
-            if persist_settings(&mut settings_store, settings, outputs_physically_off) {
-                settings_effect.mark_saved(settings);
-            }
-        }
-
-        if !comm_capable_checked
-            && cadence.healthy_for(3_000)
-            && app.state().temp_valid
-            && outputs_physically_off
-            && display_dma::ready_for_seal()
-        {
-            // One-time STUSB4500 NVM check: declare USB data support in PD
-            // requests so macOS keeps the port's data connection alive. A
-            // bus error retries on the next boot; the update itself takes
-            // effect at the next cold attach. The boot contract needs no
-            // firmware involvement: the STUSB4500 autonomously negotiates the
-            // NVM PDO2 preference (set via `SOUR:PDO:SET`) at every attach.
-            comm_capable_checked = true;
-            let _ = benchvolt_pd::pd::configure_usb_comm_capable(&mut SoftPdBus::new(
-                &mut pd_bus,
-                power_driver.delay_mut(),
-            ));
-        }
         if app.state().reboot_requested {
             // A physical reboot is safe only after every independent output-off
             // control has been attempted.

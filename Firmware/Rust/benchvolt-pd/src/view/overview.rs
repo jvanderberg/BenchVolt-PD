@@ -276,7 +276,7 @@ fn draw_table_grid<D>(view: &mut BenchVoltView<D>)
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let color = Rgb565::new(8, 16, 16);
+    let color = super::DIVIDER;
     for x in COLUMN_EDGES {
         view.fill_rect(x, TABLE_TOP, 1, (TABLE_BOTTOM - TABLE_TOP + 1) as u32, color);
     }

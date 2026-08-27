@@ -36,6 +36,10 @@ pub(crate) struct LoopState {
     /// The boot record carried a pdo_apply_pending flag; append the cleared
     /// record once (failure = a sticky banner on the next boot, by design).
     pub pdo_flag_clear_needed: bool,
+    /// Set once the cleared record has landed in flash after an
+    /// apply-induced reboot: the automatic list reload can no longer boot
+    /// loop, so fire it as soon as a contract exists to read against.
+    pub pdo_refresh_pending: bool,
     pub display_failure_handled: bool,
     /// Capability-read pacing. Get_Source_Cap triggers a renegotiation the
     /// bench charger sometimes answers with a VBUS hard reset, and reads
@@ -576,24 +580,64 @@ pub(crate) fn persistence_step(
     }
 }
 
+/// Clear the journaled PDO-apply flag as soon as flash will take the
+/// append, then reload the list the apply reboot landed the user in front
+/// of. The plain 48-byte append stalls the core ~1 ms and an interrupted
+/// program costs one skippable dirty slot, so it is safe inside the boot
+/// attach window; only the page ERASE a full journal needs is not (a VBUS
+/// reset mid-erase blanks the only settings page), so that rare case waits
+/// for the healthy-loop window. The automatic capability read fires only
+/// after the cleared record has verifiably landed: from that point a source
+/// that answers Get_Source_Cap with a VBUS hard reset produces a normal
+/// next boot instead of a boot loop. A failed append skips the reload too
+/// (sticky banner next boot, list on manual re-entry) for the same reason.
+pub(crate) fn pdo_flag_clear_step(
+    app: &mut FirmwareApp,
+    power: &mut FirmwarePower,
+    cadence: &ServiceCadence,
+    ls: &mut LoopState,
+    settings_store: &mut SettingsStore,
+    settings_effect: &mut SettingsDebouncer,
+) {
+    if ls.pdo_flag_clear_needed {
+        if !app.state().outputs_physically_off() {
+            return;
+        }
+        let allow_compaction = cadence.healthy_for(3_000);
+        if settings_store.next_slot >= crate::boot::SETTINGS_SLOTS && !allow_compaction {
+            return;
+        }
+        ls.pdo_flag_clear_needed = false;
+        // Live state carries pdo_apply_pending_mv = 0 (apply_to never
+        // restores it), so this record is the cleared one.
+        let settings = PersistentSettings::from_state(app.state());
+        if persist_settings(settings_store, settings, true, allow_compaction) {
+            settings_effect.mark_saved(settings);
+            ls.pdo_refresh_pending = true;
+        }
+    }
+    // Reload once there is a contract to read against — the read is
+    // pointless mid-attach and its single retry budget is precious.
+    if ls.pdo_refresh_pending && app.state().pd_contract.is_some() {
+        ls.pdo_refresh_pending = false;
+        dispatch_app(app, power, Action::PdSourceRefresh);
+    }
+}
+
 /// One-shot maintenance once the loop has proven healthy for three seconds
 /// with every output physically off — i.e. safely outside the boot attach
 /// window:
 /// 1. compact a full settings journal (deferred from boot: an interrupted
 ///    page erase would blank the only settings page);
-/// 2. append the cleared record for a journaled PDO-apply flag (one
-///    attempt; failure leaves a sticky banner on the next boot, which the
-///    design doc calls annoying but safe);
-/// 3. the STUSB4500 USB_COMM_CAPABLE NVM check, so PD requests declare USB
+/// 2. the STUSB4500 USB_COMM_CAPABLE NVM check, so PD requests declare USB
 ///    data support and macOS keeps the port's data connection alive.
 pub(crate) fn maintenance_step(
-    app: &mut FirmwareApp,
+    app: &FirmwareApp,
     power: &mut FirmwarePower,
     pd_bus: &mut PdI2c,
     cadence: &ServiceCadence,
     ls: &mut LoopState,
     settings_store: &mut SettingsStore,
-    settings_effect: &mut SettingsDebouncer,
 ) {
     if !cadence.healthy_for(3_000) || !app.state().outputs_physically_off() {
         return;
@@ -602,20 +646,6 @@ pub(crate) fn maintenance_step(
         ls.journal_maintenance_done = true;
         if settings_store.next_slot >= crate::boot::SETTINGS_SLOTS {
             let _ = crate::boot::compact_settings_store(settings_store);
-        }
-        if ls.pdo_flag_clear_needed {
-            ls.pdo_flag_clear_needed = false;
-            // Live state carries pdo_apply_pending_mv = 0 (apply_to never
-            // restores it), so this record is the cleared one.
-            let settings = PersistentSettings::from_state(app.state());
-            if persist_settings(settings_store, settings, true, true) {
-                settings_effect.mark_saved(settings);
-                // The apply-in-progress note is out of flash, so an
-                // automatic capability read can no longer boot-loop a
-                // source that hard-resets on Get_Source_Cap: reload the
-                // list the reboot landed the user in front of.
-                dispatch_app(app, power, Action::PdSourceRefresh);
-            }
         }
     }
     // The comm-capable check writes STUSB NVM: require an established,

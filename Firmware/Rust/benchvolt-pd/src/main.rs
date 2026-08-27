@@ -123,6 +123,7 @@ fn main() -> ! {
         pdo_flag_clear_needed: settings_store
             .latest
             .is_some_and(|record| record.settings.pdo_apply_pending_mv != 0),
+        pdo_refresh_pending: false,
         display_failure_handled: false,
         pd_list_failures: 0,
         pd_list_not_before: 0,
@@ -277,14 +278,23 @@ fn main() -> ! {
             elapsed_ms,
             cadence.healthy_for(3_000),
         );
-        loop_steps::maintenance_step(
+        // Post-apply-reboot fast path: clear the journaled flag and reload
+        // the PDO list as soon as it is safe, well before the 3 s window.
+        loop_steps::pdo_flag_clear_step(
             &mut app,
+            &mut power_driver,
+            &cadence,
+            &mut ls,
+            &mut settings_store,
+            &mut settings_effect,
+        );
+        loop_steps::maintenance_step(
+            &app,
             &mut power_driver,
             &mut pd_bus,
             &cadence,
             &mut ls,
             &mut settings_store,
-            &mut settings_effect,
         );
 
         if app.state().reboot_requested {

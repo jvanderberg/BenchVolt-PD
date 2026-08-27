@@ -421,15 +421,15 @@ impl AppState {
     }
 
     /// Same admission rule as the USB `SOUR:PDO:SET` path: outputs inactive,
-    /// no competing apply, an idle AWG — and a live, settled PD contract.
-    /// The apply erases and programs STUSB4500 NVM on this VBUS-powered
-    /// board; admitting it with the contract lost or mid-renegotiation races
-    /// that NVM program against the source's recovery hard reset.
+    /// no competing apply, an idle AWG — and a live PD contract. The apply
+    /// erases and programs STUSB4500 NVM on this VBUS-powered board; the
+    /// complementary "bus not recently disturbed" settle window is enforced
+    /// at service time (`pdo_apply_step`), because only the loop knows when
+    /// a Get_Source_Cap was last transmitted.
     pub fn pd_source_apply_ready(&self) -> bool {
         self.pd_source_armed.is_some()
             && !self.pd_source_error
             && self.pd_contract.is_some()
-            && !self.pd_negotiating
             && self.outputs_inactive()
             && self.pd_apply_request.is_none()
             && matches!(self.awg_status, AwgStatus::Stopped | AwgStatus::Fault)
@@ -526,6 +526,12 @@ pub enum Action {
         error: bool,
     },
     PdoApplyFinished(bool),
+    /// The settle timeout after a successful apply elapsed with no VBUS
+    /// reset: the renegotiation resolved in place (possibly to the identical
+    /// contract, which produces no PD event), so the journaled reboot-router
+    /// flag is done. Clearing it in RAM lets the next journal write clear
+    /// flash, preventing a spurious banner boot.
+    PdoApplySettled,
 }
 
 pub struct AppReducer;
@@ -1674,6 +1680,11 @@ impl Reducer for AppReducer {
                 {
                     next.menu_selection = next.pd_source_rows() - 1;
                 }
+                true
+            }
+            Action::PdoApplySettled if state.pdo_apply_pending_mv == 0 => false,
+            Action::PdoApplySettled => {
+                next.pdo_apply_pending_mv = 0;
                 true
             }
             Action::PdoApplyFinished(_) if state.pd_apply_request.is_none() => false,

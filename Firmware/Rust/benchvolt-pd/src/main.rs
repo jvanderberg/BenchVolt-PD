@@ -129,6 +129,10 @@ fn main() -> ! {
         was_on_pd_source: false,
         pending_awg_ack: None,
         last_waveform_tick: loop_steps::monotonic_awg_tick(),
+        pd_disturbed: false,
+        pd_quiet_after: 0,
+        pdo_settle_armed: false,
+        pdo_settle_after: 0,
     };
 
     loop {
@@ -143,7 +147,7 @@ fn main() -> ! {
                 waveform: &mut waveform_service,
                 arb_upload: &mut arb_upload,
                 usb_output: &mut usb_output,
-                pending_awg_ack: &mut ls.pending_awg_ack,
+                ls: &mut ls,
             },
             &protection,
         );
@@ -199,7 +203,12 @@ fn main() -> ! {
         }
 
         // Profile save/load and factory defaults (journal + verified shutdown).
-        if service_profile_request(&mut app, &mut power_driver, &mut settings_store) {
+        if service_profile_request(
+            &mut app,
+            &mut power_driver,
+            &mut settings_store,
+            cadence.healthy_for(3_000),
+        ) {
             // Fail-safe: factory defaults also restore the STUSB4500 NVM to
             // its canonical 20 V / request-max / comm-capable configuration,
             // recovering a unit profiled to an unusual PD voltage. Best
@@ -224,9 +233,10 @@ fn main() -> ! {
             &mut app,
             &mut power_driver,
             &mut pd_bus,
-            &pd_service,
+            &cadence,
             &mut settings_store,
             &mut settings_effect,
+            &mut ls,
         );
         // 2 kHz waveform scheduler, its start/stop directives, and the
         // deferred USB acks that wait on the engine actually running.
@@ -260,7 +270,13 @@ fn main() -> ! {
         // Debounced settings journal, then the healthy-loop one-shots:
         // deferred journal compaction, the PDO-flag clear, and the STUSB
         // comm-capable NVM check.
-        loop_steps::persistence_step(&app, &mut settings_effect, &mut settings_store, elapsed_ms);
+        loop_steps::persistence_step(
+            &app,
+            &mut settings_effect,
+            &mut settings_store,
+            elapsed_ms,
+            cadence.healthy_for(3_000),
+        );
         loop_steps::maintenance_step(
             &app,
             &mut power_driver,

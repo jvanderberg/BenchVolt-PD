@@ -601,12 +601,6 @@ fn pd_source_screen_arms_applies_and_cancels_under_the_outputs_off_rule() {
         maximum_milliamps: 3_000,
     });
 
-    // Mid-renegotiation is likewise rejected.
-    state.pd_negotiating = true;
-    let rejected = AppReducer::reduce(&state, Action::ActivateMenu);
-    assert!(rejected == state);
-    state.pd_negotiating = false;
-
     // Apply with a live output is a rejected no-op.
     state.channels[0].physical_enabled = true;
     let rejected = AppReducer::reduce(&state, Action::ActivateMenu);
@@ -627,6 +621,14 @@ fn pd_source_screen_arms_applies_and_cancels_under_the_outputs_off_rule() {
     );
     assert_eq!(applied.pdo_apply_pending_mv, 9_000);
     assert_eq!(applied.pd_banner_mv, Some(9_000));
+
+    // The settle timeout clears the journaled flag when no PD event ever
+    // fires (a same-contract renegotiation is invisible to the watchdog);
+    // the banner survives, and a stray repeat changes nothing.
+    let settled = AppReducer::reduce(&applied, Action::PdoApplySettled);
+    assert_eq!(settled.pdo_apply_pending_mv, 0);
+    assert_eq!(settled.pd_banner_mv, Some(9_000));
+    assert!(AppReducer::reduce(&settled, Action::PdoApplySettled) == settled);
 
     // A failed apply clears the journal flag and banner and shows the
     // error; a stray completion with nothing pending changes nothing.

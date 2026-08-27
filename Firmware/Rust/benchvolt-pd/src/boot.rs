@@ -14,6 +14,12 @@ pub(crate) struct SettingsStore {
     pub(crate) latest: Option<SettingsRecord>,
     pub(crate) profiles: [Option<SettingsRecord>; 3],
     pub(crate) next_slot: usize,
+    /// Consecutive record-program failures this session. A small budget of
+    /// dirty-slot skips recovers from a transient glitch; past it, persistence
+    /// gives up for the session (data in flash stays intact) instead of
+    /// marching slot-by-slot into a destructive compaction of a page that
+    /// cannot be reprogrammed.
+    pub(crate) program_failures: u8,
 }
 
 fn read_settings_slot(slot: usize) -> [u8; RECORD_SIZE] {
@@ -51,6 +57,7 @@ pub(crate) fn load_settings_store() -> SettingsStore {
         latest,
         profiles,
         next_slot,
+        program_failures: 0,
     }
 }
 
@@ -153,11 +160,14 @@ pub(crate) fn compact_settings_store(store: &mut SettingsStore) -> bool {
     true
 }
 
+const PROGRAM_FAILURE_BUDGET: u8 = 3;
+
 pub(crate) fn persist_settings_record(
     store: &mut SettingsStore,
     kind: RecordKind,
     settings: PersistentSettings,
     outputs_physically_off: bool,
+    allow_compaction: bool,
 ) -> bool {
     // Same-bank programming can stall foreground protection before control
     // reaches the RAM-resident busy waiter. Never begin any flash mutation
@@ -165,8 +175,22 @@ pub(crate) fn persist_settings_record(
     if !outputs_physically_off {
         return false;
     }
-    if store.next_slot >= SETTINGS_SLOTS && !compact_settings_store(store) {
+    // Past the failure budget the flash is not accepting programs; stop
+    // burning slots (and never compact) so the existing records survive.
+    if store.program_failures >= PROGRAM_FAILURE_BUDGET {
         return false;
+    }
+    if store.next_slot >= SETTINGS_SLOTS {
+        // Compaction erases the only settings page before rewriting it, so
+        // it is admitted only when the caller says the system is in its
+        // quiet window (loop healthy, outside the boot attach churn) and no
+        // program failures suggest the rewrite would be lost.
+        if !allow_compaction
+            || store.program_failures != 0
+            || !compact_settings_store(store)
+        {
+            return false;
+        }
     }
     let record = SettingsRecord {
         sequence: match kind {
@@ -180,13 +204,15 @@ pub(crate) fn persist_settings_record(
     };
     if !program_settings_slot(store.next_slot, record) {
         // The failed slot may no longer be blank, and the blank-check would
-        // then refuse it forever. Skip past it so the next attempt (the
-        // debouncer retries within a second) uses a fresh slot instead of
-        // wedging every persistence path for the rest of the session; the
-        // dirty slot decodes as garbage and is ignored at the next load.
+        // then refuse it forever. Skip past it (within the failure budget)
+        // so the next attempt uses a fresh slot instead of wedging every
+        // persistence path; the dirty slot decodes as garbage and is
+        // ignored at the next load.
+        store.program_failures += 1;
         store.next_slot += 1;
         return false;
     }
+    store.program_failures = 0;
     match kind {
         RecordKind::Autosave => store.latest = Some(record),
         RecordKind::Profile(slot) => store.profiles[usize::from(slot)] = Some(record),
@@ -199,11 +225,13 @@ pub(crate) fn persist_settings(
     store: &mut SettingsStore,
     settings: PersistentSettings,
     outputs_physically_off: bool,
+    allow_compaction: bool,
 ) -> bool {
     persist_settings_record(
         store,
         RecordKind::Autosave,
         settings,
         outputs_physically_off,
+        allow_compaction,
     )
 }

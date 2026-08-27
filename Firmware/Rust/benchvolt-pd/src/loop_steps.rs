@@ -51,6 +51,33 @@ pub(crate) struct LoopState {
     /// actually running (or has faulted), mirroring the ARB start contract.
     pub pending_awg_ack: Option<u8>,
     pub last_waveform_tick: u16,
+    /// True while the PD bus was recently perturbed (a Get_Source_Cap or
+    /// sink reprofile was transmitted, or the contract was observed lost):
+    /// the renegotiation it triggers may still be in flight, and the source
+    /// may answer it with a VBUS hard reset. STUSB NVM writes are refused
+    /// until this settles — this is the real signal the (never-set)
+    /// `pd_negotiating` flag pretended to be. Cleared wrap-safely every
+    /// pass by `pd_step`.
+    pub pd_disturbed: bool,
+    pub pd_quiet_after: u16,
+    /// Armed after a successful PDO apply: if no VBUS reset arrives within
+    /// the settle window, the renegotiation resolved in place (possibly to
+    /// the identical contract, which emits no PD event) and the journaled
+    /// reboot-router flag is cleared via `PdoApplySettled`.
+    pub pdo_settle_armed: bool,
+    pub pdo_settle_after: u16,
+}
+
+/// How long the PD bus is treated as disturbed after a transmission that
+/// restarts negotiation. Renegotiation completes within tens of ms; the
+/// observed hard-reset responses land well inside a second.
+const PD_SETTLE_MS: u16 = 1_000;
+
+impl LoopState {
+    pub(crate) fn mark_pd_disturbed(&mut self) {
+        self.pd_disturbed = true;
+        self.pd_quiet_after = monotonic_ms().wrapping_add(PD_SETTLE_MS);
+    }
 }
 
 pub(crate) fn monotonic_awg_tick() -> u16 {
@@ -85,6 +112,21 @@ pub(crate) fn pd_step(
     awg_hot: bool,
 ) {
     let now = monotonic_ms();
+    // Wrap-safe settle bookkeeping: these run every pass, so each deadline
+    // is observed well within its 32.7 s half-range.
+    if ls.pd_disturbed && dma_deadline_reached(now, ls.pd_quiet_after) {
+        ls.pd_disturbed = false;
+    }
+    if ls.pdo_settle_armed && dma_deadline_reached(now, ls.pdo_settle_after) {
+        ls.pdo_settle_armed = false;
+        if app.state().pdo_apply_pending_mv != 0 {
+            // The apply survived its settle window without a VBUS reset;
+            // clearing the flag in RAM lets the next journal write clear
+            // flash, so no spurious banner boot follows a same-contract
+            // apply (which produces no PD event at all).
+            dispatch_app(app, power, Action::PdoApplySettled);
+        }
+    }
     let outputs_off = app.state().outputs_inactive();
     ls.pd_deferred_elapsed_ms = ls.pd_deferred_elapsed_ms.saturating_add(elapsed_ms);
     let pd_events = if !awg_hot {
@@ -106,10 +148,14 @@ pub(crate) fn pd_step(
                 Action::PdNegotiated(contract),
                 Some(benchvolt_pd::pd::PdEvent::Negotiated(contract)),
             ),
-            PdServiceEvent::Pd(benchvolt_pd::pd::PdEvent::Lost(error)) => (
-                Action::PdFailed(error),
-                Some(benchvolt_pd::pd::PdEvent::Lost(error)),
-            ),
+            PdServiceEvent::Pd(benchvolt_pd::pd::PdEvent::Lost(error)) => {
+                // Observed contract churn: hold NVM writes until it settles.
+                ls.mark_pd_disturbed();
+                (
+                    Action::PdFailed(error),
+                    Some(benchvolt_pd::pd::PdEvent::Lost(error)),
+                )
+            }
         };
         dispatch_app(app, power, action);
         if let Some(pd_event) = pd_event {
@@ -158,6 +204,9 @@ pub(crate) fn pd_source_list_step(
             pd_bus,
             power.delay_mut(),
         ));
+        // The read (when it transmitted) restarts negotiation; hold NVM
+        // writes until the exchange settles.
+        ls.mark_pd_disturbed();
         if result.is_err() && ls.pd_list_failures < 1 {
             ls.pd_list_failures += 1;
             ls.pd_list_not_before = monotonic_ms().wrapping_add(1_500);
@@ -197,25 +246,31 @@ pub(crate) fn pdo_apply_step(
     app: &mut FirmwareApp,
     power: &mut FirmwarePower,
     pd_bus: &mut PdI2c,
-    pd_service: &PdService,
+    cadence: &ServiceCadence,
     settings_store: &mut SettingsStore,
     settings_effect: &mut SettingsDebouncer,
+    ls: &mut LoopState,
 ) {
     let Some(request) = app.state().pd_apply_request else {
         return;
     };
     let outputs_physically_off = app.state().outputs_physically_off();
     // Re-check the full admission at service time: the STUSB NVM program
-    // below must not run with the contract lost or mid-renegotiation (the
-    // source may be about to hard-reset VBUS).
+    // below must not run with the contract lost or the bus still settling
+    // from a recent Get_Source_Cap (the source may be about to hard-reset
+    // VBUS in response).
     let mut ok = app.state().outputs_inactive()
         && app.state().pd_contract.is_some()
-        && !app.state().pd_negotiating
-        && !power.is_busy()
-        && !pd_service.command_pending();
+        && !ls.pd_disturbed
+        && !power.is_busy();
     if ok {
         let settings = PersistentSettings::from_state(app.state());
-        ok = persist_settings(settings_store, settings, outputs_physically_off);
+        ok = persist_settings(
+            settings_store,
+            settings,
+            outputs_physically_off,
+            cadence.healthy_for(3_000),
+        );
         if ok {
             settings_effect.mark_saved(settings);
             ok = benchvolt_pd::pd::set_sink_pdo(
@@ -226,6 +281,14 @@ pub(crate) fn pdo_apply_step(
             )
             .is_ok();
         }
+    }
+    if ok {
+        // The reprofile re-advertises capabilities: negotiation in flight.
+        ls.mark_pd_disturbed();
+        // Arm the settle-timeout completion for the journaled flag (a
+        // same-contract renegotiation emits no PD event to clear it).
+        ls.pdo_settle_armed = true;
+        ls.pdo_settle_after = monotonic_ms().wrapping_add(5_000);
     }
     dispatch_app(app, power, Action::PdoApplyFinished(ok));
 }
@@ -474,6 +537,7 @@ pub(crate) fn persistence_step(
     settings_effect: &mut SettingsDebouncer,
     settings_store: &mut SettingsStore,
     elapsed_ms: u16,
+    allow_compaction: bool,
 ) {
     let current_settings = PersistentSettings::from_state(app.state());
     let outputs_stable = app.state().output_transitions_stable();
@@ -484,7 +548,12 @@ pub(crate) fn persistence_step(
         outputs_physically_off,
         elapsed_ms,
     ) {
-        if persist_settings(settings_store, settings, outputs_physically_off) {
+        if persist_settings(
+            settings_store,
+            settings,
+            outputs_physically_off,
+            allow_compaction,
+        ) {
             settings_effect.mark_saved(settings);
         }
     }
@@ -522,12 +591,20 @@ pub(crate) fn maintenance_step(
             // Live state carries pdo_apply_pending_mv = 0 (apply_to never
             // restores it), so this record is the cleared one.
             let settings = PersistentSettings::from_state(app.state());
-            if persist_settings(settings_store, settings, true) {
+            if persist_settings(settings_store, settings, true, true) {
                 settings_effect.mark_saved(settings);
             }
         }
     }
-    if !ls.comm_capable_checked && app.state().temp_valid && display_dma::ready_for_seal() {
+    // The comm-capable check writes STUSB NVM: require an established,
+    // settled contract too, not just uptime — the attach churn on a
+    // hard-resetting source can outlast the health window.
+    if !ls.comm_capable_checked
+        && app.state().temp_valid
+        && app.state().pd_contract.is_some()
+        && !ls.pd_disturbed
+        && display_dma::ready_for_seal()
+    {
         ls.comm_capable_checked = true;
         let _ = benchvolt_pd::pd::configure_usb_comm_capable(&mut SoftPdBus::new(
             pd_bus,

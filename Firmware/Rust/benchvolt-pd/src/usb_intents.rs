@@ -25,6 +25,7 @@ use crate::runtime::{
     confirmed_global_shutdown, dispatch_app, set_current_limit, set_regulation_mode, set_voltage,
     stop_awg_confirmed,
 };
+use crate::loop_steps::LoopState;
 use crate::types::{FirmwareApp, FirmwarePower, PdI2c};
 use crate::usb_protocol::handle_usb_command;
 use crate::usb_transport::{queue_usb_response, take_usb_command};
@@ -37,7 +38,7 @@ pub(crate) struct UsbCtx<'a> {
     pub waveform: &'a mut WaveformService,
     pub arb_upload: &'a mut ArbUploadSession,
     pub usb_output: &'a mut OutputTransaction,
-    pub pending_awg_ack: &'a mut Option<u8>,
+    pub ls: &'a mut LoopState,
 }
 
 fn awg_engine_busy(ctx: &UsbCtx) -> bool {
@@ -177,7 +178,13 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
         }
         UsbIntent::PdNegotiate => {
             let outputs_off = ctx.app.state().outputs_inactive();
-            if ctx.pd_service.command_pending() || ctx.power.is_busy() || !outputs_off {
+            // NVM write + renegotiation trigger: refuse while the bus is
+            // still settling from a previous perturbation.
+            if ctx.pd_service.command_pending()
+                || ctx.power.is_busy()
+                || !outputs_off
+                || ctx.ls.pd_disturbed
+            {
                 queue_usb_response(b"ERR:BUSY\r\n");
                 return;
             }
@@ -197,6 +204,7 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
                 }
                 Err(_) => queue_usb_response(b"ERR:PD:NVM\r\n"),
             }
+            ctx.ls.mark_pd_disturbed();
         }
         UsbIntent::PdList => {
             // Same admission as the on-device PD Source read: the
@@ -216,6 +224,8 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
                 ctx.pd_bus,
                 ctx.power.delay_mut(),
             ));
+            // The read restarts negotiation; hold NVM writes until settled.
+            ctx.ls.mark_pd_disturbed();
             // The desktop GUI collects lines between these markers and
             // ignores any line that is not "index,mv,ma,mw".
             let mut listing: String<176> = String::new();
@@ -259,13 +269,16 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
             let outputs_off = ctx.app.state().outputs_inactive();
             // A live, settled contract is part of the admission: this path
             // erases and programs STUSB4500 NVM on a VBUS-powered board, and
-            // running it mid-renegotiation races the source's recovery
-            // hard reset against the NVM program.
+            // running it while a recently-provoked renegotiation is still in
+            // flight (e.g. right after SOUR:PD:LIST?) races the source's
+            // recovery hard reset against the NVM program. `pd_disturbed` is
+            // the loop's real settle signal; the old `pd_negotiating` flag
+            // was never set in production.
             if ctx.pd_service.command_pending()
                 || ctx.power.is_busy()
                 || !outputs_off
                 || ctx.app.state().pd_contract.is_none()
-                || ctx.app.state().pd_negotiating
+                || ctx.ls.pd_disturbed
             {
                 queue_usb_response(b"ERR:BUSY\r\n");
                 return;
@@ -277,7 +290,10 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
                 milliamps,
             );
             match result {
-                Ok(()) => queue_usb_response(b"OK:PD_PROFILED\r\n"),
+                Ok(()) => {
+                    ctx.ls.mark_pd_disturbed();
+                    queue_usb_response(b"OK:PD_PROFILED\r\n")
+                }
                 Err(benchvolt_pd::pd::PdError::NoSuitablePdo) => {
                     queue_usb_response(b"ERR:PARAM_FORMAT\r\n")
                 }
@@ -370,7 +386,7 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
             if ctx.app.state().awg_status == AwgStatus::StartRequested
                 && ctx.app.state().awg_source == AwgSource::Builtin
             {
-                *ctx.pending_awg_ack = Some(channel);
+                ctx.ls.pending_awg_ack = Some(channel);
             } else {
                 queue_usb_response(b"ERR:BUSY\r\n");
             }
@@ -380,7 +396,7 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
                 && ctx.app.state().awg.channel == channel
                 && !matches!(ctx.app.state().awg_status, AwgStatus::Stopped)
             {
-                *ctx.pending_awg_ack = None;
+                ctx.ls.pending_awg_ack = None;
                 queue_usb_response(stop_awg_confirmed(ctx.app, ctx.power));
             } else {
                 queue_usb_response(b"OK\r\n");

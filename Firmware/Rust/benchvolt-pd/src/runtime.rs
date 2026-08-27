@@ -170,6 +170,7 @@ pub(crate) fn service_profile_request<V, D, const Q: usize>(
     app: &mut EffectApp<AppReducer, V, FirmwareEffectPlanner, Q>,
     power_driver: &mut PowerExecutor<D>,
     settings_store: &mut SettingsStore,
+    allow_compaction: bool,
 ) -> bool
 where
     V: reducto::View<State = AppState>,
@@ -186,6 +187,7 @@ where
                 RecordKind::Profile(slot),
                 settings,
                 outputs_physically_off,
+                allow_compaction,
             ) {
                 ProfileStatus::Saved(slot)
             } else {

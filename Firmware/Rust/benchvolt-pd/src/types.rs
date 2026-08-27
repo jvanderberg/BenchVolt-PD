@@ -32,3 +32,6 @@ pub(crate) type PdI2c = SoftI2c<
     PA9<Output<OpenDrain>>,
     { benchvolt_pd::pd::STUSB4500_I2C_HALF_CYCLE_US },
 >;
+
+pub(crate) type EncoderSwitch =
+    stm32f0xx_hal::gpio::gpiob::PB14<stm32f0xx_hal::gpio::Input<stm32f0xx_hal::gpio::Floating>>;

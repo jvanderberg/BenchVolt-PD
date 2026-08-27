@@ -46,6 +46,8 @@ use usb_intents::UsbCtx;
 
 pub(crate) const FLASH_READY_SPINS: u32 = 12_000_000;
 
+/// Last-resort exit: raw all-off, record why, reset. Also the panic and
+/// hard-fault destination.
 pub(crate) fn emergency_reset(reason: ResetReason) -> ! {
     cortex_m::interrupt::disable();
     unsafe { raw_emergency_shutdown() };
@@ -63,6 +65,8 @@ unsafe fn HardFault(_frame: &ExceptionFrame) -> ! {
     emergency_reset(ResetReason::HardFault)
 }
 
+/// IWDG feed — called exactly once per completed loop pass, so a wedged
+/// pass resets the board within four seconds.
 pub(crate) fn feed_watchdog() {
     unsafe { core::ptr::write_volatile(0x4000_3000 as *mut u32, 0xaaaa) };
 }
@@ -94,6 +98,8 @@ fn main() -> ! {
         encoder_sw,
     } = startup::initialize();
 
+    // Loop-owned services and state; everything hardware-shaped arrived in
+    // `Board`. From here on, one pass = the body of the loop below, in order.
     let mut cadence = ServiceCadence::default();
     let mut measurement_windows = MeasurementWindows::new();
     let mut protection = ProtectionService::default();
@@ -122,6 +128,8 @@ fn main() -> ! {
     };
 
     loop {
+        // One framed USB command per pass; parsing, execution, and replies
+        // all live in `usb_intents`.
         usb_intents::service_usb_command(
             &mut UsbCtx {
                 app: &mut app,
@@ -136,8 +144,11 @@ fn main() -> ! {
             &protection,
         );
 
+        // Deferred boot repaint, plus the fail-closed display-death latch.
         loop_steps::render_step(&mut app, &mut power_driver, &mut ls);
 
+        // Idle pacing: ~1 ms per pass, dropped while the waveform sampler
+        // owns the loop.
         if app.state().awg_status != AwgStatus::Running {
             power_driver.delay_ms(1u8);
         }
@@ -156,6 +167,8 @@ fn main() -> ! {
             due.measurement = false;
         }
 
+        // PD contract watchdog: passive import, renegotiation events, and
+        // USB negotiate-command completions.
         loop_steps::pd_step(
             &mut app,
             &mut power_driver,
@@ -166,6 +179,8 @@ fn main() -> ! {
             awg_hot,
         );
 
+        // Front-panel input. Deliberately inert after a display failure:
+        // a UI that cannot show state must not change it.
         let (direction, accelerated) = take_encoder_adjustment(&mut encoder_accumulator);
         if !display_dma::has_failed() {
             if let Some(action) = encoder_action(app.state(), direction, accelerated) {
@@ -179,6 +194,7 @@ fn main() -> ! {
             }
         }
 
+        // Profile save/load and factory defaults (journal + verified shutdown).
         if service_profile_request(&mut app, &mut power_driver, &mut settings_store) {
             // Fail-safe: factory defaults also restore the STUSB4500 NVM to
             // its canonical 20 V / request-max / comm-capable configuration,
@@ -191,6 +207,8 @@ fn main() -> ! {
             ));
         }
 
+        // PD Source screen: the once-per-boot capability read, then any
+        // armed front-panel PDO apply (journal first, then STUSB reprofile).
         loop_steps::pd_source_list_step(
             &mut app,
             &mut power_driver,
@@ -206,9 +224,13 @@ fn main() -> ! {
             &mut settings_store,
             &mut settings_effect,
         );
+        // 2 kHz waveform scheduler, its start/stop directives, and the
+        // deferred USB acks that wait on the engine actually running.
         loop_steps::waveform_step(&mut app, &mut power_driver, &mut waveform_service, &mut ls);
         loop_steps::awg_ack_step(&app, &mut waveform_service, &mut ls);
 
+        // Periodic sensing: 100 ms temperature, 20 ms protection sweep and
+        // CC regulation, 200 ms display measurement sync.
         if due.temperature {
             loop_steps::temperature_step(&mut app, &mut power_driver);
         }
@@ -231,6 +253,8 @@ fn main() -> ! {
         // in this same pass. One bounded stage can then advance before the
         // watchdog is fed, without blocking USB, PD, or protection cadence.
         loop_steps::executor_step(&mut app, &mut power_driver, &mut usb_output);
+        // Debounced settings journal, then the one-time STUSB comm-capable
+        // NVM check once the loop has proven healthy.
         loop_steps::persistence_step(&app, &mut settings_effect, &mut settings_store, elapsed_ms);
         loop_steps::comm_capable_step(&app, &mut power_driver, &mut pd_bus, &cadence, &mut ls);
 
@@ -242,6 +266,7 @@ fn main() -> ! {
             cortex_m::asm::delay(480_000);
             emergency_reset(ResetReason::UserReboot);
         }
+        // Advance display DMA and certify this pass to the watchdog.
         display_dma::service();
         feed_watchdog();
     }

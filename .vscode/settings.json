@@ -1,0 +1,12 @@
+{
+    // The Rust crate lives three levels down; point rust-analyzer at it
+    // explicitly instead of relying on nested-manifest discovery.
+    "rust-analyzer.linkedProjects": [
+        "Firmware/Rust/benchvolt-pd/Cargo.toml"
+    ],
+    // .cargo/config.toml pins thumbv6m-none-eabi (correct for the firmware
+    // bin). --all-targets would also build the host test suites for that
+    // no-std target and spray phantom errors, so flycheck checks only the
+    // lib and bin. Run `tools/check.sh` for the real host test gate.
+    "rust-analyzer.check.allTargets": false
+}

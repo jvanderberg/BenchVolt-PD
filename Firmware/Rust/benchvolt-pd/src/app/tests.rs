@@ -589,12 +589,33 @@ fn pd_source_screen_arms_applies_and_cancels_under_the_outputs_off_rule() {
     let disarmed = AppReducer::reduce(&state, Action::ActivateMenu);
     assert!(disarmed.pd_source_armed.is_none());
 
-    // Apply with a live output is a rejected no-op.
+    // Apply with no live PD contract is a rejected no-op: the apply
+    // programs STUSB NVM and must not race a renegotiation's hard reset.
     state.menu_selection = 1;
+    let rejected = AppReducer::reduce(&state, Action::ActivateMenu);
+    assert!(rejected == state);
+    state.pd_contract = Some(crate::pd::Contract {
+        source_position: 1,
+        millivolts: 9_000,
+        operating_milliamps: 3_000,
+        maximum_milliamps: 3_000,
+    });
+
+    // Mid-renegotiation is likewise rejected.
+    state.pd_negotiating = true;
+    let rejected = AppReducer::reduce(&state, Action::ActivateMenu);
+    assert!(rejected == state);
+    state.pd_negotiating = false;
+
+    // Apply with a live output is a rejected no-op.
     state.channels[0].physical_enabled = true;
     let rejected = AppReducer::reduce(&state, Action::ActivateMenu);
     assert!(rejected == state);
     state.channels[0].physical_enabled = false;
+
+    // Losing the contract disarms the pending choice.
+    let disarmed = AppReducer::reduce(&state, Action::PdFailed(crate::pd::PdError::Detached));
+    assert!(disarmed.pd_source_armed.is_none());
 
     let applied = AppReducer::reduce(&state, Action::ActivateMenu);
     assert_eq!(

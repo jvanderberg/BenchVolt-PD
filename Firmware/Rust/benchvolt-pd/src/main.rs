@@ -119,6 +119,10 @@ fn main() -> ! {
     let mut ls = LoopState {
         pd_deferred_elapsed_ms: 0,
         comm_capable_checked: false,
+        journal_maintenance_done: false,
+        pdo_flag_clear_needed: settings_store
+            .latest
+            .is_some_and(|record| record.settings.pdo_apply_pending_mv != 0),
         display_failure_handled: false,
         pd_list_failures: 0,
         pd_list_not_before: 0,
@@ -253,10 +257,19 @@ fn main() -> ! {
         // in this same pass. One bounded stage can then advance before the
         // watchdog is fed, without blocking USB, PD, or protection cadence.
         loop_steps::executor_step(&mut app, &mut power_driver, &mut usb_output);
-        // Debounced settings journal, then the one-time STUSB comm-capable
-        // NVM check once the loop has proven healthy.
+        // Debounced settings journal, then the healthy-loop one-shots:
+        // deferred journal compaction, the PDO-flag clear, and the STUSB
+        // comm-capable NVM check.
         loop_steps::persistence_step(&app, &mut settings_effect, &mut settings_store, elapsed_ms);
-        loop_steps::comm_capable_step(&app, &mut power_driver, &mut pd_bus, &cadence, &mut ls);
+        loop_steps::maintenance_step(
+            &app,
+            &mut power_driver,
+            &mut pd_bus,
+            &cadence,
+            &mut ls,
+            &mut settings_store,
+            &mut settings_effect,
+        );
 
         if app.state().reboot_requested {
             // A physical reboot is safe only after every independent output-off

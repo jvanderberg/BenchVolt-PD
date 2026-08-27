@@ -199,8 +199,17 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
             }
         }
         UsbIntent::PdList => {
-            if ctx.pd_service.command_pending() {
-                queue_usb_response(b"ERR:BUSY\r\n");
+            // Same admission as the on-device PD Source read: the
+            // Get_Source_Cap this transmits restarts negotiation, which some
+            // sources answer with a VBUS hard reset — never provoke that
+            // with outputs live or the 2 kHz waveform sampler running (the
+            // blocking soft-I2C poll would also starve it). The error rides
+            // inside the list markers so the GUI's parser terminates.
+            if ctx.pd_service.command_pending()
+                || !ctx.app.state().outputs_inactive()
+                || awg_engine_busy(ctx)
+            {
+                queue_usb_response(b"UI_PDO_LIST_START\r\nERR:BUSY\r\nUI_PDO_LIST_END\r\n");
                 return;
             }
             let result = benchvolt_pd::pd::read_source_capabilities(&mut SoftPdBus::new(
@@ -248,7 +257,16 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
             milliamps,
         } => {
             let outputs_off = ctx.app.state().outputs_inactive();
-            if ctx.pd_service.command_pending() || ctx.power.is_busy() || !outputs_off {
+            // A live, settled contract is part of the admission: this path
+            // erases and programs STUSB4500 NVM on a VBUS-powered board, and
+            // running it mid-renegotiation races the source's recovery
+            // hard reset against the NVM program.
+            if ctx.pd_service.command_pending()
+                || ctx.power.is_busy()
+                || !outputs_off
+                || ctx.app.state().pd_contract.is_none()
+                || ctx.app.state().pd_negotiating
+            {
                 queue_usb_response(b"ERR:BUSY\r\n");
                 return;
             }

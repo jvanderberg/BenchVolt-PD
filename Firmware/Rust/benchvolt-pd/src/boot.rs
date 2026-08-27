@@ -179,6 +179,12 @@ pub(crate) fn persist_settings_record(
         settings,
     };
     if !program_settings_slot(store.next_slot, record) {
+        // The failed slot may no longer be blank, and the blank-check would
+        // then refuse it forever. Skip past it so the next attempt (the
+        // debouncer retries within a second) uses a fresh slot instead of
+        // wedging every persistence path for the rest of the session; the
+        // dirty slot decodes as garbage and is ignored at the next load.
+        store.next_slot += 1;
         return false;
     }
     match kind {

@@ -420,11 +420,16 @@ impl AppState {
         self.pd_source_count + 2
     }
 
-    /// Same admission rule as the USB `SOUR:PDO:SET` path: outputs must be
-    /// inactive, plus no competing apply and an idle AWG.
+    /// Same admission rule as the USB `SOUR:PDO:SET` path: outputs inactive,
+    /// no competing apply, an idle AWG — and a live, settled PD contract.
+    /// The apply erases and programs STUSB4500 NVM on this VBUS-powered
+    /// board; admitting it with the contract lost or mid-renegotiation races
+    /// that NVM program against the source's recovery hard reset.
     pub fn pd_source_apply_ready(&self) -> bool {
         self.pd_source_armed.is_some()
             && !self.pd_source_error
+            && self.pd_contract.is_some()
+            && !self.pd_negotiating
             && self.outputs_inactive()
             && self.pd_apply_request.is_none()
             && matches!(self.awg_status, AwgStatus::Stopped | AwgStatus::Fault)
@@ -1637,6 +1642,9 @@ impl Reducer for AppReducer {
                 next.pd_error = Some(error);
                 next.pd_negotiating = false;
                 next.pdo_apply_pending_mv = 0;
+                // Contract gone: disarm any pending PD Source choice so a
+                // click on Apply cannot fire into the source's recovery.
+                next.pd_source_armed = None;
                 if contract_lost
                     || state
                         .channels

@@ -71,7 +71,10 @@ reserved `0x0801f000..0x0801f7ff` settings page after an edit has remained
 quiet. Torn or corrupt records are ignored, and persisted AWG configuration is
 range-validated before the reducer may index channels with it. Runtime saves only program a blank
 slot. If the journal fills, page erase/compaction is deferred until every power
-output is physically off. Three explicit profile slots store validated snapshots
+output is physically off and, at boot, until the loop has proven healthy —
+never inside the attach window, where a source hard reset could interrupt
+the page erase and blank the only settings page. A record-program failure
+skips the dirty slot rather than wedging persistence for the session. Three explicit profile slots store validated snapshots
 of those settings. Loading a profile or Factory Defaults first performs a global
 hardware shutdown. Output states, faults, UI location, and active operation are
 never persisted. As a fail-safe, Factory Defaults also restores the STUSB4500's
@@ -88,10 +91,13 @@ ceiling), marks the live contract's row ACTIVE, and lets
 a row be armed by click and applied from the front panel. The capability read
 transmits Get_Source_Cap, which restarts negotiation — and some sources
 answer that with a VBUS hard reset that cold-boots this VBUS-powered board —
-so it runs at most once per boot (the cache cannot go stale: a source swap
-always cold-boots the board), waits until every output is inactive, and
-never repeats on contract events (that feedback loop was observed on
-hardware). Apply obeys the same admission rule
+so it runs at most once per boot, only on user entry (a banner boot after a
+VBUS-reset apply is strictly display-only), only with a live settled
+contract and every output inactive, and never repeats on contract events
+(that feedback loop was observed on hardware). The cache cannot go stale: a
+source swap always cold-boots the board. Apply (and USB `SOUR:PDO:SET`)
+additionally requires the live contract, because the apply programs
+STUSB4500 NVM and must not race a renegotiation's hard reset. Apply obeys the same admission rule
 as `SOUR:PDO:SET`: every output must be inactive (a hint banner explains a
 dimmed Apply or a stalled list). Applying first appends a settings-journal
 record carrying the requested voltage, then reprofiles the STUSB4500 NVM PDO2

@@ -6,7 +6,11 @@ hardware — the capability read transmits Get_Source_Cap, which itself
 restarts negotiation and raises contract events, so re-reading on them is a
 self-sustaining read/renegotiate loop (and the resulting full-screen repaint
 storm overflowed the 192-command paint queue into a latched display failure).
-The list is read once per screen entry, only while outputs are inactive;
+The list is read at most once per boot, only on user entry with a live
+settled contract and outputs inactive — the banner boot itself performs no
+PD traffic and no flash writes (the journaled flag is cleared by a deferred
+healthy-loop maintenance step), restoring this section's display-only
+requirement to the letter;
 the journal records the requested millivolts only (no index — the banner
 names the voltage), encoded in previously-unused record bytes so no record
 version bump was needed (old and new records decode in both directions); and

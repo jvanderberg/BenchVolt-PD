@@ -24,9 +24,7 @@ use crate::board::{
     i2c::SoftI2c,
     power::HardwarePowerDriver,
 };
-use crate::boot::{
-    compact_settings_store, load_settings_store, persist_settings, SettingsStore, SETTINGS_SLOTS,
-};
+use crate::boot::{load_settings_store, SettingsStore};
 use crate::input::monotonic_ms;
 use crate::types::{EncoderSwitch, FirmwareApp, FirmwarePower, PdI2c};
 use crate::view::BenchVoltView;
@@ -218,10 +216,11 @@ pub(crate) fn initialize() -> Board {
                 gpioc.pc13.into_push_pull_output(cs),
             )
         });
-    let mut settings_store = load_settings_store();
-    if settings_store.next_slot >= SETTINGS_SLOTS {
-        let _ = compact_settings_store(&mut settings_store);
-    }
+    // NOTE: a full journal is NOT compacted here. The page erase would run
+    // inside the attach window where the source may still hard-reset VBUS,
+    // and an interrupted compaction blanks the only settings page. The
+    // loop's maintenance step compacts once the cadence is healthy.
+    let settings_store = load_settings_store();
 
     // Encoder inputs are polled in foreground code. No display or reducer work
     // runs in EXTI context, and rotation cannot change output state yet.
@@ -343,17 +342,14 @@ pub(crate) fn initialize() -> Board {
         if pending_mv != 0 {
             // A PDO apply hard-reset VBUS mid-interaction. Route straight to
             // the PD Source screen with the requested-vs-actual banner. This
-            // path is display-only: it never re-attempts the apply or writes
-            // the STUSB, and the flag clears after this single boot, so a
-            // pathological charger converges to a normal boot instead of a
-            // boot loop. If the clearing write fails the banner merely
-            // sticks for another boot.
+            // path is strictly display-only: no capability read (the list
+            // stays unloaded until the user re-enters the screen), no STUSB
+            // writes, and no flash writes during the attach window — the
+            // journaled flag is cleared later by the loop's maintenance
+            // step once the pass cadence has proven healthy. If that clear
+            // fails, the banner merely sticks for another boot.
             initial_state.screen = benchvolt_pd::app::Screen::PdSource;
-            initial_state.pd_source_stale = true;
             initial_state.pd_banner_mv = Some(pending_mv);
-            let mut cleared = record.settings;
-            cleared.pdo_apply_pending_mv = 0;
-            let _ = persist_settings(&mut settings_store, cleared, true);
         }
     }
     initial_state.profile_present =

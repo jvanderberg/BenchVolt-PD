@@ -28,6 +28,14 @@ pub(crate) struct LoopState {
     /// Elapsed time withheld from the PD service while a waveform is running.
     pub pd_deferred_elapsed_ms: u16,
     pub comm_capable_checked: bool,
+    /// One-shot deferred journal work (compaction of a full page, clearing a
+    /// journaled PDO-apply flag) runs only after the loop proves healthy —
+    /// never inside the boot attach window, where a source hard reset could
+    /// interrupt the page erase and blank the only settings page.
+    pub journal_maintenance_done: bool,
+    /// The boot record carried a pdo_apply_pending flag; append the cleared
+    /// record once (failure = a sticky banner on the next boot, by design).
+    pub pdo_flag_clear_needed: bool,
     pub display_failure_handled: bool,
     /// Capability-read pacing. Get_Source_Cap triggers a renegotiation the
     /// bench charger sometimes answers with a VBUS hard reset, and reads
@@ -131,13 +139,21 @@ pub(crate) fn pd_source_list_step(
         ls.pd_list_failures = 0;
     }
     ls.was_on_pd_source = on_pd_source;
-    if on_pd_source
+    let gates_open = on_pd_source
         && app.state().pd_source_stale
         && app.state().outputs_inactive()
         && app.state().awg_status != AwgStatus::Running
-        && !pd_service.command_pending()
-        && dma_deadline_reached(monotonic_ms(), ls.pd_list_not_before)
-    {
+        && !pd_service.command_pending();
+    if !gates_open {
+        // Keep the pacing deadline fresh while blocked: the u16 half-range
+        // comparison below is only wrap-safe within 32.7 s of arming, and a
+        // gate (outputs on, PD command pending) can hold this closed for
+        // longer. Re-arming also gives the bus 400 ms of quiet after the
+        // blocking condition clears before the read fires.
+        ls.pd_list_not_before = monotonic_ms().wrapping_add(400);
+        return;
+    }
+    if dma_deadline_reached(monotonic_ms(), ls.pd_list_not_before) {
         let result = benchvolt_pd::pd::read_source_capabilities(&mut SoftPdBus::new(
             pd_bus,
             power.delay_mut(),
@@ -189,8 +205,14 @@ pub(crate) fn pdo_apply_step(
         return;
     };
     let outputs_physically_off = app.state().outputs_physically_off();
-    let mut ok =
-        app.state().outputs_inactive() && !power.is_busy() && !pd_service.command_pending();
+    // Re-check the full admission at service time: the STUSB NVM program
+    // below must not run with the contract lost or mid-renegotiation (the
+    // source may be about to hard-reset VBUS).
+    let mut ok = app.state().outputs_inactive()
+        && app.state().pd_contract.is_some()
+        && !app.state().pd_negotiating
+        && !power.is_busy()
+        && !pd_service.command_pending();
     if ok {
         let settings = PersistentSettings::from_state(app.state());
         ok = persist_settings(settings_store, settings, outputs_physically_off);
@@ -468,25 +490,44 @@ pub(crate) fn persistence_step(
     }
 }
 
-/// One-time STUSB4500 NVM check: declare USB data support in PD requests so
-/// macOS keeps the port's data connection alive. A bus error retries on the
-/// next boot; the update itself takes effect at the next cold attach. The
-/// boot contract needs no firmware involvement: the STUSB4500 autonomously
-/// negotiates the NVM PDO2 preference (set via `SOUR:PDO:SET`) at every
-/// attach.
-pub(crate) fn comm_capable_step(
+/// One-shot maintenance once the loop has proven healthy for three seconds
+/// with every output physically off — i.e. safely outside the boot attach
+/// window:
+/// 1. compact a full settings journal (deferred from boot: an interrupted
+///    page erase would blank the only settings page);
+/// 2. append the cleared record for a journaled PDO-apply flag (one
+///    attempt; failure leaves a sticky banner on the next boot, which the
+///    design doc calls annoying but safe);
+/// 3. the STUSB4500 USB_COMM_CAPABLE NVM check, so PD requests declare USB
+///    data support and macOS keeps the port's data connection alive.
+pub(crate) fn maintenance_step(
     app: &FirmwareApp,
     power: &mut FirmwarePower,
     pd_bus: &mut PdI2c,
     cadence: &ServiceCadence,
     ls: &mut LoopState,
+    settings_store: &mut SettingsStore,
+    settings_effect: &mut SettingsDebouncer,
 ) {
-    if !ls.comm_capable_checked
-        && cadence.healthy_for(3_000)
-        && app.state().temp_valid
-        && app.state().outputs_physically_off()
-        && display_dma::ready_for_seal()
-    {
+    if !cadence.healthy_for(3_000) || !app.state().outputs_physically_off() {
+        return;
+    }
+    if !ls.journal_maintenance_done {
+        ls.journal_maintenance_done = true;
+        if settings_store.next_slot >= crate::boot::SETTINGS_SLOTS {
+            let _ = crate::boot::compact_settings_store(settings_store);
+        }
+        if ls.pdo_flag_clear_needed {
+            ls.pdo_flag_clear_needed = false;
+            // Live state carries pdo_apply_pending_mv = 0 (apply_to never
+            // restores it), so this record is the cleared one.
+            let settings = PersistentSettings::from_state(app.state());
+            if persist_settings(settings_store, settings, true) {
+                settings_effect.mark_saved(settings);
+            }
+        }
+    }
+    if !ls.comm_capable_checked && app.state().temp_valid && display_dma::ready_for_seal() {
         ls.comm_capable_checked = true;
         let _ = benchvolt_pd::pd::configure_usb_comm_capable(&mut SoftPdBus::new(
             pd_bus,

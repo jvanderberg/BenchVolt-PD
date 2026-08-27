@@ -25,6 +25,15 @@ where
                 Some(if execute_global_shutdown(power_driver).is_ok() {
                     Action::GlobalShutdownApplied
                 } else {
+                    // Invariant #5 escalation: a failed verified shutdown
+                    // falls back to the raw register-level all-off, exactly
+                    // like every synchronous shutdown site. Target-only —
+                    // the host test harness has no hardware to slam and
+                    // models this case through the mock driver instead.
+                    #[cfg(target_arch = "arm")]
+                    unsafe {
+                        crate::early_shutdown::raw_emergency_shutdown()
+                    };
                     Action::GlobalShutdownFailed
                 })
             }

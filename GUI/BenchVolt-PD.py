@@ -346,15 +346,25 @@ class BenchVoltUI(ctk.CTk):
             if in_app_mode:
                 self.log_fw_msg("-> Waiting for the updater to re-enumerate...")
                 time.sleep(2)
-                port = self._wait_for_port(port, 20) or port
-            else:
-                self.log_fw_msg("-> Device did not respond to App commands.")
-                self.log_fw_msg("-> Assuming an updater is already running.")
 
-            # Identify which updater is on the wire.
-            with serial.Serial(port, 115200, timeout=3) as ser:
-                time.sleep(0.3)
-                mode = self._probe_v2(ser)
+            # Identify which updater is on the wire. A v2 boot core comes up
+            # under its OWN port name (different USB serial than the app or
+            # the stock identity), so scan-and-probe every port for it FIRST;
+            # only fall back to the selected port when no v2 core exists.
+            mode = None
+            core_port = self._find_v2_core_port(25 if in_app_mode else 5)
+            if core_port:
+                port = core_port
+                mode = "core"
+                self.log_fw_msg(f"-> v2 boot core found on {port}.")
+            else:
+                port = self._wait_for_port(port, 10) or port
+                try:
+                    with serial.Serial(port, 115200, timeout=3) as ser:
+                        time.sleep(0.3)
+                        mode = self._probe_v2(ser)
+                except Exception:
+                    mode = None
             if mode == "app":
                 self.log_fw_msg("! ERROR: a v2 application is running but refused "
                                 "JUMP:BOOTLOADER. Reconnect and retry.")
@@ -362,7 +372,8 @@ class BenchVoltUI(ctk.CTk):
             self.log_fw_msg(f"-> Updater protocol: {'v2 sectioned' if mode == 'core' else 'v1 legacy'}.")
 
             if mode == "core" and image_target == "v2":
-                self.upload_firmware_v2(port, firmware_data)
+                if self.upload_firmware_v2(port, firmware_data):
+                    self._reconnect_after_update()
             elif mode is None and image_target == "v1":
                 self.upload_firmware(port, filepath)
             elif mode is None and image_target == "v2":
@@ -406,7 +417,33 @@ class BenchVoltUI(ctk.CTk):
             return
         self.log_fw_msg(f"-> v2 boot core found on {port}.")
         self.log_fw_msg("[MIGRATION] v2 boot core is up. Flashing the application...")
-        self.upload_firmware_v2(port, firmware_data)
+        if self.upload_firmware_v2(port, firmware_data):
+            self._reconnect_after_update()
+
+    def _reconnect_after_update(self):
+        """After a successful update + reboot, find the running firmware and
+        reconnect the control session automatically."""
+        self.log_fw_msg("[RECONNECT] Waiting for the new firmware to boot...")
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            for candidate in serial.tools.list_ports.comports():
+                if (candidate.vid, candidate.pid) != self.BENCHVOLT_USB_ID:
+                    continue
+                try:
+                    with serial.Serial(candidate.device, 115200, timeout=1.5) as ser:
+                        time.sleep(0.3)
+                        ser.reset_input_buffer()
+                        ser.write(b"\n*IDN?\n")
+                        if b"BenchVolt" in ser.readline():
+                            device = candidate.device
+                            self.log_fw_msg(f"[RECONNECT] Firmware is up on {device}. Connecting.")
+                            self.after(0, lambda d=device: (self.port_option_menu.set(d),
+                                                            self.toggle_conn()))
+                            return
+                except Exception:
+                    continue
+            time.sleep(2)
+        self.log_fw_msg("[RECONNECT] Firmware did not answer within 30 s; connect manually.")
 
     def upload_firmware_v2(self, port, firmware_data):
         """Sectioned v2 upload: START carries the section id, END commits the
@@ -454,14 +491,17 @@ class BenchVoltUI(ctk.CTk):
 
             self.log_fw_msg("[V2 STEP 5] REBOOTING INTO THE NEW FIRMWARE")
             ser.write(bytes([CMD_JUMP_ONLY]))
-            if ser.read(1) == ACK:
+            rebooted = ser.read(1) == ACK
+            if rebooted:
                 self.log_fw_msg("         -> Device is rebooting. Update complete!")
                 self.set_fw_progress(1.0)
             else:
                 self.log_fw_msg("         -> No reboot ACK; power-cycle the device.")
             ser.close()
+            return rebooted
         except Exception as e:
             self.log_fw_msg(f"! CRITICAL V2 UPLOAD ERROR: {e}")
+            return False
 
     def upload_firmware(self, port, filepath):
         try:

@@ -69,6 +69,31 @@ jobs:
           path: dist-v2/
           if-no-files-found: error
 
+  c-firmware:
+    name: Factory C firmware (build-only, for bench testing)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM GCC toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+      - name: Build bootloader
+        run: make -C Firmware/Bootloader -j"$(nproc)"
+      - name: Build legacy C application
+        run: make -C Firmware/USB_Power_Source -j"$(nproc)"
+      - name: Upload factory firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchvolt-factory-firmware
+          path: |
+            Firmware/Bootloader/build/bootloader.bin
+            Firmware/USB_Power_Source/build/usb_power_source.bin
+          if-no-files-found: error
+
   release:
     name: Publish latest firmware
     runs-on: ubuntu-latest

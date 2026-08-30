@@ -5,7 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OBJCOPY=$(command -v rust-objcopy || echo "${PICO_TOOLCHAIN_PATH:-/Users/joshv/git/toolchains/arm-gcc}/bin/arm-none-eabi-objcopy")
+# Objcopy resolution: explicit override, cargo-binutils, PATH, dev machine.
+OBJCOPY=${OBJCOPY:-$(command -v rust-objcopy || command -v arm-none-eabi-objcopy || echo "${PICO_TOOLCHAIN_PATH:-/Users/joshv/git/toolchains/arm-gcc}/bin/arm-none-eabi-objcopy")}
 
 cargo build --release -p trampoline -p golden -p worker
 for b in trampoline golden worker; do

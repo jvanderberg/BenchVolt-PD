@@ -321,9 +321,21 @@ class BenchVoltUI(ctk.CTk):
                 self.log_fw_msg("-> Device is currently active in App Mode.")
                 self.log_fw_msg("-> Sending JUMP:BOOTLOADER command...")
                 self.remote.send_scpi("JUMP:BOOTLOADER")
-                # Safely close connection (stops polling loops etc.)
-                self.after(0, self.toggle_conn)
-            else:
+            # Hard-stop the control session either way: toggle_conn would
+            # RE-connect if the link had already dropped, and the polling
+            # thread's try_reconnect grabs the port back (exclusively) the
+            # moment the updater enumerates — which starved the post-update
+            # reconnect scan and let stray SCPI hit the updater mid-flash.
+            self.running = False
+            self.remote.disconnect()
+
+            def _ui_disconnected():
+                self.status_indicator.configure(text="DISCONNECTED", text_color="red")
+                self.connect_btn.configure(text="CONNECT (USB)", fg_color="#2ecc71")
+                self._set_device_controls_enabled(False)
+
+            self.after(0, _ui_disconnected)
+            if not in_app_mode:
                 # Not connected, but hardware might be stuck in app mode.
                 # Settle after open, flush both sides, and lead with a
                 # newline: a previous failed binary upload leaves junk in

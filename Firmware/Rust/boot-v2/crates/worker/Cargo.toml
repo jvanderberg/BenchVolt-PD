@@ -1,0 +1,16 @@
+[package]
+name = "worker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "worker"
+path = "src/main.rs"
+
+[dependencies]
+boot-shared = { path = "../boot-shared" }
+boot-usb = { path = "../boot-usb" }
+boot-core = { path = "../boot-core" }
+cortex-m = "0.7.7"
+cortex-m-rt = "0.7.5"

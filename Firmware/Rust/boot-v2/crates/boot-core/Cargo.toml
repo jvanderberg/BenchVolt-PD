@@ -1,0 +1,10 @@
+[package]
+name = "boot-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cortex-m = "0.7.7"
+boot-shared = { path = "../boot-shared" }
+boot-usb = { path = "../boot-usb" }

@@ -20,6 +20,7 @@ CMD_DATA = 0x02
 CMD_END = 0x03
 CMD_JUMP_ONLY = 0x04
 CMD_ERASE_CRC = 0x05
+CMD_INFO = 0x10  # v2 boot-core identity probe
 
 ACK = b'\x06'
 NACK = b'\x15'
@@ -27,6 +28,8 @@ CHUNK_SIZE = 60
 
 MAIN_APP_ADDR = 0x08008000
 PARAM_PAGE_ADDR = 0x0801F800
+V2_APP_ADDR = 0x08005000  # v2 boot chain app partition
+V2_SEC_APP = 0  # sectioned-protocol section id: application
 
 
 def calculate_stm32_crc32(data: bytes) -> int:
@@ -171,6 +174,10 @@ class BenchVoltUI(ctk.CTk):
         ctk.CTkLabel(fw_frame, text="Caution: Device will reboot automatically. Do not disconnect USB during update.",
                      font=ctk.CTkFont(size=10)).pack(pady=(0, 10))
 
+
+        # Device controls stay locked until a verified BenchVolt is connected.
+        self._set_device_controls_enabled(False)
+
     def browse_fw_file(self):
         filename = filedialog.askopenfilename(title="Select Firmware Binary",
                                               filetypes=(("Binary", "*.bin"), ("All files", "*.*")))
@@ -199,6 +206,11 @@ class BenchVoltUI(ctk.CTk):
         if port == "No Port Found" or not port:
             self.log_fw_msg("! ERROR: Please select a valid COM port.")
             return
+        if not self._port_is_benchvolt(port):
+            self.log_fw_msg(f"! ERROR: {port} is not a BenchVolt device")
+            self.log_fw_msg("         (wrong port selected — refresh and pick the one")
+            self.log_fw_msg("         whose USB identity is 0483:5740).")
+            return
         if not self.fw_filepath or not os.path.exists(self.fw_filepath):
             self.log_fw_msg("! ERROR: Please select a valid firmware (.bin) file.")
             return
@@ -212,13 +224,116 @@ class BenchVoltUI(ctk.CTk):
         self.fw_log_box.delete("0.0", "end")
         self.fw_log_box.configure(state="disabled")
 
-        # Start process in background
+        # Start process in background. The generation token cancels any
+        # still-running reconnect scan from a previous update, so it cannot
+        # print into this run's log or probe ports mid-upload.
+        self._fw_generation = getattr(self, "_fw_generation", 0) + 1
         threading.Thread(target=self.smart_upload_sequence, args=(port, self.fw_filepath), daemon=True).start()
+
+    @staticmethod
+    def _fw_image_target(firmware_data):
+        """'v1' or 'v2' from the image's reset vector, None if neither."""
+        if len(firmware_data) < 8:
+            return None
+        entry = struct.unpack_from("<I", firmware_data, 4)[0] & ~1
+        if V2_APP_ADDR <= entry < MAIN_APP_ADDR:
+            return "v2"
+        if MAIN_APP_ADDR <= entry < 0x0801F000:
+            return "v1"
+        return None
+
+    @staticmethod
+    def _probe_v2(ser):
+        """Identify a v2 device: 'core' (boot core), 'app' (v2 test app), or
+        None (v1 bootloader / no v2 endpoint). The v1 bootloader NACKs or
+        ignores the INFO byte, so the probe is harmless."""
+        ser.reset_input_buffer()
+        ser.write(bytes([CMD_INFO]))
+        reply = ser.read(12)
+        if reply[:4] == b"BV2C":
+            return "core"
+        if reply[:4] == b"BV2A":
+            return "app"
+        return None
+
+    def _wait_for_port(self, port, timeout_s):
+        """Wait for `port` to (re)appear; fall back to the first usbmodem-ish
+        port that shows up. Returns the port path or None."""
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            available = [p.device for p in serial.tools.list_ports.comports()]
+            if port in available:
+                return port
+            time.sleep(1)
+        available = [p.device for p in serial.tools.list_ports.comports()]
+        candidates = [p for p in available if "usbmodem" in p or "ttyACM" in p]
+        return candidates[0] if candidates else None
+
+    def _find_v2_core_port(self, timeout_s):
+        """Scan serial ports and probe each for the v2 boot core identity.
+        Only BenchVolt-identity ports are probed (probing anything else —
+        e.g. a debug probe's UART — burns a read timeout per pass), and the
+        timeouts are kept tight so the core is found within a second of its
+        tty appearing."""
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            for candidate in serial.tools.list_ports.comports():
+                if (candidate.vid, candidate.pid) != self.BENCHVOLT_USB_ID:
+                    continue
+                try:
+                    with serial.Serial(candidate.device, 115200, timeout=0.5) as ser:
+                        time.sleep(0.1)
+                        if self._probe_v2(ser) == "core":
+                            return candidate.device
+                except Exception:
+                    continue
+            time.sleep(0.5)
+        return None
+
+    MIGRATOR_URL = ("https://github.com/jvanderberg/BenchVolt-PD/"
+                    "releases/download/latest/migrator.bin")
+
+    def _find_migrator(self, filepath):
+        """Locate the boot-chain installer: next to the firmware file, in
+        the app folder, in the repo — or download it from the release, so a
+        user normally only ever needs the firmware .bin itself."""
+        candidates = [
+            os.path.join(os.path.dirname(filepath), "migrator.bin"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrator.bin"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "..", "Firmware", "Rust", "boot-v2", "migrator.bin"),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return os.path.abspath(candidate)
+        destination = os.path.join(os.path.dirname(filepath), "migrator.bin")
+        self.log_fw_msg("-> Fetching the boot-chain installer (migrator.bin)...")
+        try:
+            import urllib.request
+            with urllib.request.urlopen(self.MIGRATOR_URL, timeout=30) as response:
+                data = response.read()
+            if len(data) < 1024:
+                raise ValueError("download too small")
+            with open(destination, "wb") as out:
+                out.write(data)
+            self.log_fw_msg(f"-> Saved to {destination}.")
+            return destination
+        except Exception as e:
+            self.log_fw_msg(f"-> Download failed ({e}).")
+            return None
 
     def smart_upload_sequence(self, port, filepath):
         try:
             self.log_fw_msg("==================================================")
             self.log_fw_msg("[SMART UPLOAD] Checking device state...")
+
+            with open(filepath, "rb") as f:
+                firmware_data = f.read()
+            image_target = self._fw_image_target(firmware_data)
+            if image_target is None:
+                self.log_fw_msg("! ERROR: file is not a BenchVolt firmware image.")
+                return
+            self.log_fw_msg(f"-> Selected image targets the {image_target} boot layout.")
 
             in_app_mode = False
 
@@ -228,14 +343,35 @@ class BenchVoltUI(ctk.CTk):
                 self.log_fw_msg("-> Device is currently active in App Mode.")
                 self.log_fw_msg("-> Sending JUMP:BOOTLOADER command...")
                 self.remote.send_scpi("JUMP:BOOTLOADER")
-                # Safely close connection (stops polling loops etc.)
-                self.after(0, self.toggle_conn)
-            else:
-                # Not connected, but hardware might be stuck in app mode
+            # Hard-stop the control session either way: toggle_conn would
+            # RE-connect if the link had already dropped, and the polling
+            # thread's try_reconnect grabs the port back (exclusively) the
+            # moment the updater enumerates — which starved the post-update
+            # reconnect scan and let stray SCPI hit the updater mid-flash.
+            self.running = False
+            self.remote.disconnect()
+
+            def _ui_disconnected():
+                self.status_indicator.configure(text="DISCONNECTED", text_color="red")
+                self.connect_btn.configure(text="CONNECT (USB)", fg_color="#2ecc71")
+                self._set_device_controls_enabled(False)
+
+            self.after(0, _ui_disconnected)
+            if not in_app_mode:
+                # Not connected, but hardware might be stuck in app mode.
+                # Settle after open, flush both sides, and lead with a
+                # newline: a previous failed binary upload leaves junk in
+                # the device's line buffer that would otherwise corrupt
+                # this command (verified on the stock C firmware).
                 try:
-                    ser = serial.Serial(port, 115200, timeout=1)
-                    ser.write(b"JUMP:BOOTLOADER\n")
-                    res = ser.readline()
+                    ser = serial.Serial(port, 115200, timeout=2)
+                    time.sleep(0.4)
+                    ser.reset_input_buffer()
+                    ser.write(b"\nJUMP:BOOTLOADER\n")
+                    res = b"".join(ser.readline() for _ in range(3))
+                    if not res:
+                        ser.write(b"\nJUMP:BOOTLOADER\n")
+                        res = b"".join(ser.readline() for _ in range(3))
                     ser.close()
                     if b"OK:JUMPING" in res or b"BOOTLOADER" in res:
                         in_app_mode = True
@@ -245,19 +381,188 @@ class BenchVoltUI(ctk.CTk):
                     pass
 
             if in_app_mode:
-                self.log_fw_msg("-> Waiting for USB Port to re-enumerate (2 seconds)...")
-                time.sleep(2)  # Time for MCU to reset and enter bootloader
-                self.log_fw_msg("-> Device ready in Bootloader mode. Starting upload...")
+                self.log_fw_msg("-> Waiting for the updater to re-enumerate (5-10 s)...")
+
+            # Identify which updater is on the wire. A v2 boot core comes up
+            # under its OWN port name (different USB serial than the app or
+            # the stock identity), so scan-and-probe every port for it FIRST;
+            # only fall back to the selected port when no v2 core exists.
+            mode = None
+            core_port = self._find_v2_core_port(25 if in_app_mode else 5)
+            if core_port:
+                port = core_port
+                mode = "core"
+                self.log_fw_msg(f"-> v2 boot core found on {port}.")
             else:
-                self.log_fw_msg("-> Device did not respond to App commands.")
-                self.log_fw_msg("-> Assuming it's already in Bootloader mode. Starting upload...")
+                port = self._wait_for_port(port, 10) or port
+                v1_confirmed = False
+                try:
+                    with serial.Serial(port, 115200, timeout=3) as ser:
+                        time.sleep(0.3)
+                        mode = self._probe_v2(ser)
+                        if mode is None:
+                            # Never assume "v1 legacy" from silence: demand a
+                            # positive sign of the binary updater protocol.
+                            # An orphan END is harmless and NACKed by both
+                            # bootloader generations; silence means the port
+                            # holds something else (an app mid-boot, a held
+                            # port, nothing) and migrating would be wrong.
+                            ser.reset_input_buffer()
+                            ser.write(bytes([CMD_END, 0, 0, 0, 0]))
+                            v1_confirmed = ser.read(1) == b"\x15"
+                except Exception:
+                    mode = None
+                if mode is None and not v1_confirmed:
+                    self.log_fw_msg("! ERROR: no updater answered on this port. The device")
+                    self.log_fw_msg("         may still be booting or the port is busy —")
+                    self.log_fw_msg("         wait a few seconds and press START again.")
+                    return
+            if mode == "app":
+                self.log_fw_msg("! ERROR: a v2 application is running but refused "
+                                "JUMP:BOOTLOADER. Reconnect and retry.")
+                return
+            self.log_fw_msg(f"-> Updater protocol: {'v2 sectioned' if mode == 'core' else 'v1 legacy'}.")
 
-            # Run original upload function
-            self.upload_firmware(port, filepath)
-
+            if mode == "core" and image_target == "v2":
+                if self.upload_firmware_v2(port, firmware_data):
+                    self._reconnect_after_update()
+            elif mode is None and image_target == "v1":
+                self.upload_firmware(port, filepath)
+            elif mode is None and image_target == "v2":
+                self.migrate_then_upload(port, filepath, firmware_data)
+            else:
+                self.log_fw_msg(f"! ERROR: {image_target} image cannot be flashed over the "
+                                f"{'v2' if mode == 'core' else 'v1'} protocol. Wrong file?")
         except Exception as e:
             self.log_fw_msg(f"! SMART UPLOAD ERROR: {e}")
+        finally:
             self.after(0, lambda: self.fw_btn.configure(state="normal", text="START SMART UPDATE"))
+
+    def migrate_then_upload(self, port, filepath, firmware_data):
+        """One-time v1 -> v2 migration: flash the migrator through the stock
+        bootloader, let it install the v2 boot chain, then flash the v2
+        application over the sectioned protocol."""
+        migrator = self._find_migrator(filepath)
+        if migrator is None:
+            self.log_fw_msg("! ERROR: this device needs the one-time boot-chain install,")
+            self.log_fw_msg("         and migrator.bin could not be found or downloaded.")
+            self.log_fw_msg("         Place it next to the firmware file and retry.")
+            return
+        self.log_fw_msg("==================================================")
+        self.log_fw_msg("[MIGRATION] Installing the v2 boot chain (one time).")
+        self.log_fw_msg("  *** DO NOT UNPLUG OR POWER OFF THE DEVICE. ***")
+        self.log_fw_msg("  Use a mains-powered supply, not a power bank.")
+        if not self.upload_firmware(port, migrator):
+            self.log_fw_msg("! MIGRATION ABORTED: migrator upload failed; device unchanged.")
+            return
+        self.log_fw_msg("[MIGRATION] Migrator flashed; the device is rewriting its")
+        self.log_fw_msg("            boot pages and will reboot. Waiting...")
+        time.sleep(8)
+        # The v2 core enumerates under a NEW port name (different USB
+        # serial string), so scan every candidate port and probe each for
+        # the v2 identity instead of waiting for the old name.
+        port = self._find_v2_core_port(45)
+        if port is None:
+            self.log_fw_msg("! ERROR: v2 boot core did not answer after migration.")
+            self.log_fw_msg("         Refresh ports, select the new one, and retry —")
+            self.log_fw_msg("         the update resumes from where it left off.")
+            return
+        self.log_fw_msg(f"-> v2 boot core found on {port}.")
+        self.log_fw_msg("[MIGRATION] v2 boot core is up. Flashing the application...")
+        if self.upload_firmware_v2(port, firmware_data):
+            self._reconnect_after_update()
+
+    def _reconnect_after_update(self):
+        """After a successful update + reboot, find the running firmware and
+        reconnect the control session automatically. Exits silently if a
+        newer smart update has started meanwhile."""
+        generation = getattr(self, "_fw_generation", 0)
+        self.log_fw_msg("[RECONNECT] Waiting for the new firmware to boot...")
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if getattr(self, "_fw_generation", 0) != generation:
+                return
+            for candidate in serial.tools.list_ports.comports():
+                if (candidate.vid, candidate.pid) != self.BENCHVOLT_USB_ID:
+                    continue
+                try:
+                    with serial.Serial(candidate.device, 115200, timeout=0.7) as ser:
+                        time.sleep(0.1)
+                        ser.reset_input_buffer()
+                        # The leading newline flushes any junk line in the
+                        # device parser, but the Rust firmware answers it
+                        # with ERR:UNKNOWN_COMMAND — so scan a few reply
+                        # lines instead of only the first.
+                        ser.write(b"\n*IDN?\n")
+                        if any(b"BenchVolt" in ser.readline() for _ in range(3)):
+                            device = candidate.device
+                            self.log_fw_msg(f"[RECONNECT] Firmware is up on {device}. Connecting.")
+                            self.after(0, lambda d=device: (self.port_option_menu.set(d),
+                                                            self.toggle_conn()))
+                            return
+                except Exception:
+                    continue
+            time.sleep(0.5)
+        if getattr(self, "_fw_generation", 0) == generation:
+            self.log_fw_msg("[RECONNECT] Firmware did not answer within 30 s; connect manually.")
+
+    def upload_firmware_v2(self, port, firmware_data):
+        """Sectioned v2 upload: START carries the section id, END commits the
+        in-partition descriptor, and a BOOT command launches the new image."""
+        try:
+            file_size = len(firmware_data)
+            calculated_crc = calculate_stm32_crc32(firmware_data)
+            self.log_fw_msg("--------------------------------------------------")
+            self.log_fw_msg("[V2 STEP 1] PREPARATION")
+            self.log_fw_msg(f"         File Size    : {file_size} Bytes")
+            self.log_fw_msg(f"         Target Addr  : {hex(V2_APP_ADDR)}")
+            self.log_fw_msg(f"         Python CRC32 : {hex(calculated_crc)}")
+
+            ser = serial.Serial(port, 115200, timeout=15)
+            time.sleep(0.3)
+
+            self.log_fw_msg("[V2 STEP 2] ERASING APPLICATION SECTION")
+            ser.write(struct.pack("<BIB", CMD_START, file_size, V2_SEC_APP))
+            if ser.read(1) != ACK:
+                self.log_fw_msg("! ERROR: no ACK for START/erase. Aborting.")
+                ser.close()
+                return
+            self.log_fw_msg("         -> ACK. Section erased.")
+
+            self.log_fw_msg("[V2 STEP 3] WRITING DATA")
+            sent_bytes = 0
+            for i in range(0, file_size, CHUNK_SIZE):
+                chunk = firmware_data[i:i + CHUNK_SIZE]
+                ser.write(struct.pack("<BH", CMD_DATA, len(chunk)) + chunk)
+                if ser.read(1) != ACK:
+                    self.log_fw_msg(f"! ERROR: ACK failure at offset {sent_bytes}.")
+                    ser.close()
+                    return
+                sent_bytes += len(chunk)
+                self.set_fw_progress(sent_bytes / file_size)
+
+            self.log_fw_msg("[V2 STEP 4] VERIFY & COMMIT (descriptor last)")
+            ser.write(struct.pack("<BI", CMD_END, calculated_crc))
+            if ser.read(1) != ACK:
+                self.log_fw_msg("! ERROR: CRC verification failed; device stays in updater.")
+                ser.close()
+                self.set_fw_progress(0.0)
+                return
+            self.log_fw_msg("         -> Committed. CRC verified, descriptor sealed.")
+
+            self.log_fw_msg("[V2 STEP 5] REBOOTING INTO THE NEW FIRMWARE")
+            ser.write(bytes([CMD_JUMP_ONLY]))
+            rebooted = ser.read(1) == ACK
+            if rebooted:
+                self.log_fw_msg("         -> Device is rebooting. Update complete!")
+                self.set_fw_progress(1.0)
+            else:
+                self.log_fw_msg("         -> No reboot ACK; power-cycle the device.")
+            ser.close()
+            return rebooted
+        except Exception as e:
+            self.log_fw_msg(f"! CRITICAL V2 UPLOAD ERROR: {e}")
+            return False
 
     def upload_firmware(self, port, filepath):
         try:
@@ -321,6 +626,8 @@ class BenchVoltUI(ctk.CTk):
                 self.log_fw_msg(f"         -> SEAL APPLIED! {hex(PARAM_PAGE_ADDR)} erased & new CRC sealed.")
                 self.log_fw_msg("\n[STEP 5] COMPLETE - JUMPING TO APP!")
                 self.set_fw_progress(1.0)
+                ser.close()
+                return True
             else:
                 self.log_fw_msg("! ERROR: VERIFICATION FAILED!")
                 self.log_fw_msg("         MCU CRC does not match Python CRC.")
@@ -1200,6 +1507,30 @@ class BenchVoltUI(ctk.CTk):
         arb_entry.delete("0.0", "end")
         arb_entry.insert("0.0", ",".join(lines))
 
+
+    BENCHVOLT_USB_ID = (0x0483, 0x5740)
+
+    def _port_is_benchvolt(self, port):
+        """True when the selected port enumerates with the BenchVolt USB
+        identity (shared by the application, the stock bootloader, and the
+        v2 boot cores). Blocks uploads aimed at debug probes etc."""
+        for candidate in serial.tools.list_ports.comports():
+            if candidate.device == port:
+                return (candidate.vid, candidate.pid) == self.BENCHVOLT_USB_ID
+        return False
+
+    def _set_device_controls_enabled(self, enabled, parent=None):
+        """Recursively enable/disable the Main Control tab's widgets."""
+        if parent is None:
+            parent = self.tab_main
+        state = "normal" if enabled else "disabled"
+        for child in parent.winfo_children():
+            try:
+                child.configure(state=state)
+            except Exception:
+                pass
+            self._set_device_controls_enabled(enabled, child)
+
     def toggle_conn(self):
         selected_port = self.port_option_menu.get()
 
@@ -1208,11 +1539,36 @@ class BenchVoltUI(ctk.CTk):
                 return
 
             if self.remote.connect(selected_port):
+                # Only a device that identifies as a BenchVolt unlocks the
+                # controls; anything else (debug probe, random CDC port,
+                # a boot core awaiting firmware) is disconnected again.
+                identity = self.remote.query('*IDN?')
+                if not identity or "BenchVolt" not in identity:
+                    # Distinguish "wrong device" from "BenchVolt updater":
+                    # a v2 boot core answers the INFO probe with BV2C.
+                    updater = False
+                    try:
+                        self.remote.ser.reset_input_buffer()
+                        self.remote.ser.write(bytes([0x10]))
+                        time.sleep(0.4)
+                        updater = self.remote.ser.read(12)[:4] == b"BV2C"
+                    except Exception:
+                        pass
+                    self.remote.disconnect()
+                    if updater:
+                        self.status_indicator.configure(
+                            text="UPDATER MODE — use Firmware Update tab",
+                            text_color="orange")
+                    else:
+                        self.status_indicator.configure(
+                            text="NOT A BENCHVOLT", text_color="orange")
+                    return
                 self.status_indicator.configure(text=f"CONNECTED ({selected_port})", text_color="#2ecc71")
                 self.connect_btn.configure(text="DISCONNECT", fg_color="#c0392b")
+                self._set_device_controls_enabled(True)
 
                 # 1. FIRST DO INITIAL QUERIES (Background loop sleeping)
-                print(f"Device Info: {self.remote.query('*IDN?')}")
+                print(f"Device Info: {identity}")
 
                 build_info = self.remote.get_build_date()
                 if build_info:
@@ -1236,6 +1592,7 @@ class BenchVoltUI(ctk.CTk):
             self.status_indicator.configure(text="DISCONNECTED", text_color="red")
             self.connect_btn.configure(text="CONNECT (USB)", fg_color="#2ecc71")
             self.fw_date_info.configure(text="--")
+            self._set_device_controls_enabled(False)
 
     def sync_output_switches_from_meas_all(self, parts):
         if len(parts) < 18:

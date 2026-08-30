@@ -135,6 +135,12 @@ fn main() -> ! {
         pdo_settle_armed: false,
         pdo_settle_after: 0,
     };
+    // v2 boot chain: one-shot health mark once the loop has proven healthy
+    // (same signal the settings compaction path waits on). Without it the
+    // boot core counts this boot as unhealthy and holds in updater mode
+    // after three such boots.
+    #[cfg(feature = "v2-boot")]
+    let mut boot_health_marked = false;
 
     loop {
         // One framed USB command per pass; parsing, execution, and replies
@@ -247,7 +253,7 @@ fn main() -> ! {
         // Periodic sensing: 100 ms temperature, 20 ms protection sweep and
         // CC regulation, 200 ms display measurement sync.
         if due.temperature {
-            loop_steps::temperature_step(&mut app, &mut power_driver);
+            loop_steps::temperature_step(&mut app, &mut power_driver, due.temperature_display);
         }
         if due.measurement {
             loop_steps::measurement_step(
@@ -278,6 +284,14 @@ fn main() -> ! {
             elapsed_ms,
             cadence.healthy_for(3_000),
         );
+        // v2 boot record: mark healthy exactly once, at the same threshold
+        // that unlocks compaction. A single word program (~100 µs stall),
+        // attempted once — failure just costs this boot's health mark.
+        #[cfg(feature = "v2-boot")]
+        if !boot_health_marked && cadence.healthy_for(3_000) {
+            boot_health_marked = true;
+            let _ = crate::boot::mark_boot_healthy();
+        }
         // Post-apply-reboot fast path: clear the journaled flag and reload
         // the PDO list as soon as it is safe, well before the 3 s window.
         loop_steps::pdo_flag_clear_step(

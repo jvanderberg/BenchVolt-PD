@@ -16,7 +16,14 @@ for command in cargo arm-none-eabi-objcopy python3; do
 done
 
 cd "$project_dir"
-cargo build --locked --release --target "$thumb_target"
+# BENCHVOLT_LAYOUT=v2 builds for the v2 boot chain (app at 0x08005000); the
+# same variable switches the Python validation's partition math below.
+build_features=""
+if [ "${BENCHVOLT_LAYOUT:-}" = "v2" ]; then
+    build_features="--features v2-boot"
+fi
+# shellcheck disable=SC2086 — intentional word splitting of the feature flag
+cargo build --locked --release --target "$thumb_target" $build_features
 arm-none-eabi-objcopy -O binary "$elf" "$image"
 
 validation_tools="$project_dir/tools"

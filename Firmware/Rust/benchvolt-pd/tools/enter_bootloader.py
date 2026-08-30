@@ -41,14 +41,16 @@ def enter(application_port: str) -> str:
     # The application presents the bootloader's chip-unique USB serial so the
     # desktop GUI can reopen one port name across the jump; the bootloader is
     # recognized by its distinct product string, not by a new port name.
-    deadline = time.monotonic() + 15
+    # 30 s: the v2 boot core holds a ~2 s disconnect during handover and
+    # host driver attach can add several more on a busy bus.
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         for candidate in list_ports.comports():
             description = candidate.description or ""
             if "STM32 Virtual ComPort" in description:
                 return candidate.device
         time.sleep(0.25)
-    raise RuntimeError("stock STM32 bootloader port did not enumerate within 15 seconds")
+    raise RuntimeError("updater port did not enumerate within 30 seconds")
 
 
 def main() -> None:

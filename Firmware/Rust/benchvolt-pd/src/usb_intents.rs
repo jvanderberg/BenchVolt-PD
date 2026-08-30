@@ -19,6 +19,7 @@ use heapless::String;
 
 use crate::arb_runtime;
 use crate::board::i2c::SoftPdBus;
+#[cfg(not(feature = "v2-boot"))]
 use crate::boot::{erase_flash_page, BOOT_METADATA_ADDR};
 use crate::display_dma;
 use crate::runtime::{
@@ -66,7 +67,15 @@ pub(crate) fn service_usb_command(ctx: &mut UsbCtx, protection: &ProtectionServi
                 queue_usb_response(b"ERR:HARDWARE\r\n");
                 return;
             }
-            if !erase_flash_page(BOOT_METADATA_ADDR) {
+            // v1: erasing the metadata page invalidates the app CRC so the
+            // stock bootloader stays resident. v2: the app CRC lives in the
+            // in-partition descriptor, so the request is a single program
+            // of the metadata request word instead (crash-safe, no erase).
+            #[cfg(not(feature = "v2-boot"))]
+            let entered = erase_flash_page(BOOT_METADATA_ADDR);
+            #[cfg(feature = "v2-boot")]
+            let entered = crate::boot::request_bootloader();
+            if !entered {
                 unsafe { raw_emergency_shutdown() };
                 queue_usb_response(b"ERR:FLASH\r\n");
                 return;

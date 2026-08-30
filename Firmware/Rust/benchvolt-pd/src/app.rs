@@ -1557,8 +1557,13 @@ impl Reducer for AppReducer {
                 true
             }
             Action::Temperature(Some(raw))
-                if state.temp_valid && state.temp_sixteenths_c == raw =>
+                if state.temp_valid && (i32::from(state.temp_sixteenths_c) - i32::from(raw)).abs() <= 1 =>
             {
+                // One-LSB (0.0625 degC) deadband: single-step sensor jitter
+                // near a display boundary otherwise flips the shown tenth
+                // back and forth. Real drift accumulates past the deadband
+                // relative to the STORED value, so it still tracks within
+                // one LSB.
                 false
             }
             Action::Temperature(Some(raw)) => {

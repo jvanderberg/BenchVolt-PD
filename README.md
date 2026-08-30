@@ -157,6 +157,43 @@ A failed or interrupted upload is safe: the bootloader only ever rewrites the
 application partition, so the device falls back to the bootloader and the
 upload can simply be retried.
 
+### Installing firmware on a stock device
+
+The firmware ships with its own boot chain
+([design](Docs/v2-bootloader-design.md)): a frozen trampoline, a recovery
+core, and a worker core that shows an on-screen updater, with a 104 KiB
+application partition. Every update is power-glitch-safe, the updater
+shares the device's normal USB identity (one port name, no new
+authorization prompts), and a device with broken firmware always falls
+back to an updater.
+
+No programming hardware is needed:
+
+1. Download `benchvolt-v2.bin` from the
+   [latest release](https://github.com/jvanderberg/BenchVolt-PD/releases/tag/latest).
+   (For offline use, also grab `migrator.bin` into the same folder — the
+   boot-chain installer a factory device needs once. Online, the GUI
+   fetches it automatically when required.)
+2. Power the device from a mains supply (not a power bank) and connect USB.
+3. In the desktop GUI: select the device's port, open the Firmware Update
+   tab, browse to `benchvolt-v2.bin`, and press **START SMART UPDATE**.
+
+On a stock device the GUI first installs the boot chain through the
+factory bootloader (the screen shows **MIGRATING — DO NOT UNPLUG**; this
+one-time step is the only moment where losing power requires an SWD probe
+to recover), then uploads the firmware and reconnects automatically. On a
+device that already has the boot chain, the same button just updates the
+firmware. Command line equivalent:
+`python3 Firmware/Rust/boot-v2/tools/flash_v2.py <port> benchvolt-v2.bin 0 --boot`
+(enter the updater first with `JUMP:BOOTLOADER` /
+`tools/enter_bootloader.py`).
+
+Recovery: an interrupted install resumes by pressing START again; a failed
+upload leaves the device in the updater — retry. Holding the encoder
+button for one second while plugging in forces the updater even with
+working firmware. The GUI checks that an image matches the device's
+bootloader generation and refuses mismatches.
+
 ### Desktop GUI
 
 The original desktop GUI ([`GUI/BenchVolt-PD.py`](GUI), Python/customtkinter) works with the Rust firmware, including firmware update over USB.

@@ -423,9 +423,15 @@ pub(crate) fn awg_ack_step(
     }
 }
 
-pub(crate) fn temperature_step(app: &mut FirmwareApp, power: &mut FirmwarePower) {
+pub(crate) fn temperature_step(
+    app: &mut FirmwareApp,
+    power: &mut FirmwarePower,
+    update_display: bool,
+) {
     let temperature = power.read_temperature();
-    dispatch_app(app, power, Action::Temperature(temperature));
+    if update_display {
+        dispatch_app(app, power, Action::Temperature(temperature));
+    }
     if let Some(fault) = ProtectionService::temperature_fault(temperature) {
         for action in ProtectionService::temperature_trip_actions(app.state(), fault)
             .into_iter()

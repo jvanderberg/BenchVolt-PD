@@ -1,6 +1,10 @@
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Due {
     pub temperature: bool,
+    /// Slow tick for the temperature READOUT: sampling and thermal
+    /// protection stay on the fast `temperature` tick, but repainting the
+    /// display faster than once a second just flashes sensor noise.
+    pub temperature_display: bool,
     pub measurement: bool,
     pub display_measurement: bool,
     pub awg_load: bool,
@@ -9,6 +13,7 @@ pub struct Due {
 #[derive(Default)]
 pub struct ServiceCadence {
     temperature_ms: u16,
+    temperature_display_ms: u16,
     measurement_ms: u16,
     display_measurement_ms: u16,
     awg_load_ms: u16,
@@ -21,6 +26,7 @@ impl ServiceCadence {
         self.health_ms = self.health_ms.saturating_add(u32::from(elapsed_ms));
         Due {
             temperature: tick(&mut self.temperature_ms, elapsed_ms, 100),
+            temperature_display: tick(&mut self.temperature_display_ms, elapsed_ms, 1_000),
             measurement: tick(&mut self.measurement_ms, elapsed_ms, 20),
             display_measurement: tick(&mut self.display_measurement_ms, elapsed_ms, 200),
             awg_load: tick(&mut self.awg_load_ms, elapsed_ms, 2_000),
@@ -69,6 +75,7 @@ mod tests {
             cadence.advance(2_000),
             Due {
                 temperature: true,
+                temperature_display: true,
                 measurement: true,
                 display_measurement: true,
                 awg_load: true,

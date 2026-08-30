@@ -253,7 +253,7 @@ fn main() -> ! {
         // Periodic sensing: 100 ms temperature, 20 ms protection sweep and
         // CC regulation, 200 ms display measurement sync.
         if due.temperature {
-            loop_steps::temperature_step(&mut app, &mut power_driver);
+            loop_steps::temperature_step(&mut app, &mut power_driver, due.temperature_display);
         }
         if due.measurement {
             loop_steps::measurement_step(

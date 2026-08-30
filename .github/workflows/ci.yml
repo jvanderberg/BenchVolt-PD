@@ -14,92 +14,6 @@ defaults:
     working-directory: Firmware/Rust/benchvolt-pd
 
 jobs:
-  firmware:
-    name: Firmware build (thumbv6m)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust with ARM target and llvm-tools
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add thumbv6m-none-eabi
-          rustup component add llvm-tools
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            Firmware/Rust/benchvolt-pd/target
-          key: firmware-${{ runner.os }}-${{ hashFiles('Firmware/Rust/benchvolt-pd/Cargo.lock') }}
-      - name: Build release firmware
-        run: cargo build --release
-      - name: Produce raw binary and check partition fit
-        run: |
-          OBJCOPY=$(find "$(rustc --print sysroot)" -name llvm-objcopy | head -1)
-          "$OBJCOPY" -O binary \
-            target/thumbv6m-none-eabi/release/benchvolt-pd \
-            target/thumbv6m-none-eabi/release/benchvolt-pd.bin
-          SIZE=$(stat -c%s target/thumbv6m-none-eabi/release/benchvolt-pd.bin)
-          LIMIT=$((92 * 1024))
-          echo "Firmware image: ${SIZE} bytes (partition limit ${LIMIT})"
-          if [ "$SIZE" -gt "$LIMIT" ]; then
-            echo "::error::Firmware exceeds the 92 KiB application partition"
-            exit 1
-          fi
-      - name: Upload firmware artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchvolt-firmware
-          path: |
-            Firmware/Rust/benchvolt-pd/target/thumbv6m-none-eabi/release/benchvolt-pd
-            Firmware/Rust/benchvolt-pd/target/thumbv6m-none-eabi/release/benchvolt-pd.bin
-          if-no-files-found: error
-
-  c-firmware:
-    name: C firmware build (bootloader + legacy app)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install ARM GCC toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
-      - name: Build bootloader
-        run: make -C Firmware/Bootloader -j"$(nproc)"
-      - name: Build legacy C application
-        run: make -C Firmware/USB_Power_Source -j"$(nproc)"
-      - name: Check partition fit
-        run: |
-          BOOT=Firmware/Bootloader/build/bootloader.bin
-          APP=Firmware/USB_Power_Source/build/usb_power_source.bin
-          BOOT_SIZE=$(stat -c%s "$BOOT")
-          APP_SIZE=$(stat -c%s "$APP")
-          echo "Bootloader: ${BOOT_SIZE} bytes (limit 32768)"
-          echo "Application: ${APP_SIZE} bytes (limit 98304)"
-          if [ "$BOOT_SIZE" -gt 32768 ]; then
-            echo "::error::Bootloader exceeds the 32 KiB bootloader partition"
-            exit 1
-          fi
-          if [ "$APP_SIZE" -gt 98304 ]; then
-            echo "::error::C application exceeds the 96 KiB application partition"
-            exit 1
-          fi
-      - name: Upload bootloader artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchvolt-c-bootloader
-          path: Firmware/Bootloader/build/bootloader.bin
-          if-no-files-found: error
-      - name: Upload C application artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchvolt-c-firmware
-          path: Firmware/USB_Power_Source/build/usb_power_source.bin
-          if-no-files-found: error
-
   v2-boot-chain:
     name: v2 boot chain (migrator + cores + v2 app)
     runs-on: ubuntu-latest
@@ -155,10 +69,35 @@ jobs:
           path: dist-v2/
           if-no-files-found: error
 
+  c-firmware:
+    name: Factory C firmware (build-only, for bench testing)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM GCC toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+      - name: Build bootloader
+        run: make -C Firmware/Bootloader -j"$(nproc)"
+      - name: Build legacy C application
+        run: make -C Firmware/USB_Power_Source -j"$(nproc)"
+      - name: Upload factory firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchvolt-factory-firmware
+          path: |
+            Firmware/Bootloader/build/bootloader.bin
+            Firmware/USB_Power_Source/build/usb_power_source.bin
+          if-no-files-found: error
+
   release:
     name: Publish latest firmware
     runs-on: ubuntu-latest
-    needs: [firmware, c-firmware, tests, v2-boot-chain]
+    needs: [tests, v2-boot-chain]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
@@ -169,33 +108,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: benchvolt-firmware
-          path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: benchvolt-c-bootloader
-          path: dist/c
-      - uses: actions/download-artifact@v4
-        with:
-          name: benchvolt-c-firmware
-          path: dist/c
-      - uses: actions/download-artifact@v4
-        with:
           name: benchvolt-v2-boot-chain
           path: dist/v2
       - name: Update rolling latest release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          BIN=$(find dist -name benchvolt-pd.bin | head -1)
-          SIZE=$(stat -c%s "$BIN")
-          NOTES="Rolling build of main at ${GITHUB_SHA}. Image size: ${SIZE} bytes (92 KiB partition). Flash from the desktop GUI's firmware update tab, or with Firmware/Rust/benchvolt-pd/tools/flash_firmware.py. To install on any device: start a smart update with benchvolt-v2.bin selected — the GUI handles a stock device automatically (it fetches migrator.bin when needed; keep it next to the firmware for offline use). See README 'Installing firmware on a stock device'."
+          SIZE=$(stat -c%s dist/v2/benchvolt-v2.bin)
+          NOTES="Rolling build of main at ${GITHUB_SHA}. Image size: ${SIZE} bytes (104 KiB partition). To install on any device: start a smart update in the desktop GUI with benchvolt-v2.bin selected — a factory device gets the boot chain automatically (the GUI fetches migrator.bin when needed; keep it next to the firmware for offline use). See README 'Installing firmware on a stock device'."
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest "$BIN#benchvolt-pd.bin (application image for the stock factory bootloader)" \
+          gh release create latest \
             "dist/v2/benchvolt-v2.bin#benchvolt-v2.bin (application image; the GUI installs the boot chain on stock devices automatically)" \
             "dist/v2/migrator.bin#migrator.bin (boot chain installer; only needed offline — the GUI downloads it on demand)" \
-            "dist/c/bootloader.bin#bootloader.bin (flash once via ST-Link/DFU at 0x08000000)" \
-            "dist/c/usb_power_source.bin#usb_power_source.bin (legacy C application, alternative to the Rust image; flash via bootloader at 0x08008000)" \
             --title "Latest firmware (main)" \
             --notes "$NOTES" \
             --latest \

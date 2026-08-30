@@ -139,26 +139,6 @@ This produces an image linked at `0x08008000` for the existing C bootloader. See
 
 ### Installing firmware
 
-Every push to `main` publishes a prebuilt image to the
-[latest release](https://github.com/jvanderberg/BenchVolt-PD/releases/tag/latest)
-(`benchvolt-pd.bin`, linked at `0x08008000` for the stock bootloader). No
-programming hardware is needed - the bootloader accepts uploads over the same
-USB port:
-
-- **Desktop GUI**: open the firmware update tab in
-  [`GUI/BenchVolt-PD.py`](GUI), pick the device's COM port and the `.bin`,
-  and start the upload. The GUI reboots the device into the bootloader,
-  streams the image with CRC verification, and restarts it.
-- **Command line**: `python3 Firmware/Rust/benchvolt-pd/tools/flash_firmware.py <port> benchvolt-pd.bin`
-  (needs `pyserial`; `tools/flash_latest.sh` wraps this for locally built
-  images).
-
-A failed or interrupted upload is safe: the bootloader only ever rewrites the
-application partition, so the device falls back to the bootloader and the
-upload can simply be retried.
-
-### Installing firmware on a stock device
-
 The firmware ships with its own boot chain
 ([design](Docs/v2-bootloader-design.md)): a frozen trampoline, a recovery
 core, and a worker core that shows an on-screen updater, with a 104 KiB

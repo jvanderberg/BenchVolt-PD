@@ -270,22 +270,24 @@ class BenchVoltUI(ctk.CTk):
         return candidates[0] if candidates else None
 
     def _find_v2_core_port(self, timeout_s):
-        """Scan serial ports and probe each for the v2 boot core identity;
-        the core enumerates under a different name than the application."""
+        """Scan serial ports and probe each for the v2 boot core identity.
+        Only BenchVolt-identity ports are probed (probing anything else —
+        e.g. a debug probe's UART — burns a read timeout per pass), and the
+        timeouts are kept tight so the core is found within a second of its
+        tty appearing."""
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             for candidate in serial.tools.list_ports.comports():
-                device = candidate.device
-                if "usbmodem" not in device and "ttyACM" not in device:
+                if (candidate.vid, candidate.pid) != self.BENCHVOLT_USB_ID:
                     continue
                 try:
-                    with serial.Serial(device, 115200, timeout=1.5) as ser:
-                        time.sleep(0.2)
+                    with serial.Serial(candidate.device, 115200, timeout=0.5) as ser:
+                        time.sleep(0.1)
                         if self._probe_v2(ser) == "core":
-                            return device
+                            return candidate.device
                 except Exception:
                     continue
-            time.sleep(2)
+            time.sleep(0.5)
         return None
 
     def _find_migrator(self, filepath):
@@ -359,8 +361,7 @@ class BenchVoltUI(ctk.CTk):
                     pass
 
             if in_app_mode:
-                self.log_fw_msg("-> Waiting for the updater to re-enumerate...")
-                time.sleep(2)
+                self.log_fw_msg("-> Waiting for the updater to re-enumerate (5-10 s)...")
 
             # Identify which updater is on the wire. A v2 boot core comes up
             # under its OWN port name (different USB serial than the app or
@@ -465,8 +466,8 @@ class BenchVoltUI(ctk.CTk):
                 if (candidate.vid, candidate.pid) != self.BENCHVOLT_USB_ID:
                     continue
                 try:
-                    with serial.Serial(candidate.device, 115200, timeout=1.5) as ser:
-                        time.sleep(0.3)
+                    with serial.Serial(candidate.device, 115200, timeout=0.7) as ser:
+                        time.sleep(0.1)
                         ser.reset_input_buffer()
                         # The leading newline flushes any junk line in the
                         # device parser, but the Rust firmware answers it
@@ -481,7 +482,7 @@ class BenchVoltUI(ctk.CTk):
                             return
                 except Exception:
                     continue
-            time.sleep(2)
+            time.sleep(0.5)
         if getattr(self, "_fw_generation", 0) == generation:
             self.log_fw_msg("[RECONNECT] Firmware did not answer within 30 s; connect manually.")
 

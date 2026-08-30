@@ -224,7 +224,10 @@ class BenchVoltUI(ctk.CTk):
         self.fw_log_box.delete("0.0", "end")
         self.fw_log_box.configure(state="disabled")
 
-        # Start process in background
+        # Start process in background. The generation token cancels any
+        # still-running reconnect scan from a previous update, so it cannot
+        # print into this run's log or probe ports mid-upload.
+        self._fw_generation = getattr(self, "_fw_generation", 0) + 1
         threading.Thread(target=self.smart_upload_sequence, args=(port, self.fw_filepath), daemon=True).start()
 
     @staticmethod
@@ -438,10 +441,14 @@ class BenchVoltUI(ctk.CTk):
 
     def _reconnect_after_update(self):
         """After a successful update + reboot, find the running firmware and
-        reconnect the control session automatically."""
+        reconnect the control session automatically. Exits silently if a
+        newer smart update has started meanwhile."""
+        generation = getattr(self, "_fw_generation", 0)
         self.log_fw_msg("[RECONNECT] Waiting for the new firmware to boot...")
         deadline = time.time() + 30
         while time.time() < deadline:
+            if getattr(self, "_fw_generation", 0) != generation:
+                return
             for candidate in serial.tools.list_ports.comports():
                 if (candidate.vid, candidate.pid) != self.BENCHVOLT_USB_ID:
                     continue
@@ -459,7 +466,8 @@ class BenchVoltUI(ctk.CTk):
                 except Exception:
                     continue
             time.sleep(2)
-        self.log_fw_msg("[RECONNECT] Firmware did not answer within 30 s; connect manually.")
+        if getattr(self, "_fw_generation", 0) == generation:
+            self.log_fw_msg("[RECONNECT] Firmware did not answer within 30 s; connect manually.")
 
     def upload_firmware_v2(self, port, firmware_data):
         """Sectioned v2 upload: START carries the section id, END commits the

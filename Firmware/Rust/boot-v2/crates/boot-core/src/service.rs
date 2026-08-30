@@ -30,18 +30,31 @@ fn handover_hygiene() {
 }
 
 /// Sample the physical interlock: encoder switch on PB14, active low
-/// (external pull-up). Two samples ~1 ms apart must both read pressed.
+/// (external pull-up). Requires a CONTINUOUS hold of roughly a second —
+/// the application reboots itself in normal flows (PDO apply, reboot menu)
+/// and a user's finger from an ordinary click easily spans that reset, so
+/// a short sample window diverted routine operation into the updater
+/// (observed live: "device hung" with the app's last frame on screen).
+/// Releasing at any point during the window cancels the gesture; a real
+/// hold-at-power-on sails through.
 pub fn interlock_held() -> bool {
     unsafe {
         let ahbenr = 0x4002_1014usize as *mut u32;
         core::ptr::write_volatile(ahbenr, core::ptr::read_volatile(ahbenr) | (1 << 18));
         let idr = 0x4800_0410usize as *const u32;
-        let first = core::ptr::read_volatile(idr) & (1 << 14) == 0;
-        for _ in 0..8_000 {
-            core::hint::spin_loop();
+        if core::ptr::read_volatile(idr) & (1 << 14) != 0 {
+            return false; // not pressed — the common case, no delay at all
         }
-        let second = core::ptr::read_volatile(idr) & (1 << 14) == 0;
-        first && second
+        // Pressed at boot: demand ~1 s of unbroken hold (~1000 x ~1 ms).
+        for _ in 0..1_000 {
+            for _ in 0..2_000 {
+                core::hint::spin_loop();
+            }
+            if core::ptr::read_volatile(idr) & (1 << 14) != 0 {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -61,8 +74,17 @@ pub fn boot_core_entry(core_writes_with_interlock: bool, core_id: u32) -> ! {
     );
     // The interlock forces the updater even with a healthy app — it is the
     // physical "I want the flasher" gesture and the authorization for
-    // core-section writes.
-    let interlock = interlock_held();
+    // core-section writes. It is honored only when this boot did NOT come
+    // from a software reset: the application reboots itself via the
+    // encoder's own gestures (long-press reboot, PDO apply), so the finger
+    // is guaranteed to still be on the button at that instant — observed
+    // live as "device hung in updater after a long-press reboot". The app
+    // clears RCC_CSR (RMVF) every boot, so a set SFTRSTF here reliably
+    // means "the app initiated this reset". Plug-in and watchdog resets
+    // keep the escape hatch.
+    let soft_reset =
+        unsafe { core::ptr::read_volatile(0x4002_1024usize as *const u32) } & (1 << 28) != 0;
+    let interlock = !soft_reset && interlock_held();
     if decision == boot_shared::CoreBoot::LaunchApp && !interlock {
         crate::meta::claim_attempt();
         crate::launch::launch_app();

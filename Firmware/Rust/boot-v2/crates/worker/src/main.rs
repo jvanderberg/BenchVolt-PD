@@ -8,7 +8,9 @@ use boot_core::service::boot_core_entry;
 /// golden's job.
 #[cortex_m_rt::entry]
 fn main() -> ! {
-    boot_core_entry(false, 0x3B)
+    boot_core_entry(false, 0x3B, || {
+        boot_display::banner("BENCHVOLT V2", "FIRMWARE UPDATER");
+    })
 }
 
 #[panic_handler]

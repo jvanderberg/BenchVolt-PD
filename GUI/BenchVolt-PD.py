@@ -359,12 +359,28 @@ class BenchVoltUI(ctk.CTk):
                 self.log_fw_msg(f"-> v2 boot core found on {port}.")
             else:
                 port = self._wait_for_port(port, 10) or port
+                v1_confirmed = False
                 try:
                     with serial.Serial(port, 115200, timeout=3) as ser:
                         time.sleep(0.3)
                         mode = self._probe_v2(ser)
+                        if mode is None:
+                            # Never assume "v1 legacy" from silence: demand a
+                            # positive sign of the binary updater protocol.
+                            # An orphan END is harmless and NACKed by both
+                            # bootloader generations; silence means the port
+                            # holds something else (an app mid-boot, a held
+                            # port, nothing) and migrating would be wrong.
+                            ser.reset_input_buffer()
+                            ser.write(bytes([CMD_END, 0, 0, 0, 0]))
+                            v1_confirmed = ser.read(1) == b"\x15"
                 except Exception:
                     mode = None
+                if mode is None and not v1_confirmed:
+                    self.log_fw_msg("! ERROR: no updater answered on this port. The device")
+                    self.log_fw_msg("         may still be booting or the port is busy —")
+                    self.log_fw_msg("         wait a few seconds and press START again.")
+                    return
             if mode == "app":
                 self.log_fw_msg("! ERROR: a v2 application is running but refused "
                                 "JUMP:BOOTLOADER. Reconnect and retry.")
@@ -1483,9 +1499,24 @@ class BenchVoltUI(ctk.CTk):
                 # a boot core awaiting firmware) is disconnected again.
                 identity = self.remote.query('*IDN?')
                 if not identity or "BenchVolt" not in identity:
+                    # Distinguish "wrong device" from "BenchVolt updater":
+                    # a v2 boot core answers the INFO probe with BV2C.
+                    updater = False
+                    try:
+                        self.remote.ser.reset_input_buffer()
+                        self.remote.ser.write(bytes([0x10]))
+                        time.sleep(0.4)
+                        updater = self.remote.ser.read(12)[:4] == b"BV2C"
+                    except Exception:
+                        pass
                     self.remote.disconnect()
-                    self.status_indicator.configure(
-                        text="NOT A BENCHVOLT (or updater mode)", text_color="orange")
+                    if updater:
+                        self.status_indicator.configure(
+                            text="UPDATER MODE — use Firmware Update tab",
+                            text_color="orange")
+                    else:
+                        self.status_indicator.configure(
+                            text="NOT A BENCHVOLT", text_color="orange")
                     return
                 self.status_indicator.configure(text=f"CONNECTED ({selected_port})", text_color="#2ecc71")
                 self.connect_btn.configure(text="DISCONNECT", fg_color="#c0392b")

@@ -90,24 +90,6 @@ pub fn cmd_data(state: &mut UploadState, body: &[u8]) -> u8 {
     let len = u16::from_le_bytes([body[0], body[1]]) as usize;
     if len == 0 || len > MAX_CHUNK || body.len() != len + 2 {
         diag(4, len as u32, body.len() as u32);
-        // Dump the packet head and live EP1/PMA state for the count bug.
-        unsafe {
-            for word in 0..3 {
-                let mut bytes = [0u8; 4];
-                for (i, b) in bytes.iter_mut().enumerate() {
-                    *b = *body.get(word * 4 + i).unwrap_or(&0xEE);
-                }
-                core::ptr::write_volatile(
-                    (0x2000_0154usize + word * 4) as *mut u32,
-                    u32::from_le_bytes(bytes),
-                );
-            }
-            core::ptr::write_volatile(
-                0x2000_0160usize as *mut u32,
-                (boot_usb::regs::pma_count_rx(1) as u32) << 16
-                    | boot_usb::regs::ep_read(1) as u32,
-            );
-        }
         return NACK;
     }
     let payload = &body[2..2 + len];

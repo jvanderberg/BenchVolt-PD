@@ -63,8 +63,10 @@ pub fn interlock_held() -> bool {
 /// either hand over to the application or stay resident as the updater.
 /// `core_writes_with_interlock` is true only for golden — the worker never
 /// writes core sections (the running core must not touch its own pages).
-/// `core_id` is a diagnostics marker written to 0x20000140.
-pub fn boot_core_entry(core_writes_with_interlock: bool, core_id: u32) -> ! {
+/// `core_id` is a diagnostics marker written to 0x20000140. `updater_ui`
+/// runs just before the updater loop (the worker paints a display banner;
+/// the size-capped golden passes a no-op).
+pub fn boot_core_entry(core_writes_with_interlock: bool, core_id: u32, updater_ui: fn()) -> ! {
     unsafe { core::ptr::write_volatile(0x2000_0140usize as *mut u32, core_id) };
     let decision = boot_shared::core_boot_decision(
         crate::meta::layout_word(),
@@ -89,6 +91,7 @@ pub fn boot_core_entry(core_writes_with_interlock: bool, core_id: u32) -> ! {
         crate::meta::claim_attempt();
         crate::launch::launch_app();
     }
+    updater_ui();
     run_boot_core(core_writes_with_interlock && interlock)
 }
 

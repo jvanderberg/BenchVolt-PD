@@ -11,7 +11,7 @@
 //! slots are still invalid).
 
 use boot_core::flash;
-use boot_shared::layout;
+use boot_shared::{layout, metadata};
 use core::ptr::read_volatile;
 
 static TRAMPOLINE: &[u8] =
@@ -61,6 +61,7 @@ fn main() -> ! {
     // Diagnostics marker: migrator entered.
     unsafe { core::ptr::write_volatile(0x2000_0140usize as *mut u32, 0x0000_0316) };
     cortex_m::interrupt::disable();
+    boot_display::banner("MIGRATING", "DO NOT UNPLUG");
 
     loop {
         let mut pass_ok = true;
@@ -80,6 +81,13 @@ fn main() -> ! {
             pass_ok &= install(layout::SLOT_B_BASE, layout::SLOT_B_SIZE, WORKER);
         }
         if pass_ok {
+            // Select the freshly verified worker core as the everyday boot
+            // path (it carries the display banner; golden stays the silent
+            // recovery core). A torn program falls back to golden — safe.
+            let _ = flash::program_word(
+                layout::METADATA_ADDR as usize + metadata::OFF_SLOT_FLAG * 4,
+                metadata::SLOT_B_MARK,
+            );
             system_reset();
         }
         // Flash trouble: brief pause, retry the whole (idempotent) pass.

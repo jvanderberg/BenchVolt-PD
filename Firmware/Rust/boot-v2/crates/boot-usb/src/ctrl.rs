@@ -29,28 +29,7 @@ impl Usb {
         let mut packet = [0u8; 8];
         pma_read_bytes(super::EP0_RX_BUF, &mut packet);
         let request = packet[1];
-        // Enumeration breadcrumb ring (4 entries) at 0x20000110: the last
-        // four requests seen, newest first.
-        unsafe {
-            let base = 0x2000_0110usize;
-            let r2 = core::ptr::read_volatile((base + 4) as *mut u32);
-            let r1 = core::ptr::read_volatile(base as *mut u32);
-            core::ptr::write_volatile((base + 8) as *mut u32, r2);
-            core::ptr::write_volatile((base + 4) as *mut u32, r1);
-            core::ptr::write_volatile(base as *mut u32, 0x100 + request as u32);
-            // Parallel context ring: bmRequestType << 8 | wValue high byte
-            // (descriptor type for GET_DESCRIPTOR) and wLength.
-            let ctx = ((packet[0] as u32) << 16) | ((packet[3] as u32) << 8) | packet[2] as u32;
-            let c2 = core::ptr::read_volatile((base + 0x14) as *mut u32);
-            let c1 = core::ptr::read_volatile((base + 0x10) as *mut u32);
-            core::ptr::write_volatile((base + 0x18) as *mut u32, c2);
-            core::ptr::write_volatile((base + 0x14) as *mut u32, c1);
-            core::ptr::write_volatile((base + 0x10) as *mut u32, ctx);
-                    }
         let wlength = u16::from_le_bytes([packet[6], packet[7]]) as usize;
-        unsafe {
-            core::ptr::write_volatile(0x2000_012Cusize as *mut u32, wlength as u32);
-        }
 
         match (packet[0], request) {
             (0x00, super::SET_ADDRESS) => {
@@ -58,9 +37,6 @@ impl Usb {
             }
             (0x00, super::SET_CONFIGURATION) => {
                 self.configured = packet[2] != 0;
-                unsafe {
-                    core::ptr::write_volatile(0x2000_0130usize as *mut u32, self.configured as u32);
-                }
                 self.arm_status_in(0);
             }
             (0x00, super::SET_INTERFACE) => {

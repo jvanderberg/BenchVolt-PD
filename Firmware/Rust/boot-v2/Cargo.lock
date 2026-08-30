@@ -38,6 +38,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "boot-display"
+version = "0.1.0"
+
+[[package]]
 name = "boot-shared"
 version = "0.1.0"
 
@@ -140,6 +144,7 @@ name = "migrator"
 version = "0.1.0"
 dependencies = [
  "boot-core",
+ "boot-display",
  "boot-shared",
  "boot-usb",
  "cortex-m",
@@ -257,6 +262,7 @@ name = "worker"
 version = "0.1.0"
 dependencies = [
  "boot-core",
+ "boot-display",
  "boot-shared",
  "boot-usb",
  "cortex-m",

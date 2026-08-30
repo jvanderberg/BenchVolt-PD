@@ -8,7 +8,7 @@ use boot_core::service::boot_core_entry;
 /// logic.
 #[cortex_m_rt::entry]
 fn main() -> ! {
-    boot_core_entry(true, 0x601D)
+    boot_core_entry(true, 0x601D, || {})
 }
 
 #[panic_handler]

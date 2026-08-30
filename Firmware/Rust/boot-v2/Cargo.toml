@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/boot-shared",
     "crates/boot-usb",
+    "crates/boot-display",
     "crates/boot-core",
     "crates/golden",
     "crates/golden-fakeapp",

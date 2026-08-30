@@ -48,7 +48,30 @@ pub const STRING_LANGID: [u8; 4] = [4, 0x03, 0x09, 0x04];
 // device has none to give.
 pub const STRING_MANUFACTURER: [u8; 38] = string_const("STMicroelectronics");
 pub const STRING_PRODUCT: [u8; 44] = string_const("STM32 Virtual ComPort");
-pub const STRING_SERIAL: [u8; 36] = string_const("BENCHVOLT-V2-BOOT");
+
+/// Serial descriptor: the chip-unique ID in the stock bootloader's exact
+/// format (usbd_desc.c Get_SerialNum: hex(UID0+UID2) ++ hex(UID1[..4])).
+/// The application presents the same value, so the host's tty name stays
+/// IDENTICAL across app <-> updater transitions — the GUI can hold one
+/// port name through the whole update flow.
+pub static mut STRING_SERIAL: [u8; 26] = [26, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+pub fn init_serial() {
+    const UID: usize = 0x1FFF_F7AC;
+    let uid0 = unsafe { core::ptr::read_volatile(UID as *const u32) };
+    let uid1 = unsafe { core::ptr::read_volatile((UID + 4) as *const u32) };
+    let uid2 = unsafe { core::ptr::read_volatile((UID + 8) as *const u32) };
+    let serial0 = uid0.wrapping_add(uid2);
+    let mut write = |index: usize, value: u32, digits: usize| {
+        for digit in 0..digits {
+            let nibble = ((value >> (28 - 4 * digit)) & 0xF) as u8;
+            let ch = if nibble < 10 { b'0' + nibble } else { b'A' + nibble - 10 };
+            unsafe { STRING_SERIAL[2 + 2 * (index + digit)] = ch };
+        }
+    };
+    write(0, serial0, 8);
+    write(8, uid1, 4);
+}
 
 pub const fn string_const<const N: usize>(text: &str) -> [u8; N] {
     assert!(N == 2 + 2 * text.len());

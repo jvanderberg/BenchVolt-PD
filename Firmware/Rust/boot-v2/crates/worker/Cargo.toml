@@ -12,5 +12,6 @@ path = "src/main.rs"
 boot-shared = { path = "../boot-shared" }
 boot-usb = { path = "../boot-usb" }
 boot-core = { path = "../boot-core" }
+boot-display = { path = "../boot-display" }
 cortex-m = "0.7.7"
 cortex-m-rt = "0.7.5"

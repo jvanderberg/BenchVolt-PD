@@ -72,7 +72,7 @@ pub fn desc_bytes(which: Desc) -> &'static [u8] {
         Desc::LangId => &desc::STRING_LANGID,
         Desc::Manufacturer => &desc::STRING_MANUFACTURER,
         Desc::Product => &desc::STRING_PRODUCT,
-        Desc::Serial => &desc::STRING_SERIAL,
+        Desc::Serial => unsafe { &*core::ptr::addr_of!(desc::STRING_SERIAL) },
         Desc::Status => &STATUS_DATA,
         Desc::LineCoding => &LINE_CODING,
     }
@@ -108,6 +108,7 @@ impl Usb {
     /// bulk-OUT endpoint. Blocks until HSE/PLL are stable.
     pub fn new() -> Self {
         crate::regs::stage_trace(1);
+        desc::init_serial();
         regs::clocks_48mhz();
         crate::regs::stage_trace(2);
         // Host-visible disconnect FIRST: the stock bootloader enables the

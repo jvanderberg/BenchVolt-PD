@@ -257,6 +257,25 @@ class BenchVoltUI(ctk.CTk):
         candidates = [p for p in available if "usbmodem" in p or "ttyACM" in p]
         return candidates[0] if candidates else None
 
+    def _find_v2_core_port(self, timeout_s):
+        """Scan serial ports and probe each for the v2 boot core identity;
+        the core enumerates under a different name than the application."""
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            for candidate in serial.tools.list_ports.comports():
+                device = candidate.device
+                if "usbmodem" not in device and "ttyACM" not in device:
+                    continue
+                try:
+                    with serial.Serial(device, 115200, timeout=1.5) as ser:
+                        time.sleep(0.2)
+                        if self._probe_v2(ser) == "core":
+                            return device
+                except Exception:
+                    continue
+            time.sleep(2)
+        return None
+
     def _find_migrator(self, filepath):
         candidates = [
             os.path.join(os.path.dirname(filepath), "migrator.bin"),
@@ -293,11 +312,20 @@ class BenchVoltUI(ctk.CTk):
                 # Safely close connection (stops polling loops etc.)
                 self.after(0, self.toggle_conn)
             else:
-                # Not connected, but hardware might be stuck in app mode
+                # Not connected, but hardware might be stuck in app mode.
+                # Settle after open, flush both sides, and lead with a
+                # newline: a previous failed binary upload leaves junk in
+                # the device's line buffer that would otherwise corrupt
+                # this command (verified on the stock C firmware).
                 try:
-                    ser = serial.Serial(port, 115200, timeout=1)
-                    ser.write(b"JUMP:BOOTLOADER\n")
+                    ser = serial.Serial(port, 115200, timeout=2)
+                    time.sleep(0.4)
+                    ser.reset_input_buffer()
+                    ser.write(b"\nJUMP:BOOTLOADER\n")
                     res = ser.readline()
+                    if not res:
+                        ser.write(b"\nJUMP:BOOTLOADER\n")
+                        res = ser.readline()
                     ser.close()
                     if b"OK:JUMPING" in res or b"BOOTLOADER" in res:
                         in_app_mode = True
@@ -352,21 +380,22 @@ class BenchVoltUI(ctk.CTk):
         self.log_fw_msg("[MIGRATION] Installing the v2 boot chain (one time).")
         self.log_fw_msg("  *** DO NOT UNPLUG OR POWER OFF THE DEVICE. ***")
         self.log_fw_msg("  Use a mains-powered supply, not a power bank.")
-        self.upload_firmware(port, migrator)
+        if not self.upload_firmware(port, migrator):
+            self.log_fw_msg("! MIGRATION ABORTED: migrator upload failed; device unchanged.")
+            return
         self.log_fw_msg("[MIGRATION] Migrator flashed; the device is rewriting its")
         self.log_fw_msg("            boot pages and will reboot. Waiting...")
         time.sleep(8)
-        port = self._wait_for_port(port, 30)
+        # The v2 core enumerates under a NEW port name (different USB
+        # serial string), so scan every candidate port and probe each for
+        # the v2 identity instead of waiting for the old name.
+        port = self._find_v2_core_port(45)
         if port is None:
-            self.log_fw_msg("! ERROR: device did not come back. If it re-appears later,")
-            self.log_fw_msg("         simply retry — the migration resumes automatically.")
+            self.log_fw_msg("! ERROR: v2 boot core did not answer after migration.")
+            self.log_fw_msg("         Refresh ports, select the new one, and retry —")
+            self.log_fw_msg("         the update resumes from where it left off.")
             return
-        with serial.Serial(port, 115200, timeout=3) as ser:
-            time.sleep(0.3)
-            mode = self._probe_v2(ser)
-        if mode != "core":
-            self.log_fw_msg("! ERROR: v2 boot core did not answer after migration; retry.")
-            return
+        self.log_fw_msg(f"-> v2 boot core found on {port}.")
         self.log_fw_msg("[MIGRATION] v2 boot core is up. Flashing the application...")
         self.upload_firmware_v2(port, firmware_data)
 
@@ -487,6 +516,8 @@ class BenchVoltUI(ctk.CTk):
                 self.log_fw_msg(f"         -> SEAL APPLIED! {hex(PARAM_PAGE_ADDR)} erased & new CRC sealed.")
                 self.log_fw_msg("\n[STEP 5] COMPLETE - JUMPING TO APP!")
                 self.set_fw_progress(1.0)
+                ser.close()
+                return True
             else:
                 self.log_fw_msg("! ERROR: VERIFICATION FAILED!")
                 self.log_fw_msg("         MCU CRC does not match Python CRC.")

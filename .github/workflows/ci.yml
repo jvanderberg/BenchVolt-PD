@@ -189,11 +189,11 @@ jobs:
         run: |
           BIN=$(find dist -name benchvolt-pd.bin | head -1)
           SIZE=$(stat -c%s "$BIN")
-          NOTES="Rolling build of main at ${GITHUB_SHA}. Image size: ${SIZE} bytes (92 KiB partition). Flash from the desktop GUI's firmware update tab, or with Firmware/Rust/benchvolt-pd/tools/flash_firmware.py. To move a stock device to the v2 boot chain (104 KiB partition, sectioned updates, on-screen updater), put migrator.bin next to benchvolt-v2.bin and start a smart update with benchvolt-v2.bin selected — the GUI migrates automatically. See README 'Updating to the v2 boot chain'."
+          NOTES="Rolling build of main at ${GITHUB_SHA}. Image size: ${SIZE} bytes (92 KiB partition). Flash from the desktop GUI's firmware update tab, or with Firmware/Rust/benchvolt-pd/tools/flash_firmware.py. To install on any device: start a smart update with benchvolt-v2.bin selected — the GUI handles a stock device automatically (it fetches migrator.bin when needed; keep it next to the firmware for offline use). See README 'Installing firmware on a stock device'."
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest "$BIN#benchvolt-pd.bin (v1-layout application image, flash via GUI or flash_firmware.py)" \
-            "dist/v2/benchvolt-v2.bin#benchvolt-v2.bin (v2 boot chain application image; GUI migrates stock devices automatically)" \
-            "dist/v2/migrator.bin#migrator.bin (one-time v1-to-v2 migrator; keep next to benchvolt-v2.bin)" \
+          gh release create latest "$BIN#benchvolt-pd.bin (application image for the stock factory bootloader)" \
+            "dist/v2/benchvolt-v2.bin#benchvolt-v2.bin (application image; the GUI installs the boot chain on stock devices automatically)" \
+            "dist/v2/migrator.bin#migrator.bin (boot chain installer; only needed offline — the GUI downloads it on demand)" \
             "dist/c/bootloader.bin#bootloader.bin (flash once via ST-Link/DFU at 0x08000000)" \
             "dist/c/usb_power_source.bin#usb_power_source.bin (legacy C application, alternative to the Rust image; flash via bootloader at 0x08008000)" \
             --title "Latest firmware (main)" \

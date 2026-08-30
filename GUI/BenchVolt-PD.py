@@ -290,7 +290,13 @@ class BenchVoltUI(ctk.CTk):
             time.sleep(0.5)
         return None
 
+    MIGRATOR_URL = ("https://github.com/jvanderberg/BenchVolt-PD/"
+                    "releases/download/latest/migrator.bin")
+
     def _find_migrator(self, filepath):
+        """Locate the boot-chain installer: next to the firmware file, in
+        the app folder, in the repo — or download it from the release, so a
+        user normally only ever needs the firmware .bin itself."""
         candidates = [
             os.path.join(os.path.dirname(filepath), "migrator.bin"),
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrator.bin"),
@@ -300,7 +306,21 @@ class BenchVoltUI(ctk.CTk):
         for candidate in candidates:
             if os.path.exists(candidate):
                 return os.path.abspath(candidate)
-        return None
+        destination = os.path.join(os.path.dirname(filepath), "migrator.bin")
+        self.log_fw_msg("-> Fetching the boot-chain installer (migrator.bin)...")
+        try:
+            import urllib.request
+            with urllib.request.urlopen(self.MIGRATOR_URL, timeout=30) as response:
+                data = response.read()
+            if len(data) < 1024:
+                raise ValueError("download too small")
+            with open(destination, "wb") as out:
+                out.write(data)
+            self.log_fw_msg(f"-> Saved to {destination}.")
+            return destination
+        except Exception as e:
+            self.log_fw_msg(f"-> Download failed ({e}).")
+            return None
 
     def smart_upload_sequence(self, port, filepath):
         try:
@@ -424,9 +444,9 @@ class BenchVoltUI(ctk.CTk):
         application over the sectioned protocol."""
         migrator = self._find_migrator(filepath)
         if migrator is None:
-            self.log_fw_msg("! ERROR: this device still has the v1 bootloader and needs a")
-            self.log_fw_msg("         one-time migration, but migrator.bin was not found")
-            self.log_fw_msg("         next to the firmware file. Get it from the release.")
+            self.log_fw_msg("! ERROR: this device needs the one-time boot-chain install,")
+            self.log_fw_msg("         and migrator.bin could not be found or downloaded.")
+            self.log_fw_msg("         Place it next to the firmware file and retry.")
             return
         self.log_fw_msg("==================================================")
         self.log_fw_msg("[MIGRATION] Installing the v2 boot chain (one time).")

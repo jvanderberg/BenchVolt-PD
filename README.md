@@ -157,43 +157,42 @@ A failed or interrupted upload is safe: the bootloader only ever rewrites the
 application partition, so the device falls back to the bootloader and the
 upload can simply be retried.
 
-### Updating to the v2 boot chain
+### Installing firmware on a stock device
 
-The fork now ships a second-generation boot architecture
-([design](Docs/v2-bootloader-design.md)): a frozen 2 KiB trampoline, a
-never-updated golden recovery core, an updatable worker core with an
-on-screen updater banner, and a 104 KiB application partition (up from
-92 KiB). Updates stay power-glitch-safe at every step, the updater shares
-the device's normal USB identity (one port name, no new authorization
-prompts), and failed boots fall back to an updater automatically.
+The firmware ships with its own boot chain
+([design](Docs/v2-bootloader-design.md)): a frozen trampoline, a recovery
+core, and a worker core that shows an on-screen updater, with a 104 KiB
+application partition. Every update is power-glitch-safe, the updater
+shares the device's normal USB identity (one port name, no new
+authorization prompts), and a device with broken firmware always falls
+back to an updater.
 
-**Updating a stock device (stock bootloader + any firmware), no
-programming hardware needed:**
+No programming hardware is needed:
 
-1. Download `benchvolt-v2.bin` **and** `migrator.bin` from the
-   [latest release](https://github.com/jvanderberg/BenchVolt-PD/releases/tag/latest)
-   into the same folder.
+1. Download `benchvolt-v2.bin` from the
+   [latest release](https://github.com/jvanderberg/BenchVolt-PD/releases/tag/latest).
+   (For offline use, also grab `migrator.bin` into the same folder — the
+   boot-chain installer a factory device needs once. Online, the GUI
+   fetches it automatically when required.)
 2. Power the device from a mains supply (not a power bank) and connect USB.
 3. In the desktop GUI: select the device's port, open the Firmware Update
    tab, browse to `benchvolt-v2.bin`, and press **START SMART UPDATE**.
-4. The GUI detects the stock bootloader, flashes the one-time migrator
-   through it, waits while the migrator installs the v2 boot chain
-   (the screen shows **MIGRATING — DO NOT UNPLUG**; this is the only step
-   where losing power requires an SWD probe to recover), then uploads the
-   firmware over the new sectioned protocol and reconnects automatically.
 
-Every update after migration is the same single button — the GUI detects
-the v2 updater and skips the migration. Command line equivalent:
+On a stock device the GUI first installs the boot chain through the
+factory bootloader (the screen shows **MIGRATING — DO NOT UNPLUG**; this
+one-time step is the only moment where losing power requires an SWD probe
+to recover), then uploads the firmware and reconnects automatically. On a
+device that already has the boot chain, the same button just updates the
+firmware. Command line equivalent:
 `python3 Firmware/Rust/boot-v2/tools/flash_v2.py <port> benchvolt-v2.bin 0 --boot`
 (enter the updater first with `JUMP:BOOTLOADER` /
 `tools/enter_bootloader.py`).
 
-Recovery notes: an interrupted migration resumes by pressing START again;
-a failed firmware upload leaves the device in the updater — retry. Holding
-the encoder button for one second while plugging in forces the updater
-(golden recovery core) even with working firmware. v1-layout images
-(`benchvolt-pd.bin`) and v2 images are mutually incompatible with the other
-bootloader generation; the GUI checks and refuses mismatches.
+Recovery: an interrupted install resumes by pressing START again; a failed
+upload leaves the device in the updater — retry. Holding the encoder
+button for one second while plugging in forces the updater even with
+working firmware. The GUI checks that an image matches the device's
+bootloader generation and refuses mismatches.
 
 ### Desktop GUI
 

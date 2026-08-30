@@ -346,10 +346,10 @@ class BenchVoltUI(ctk.CTk):
                     time.sleep(0.4)
                     ser.reset_input_buffer()
                     ser.write(b"\nJUMP:BOOTLOADER\n")
-                    res = ser.readline()
+                    res = b"".join(ser.readline() for _ in range(3))
                     if not res:
                         ser.write(b"\nJUMP:BOOTLOADER\n")
-                        res = ser.readline()
+                        res = b"".join(ser.readline() for _ in range(3))
                     ser.close()
                     if b"OK:JUMPING" in res or b"BOOTLOADER" in res:
                         in_app_mode = True
@@ -468,8 +468,12 @@ class BenchVoltUI(ctk.CTk):
                     with serial.Serial(candidate.device, 115200, timeout=1.5) as ser:
                         time.sleep(0.3)
                         ser.reset_input_buffer()
+                        # The leading newline flushes any junk line in the
+                        # device parser, but the Rust firmware answers it
+                        # with ERR:UNKNOWN_COMMAND — so scan a few reply
+                        # lines instead of only the first.
                         ser.write(b"\n*IDN?\n")
-                        if b"BenchVolt" in ser.readline():
+                        if any(b"BenchVolt" in ser.readline() for _ in range(3)):
                             device = candidate.device
                             self.log_fw_msg(f"[RECONNECT] Firmware is up on {device}. Connecting.")
                             self.after(0, lambda d=device: (self.port_option_menu.set(d),

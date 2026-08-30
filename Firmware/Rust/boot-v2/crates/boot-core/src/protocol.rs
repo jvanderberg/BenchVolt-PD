@@ -10,6 +10,9 @@ pub const NACK: u8 = 0x15;
 pub const CMD_START: u8 = 0x01;
 pub const CMD_DATA: u8 = 0x02;
 pub const CMD_END: u8 = 0x03;
+/// Reboot the device (v1's CMD_JUMP_ONLY slot): ACK, then system reset —
+/// the trampoline re-decides and a freshly committed app launches.
+pub const CMD_BOOT: u8 = 0x04;
 pub const CMD_INFO: u8 = 0x10;
 
 const MAX_CHUNK: usize = 60;

@@ -6,6 +6,96 @@ use benchvolt_pd::settings::{
 
 pub(crate) const BOOT_METADATA_ADDR: usize = 0x0801_F800;
 const SETTINGS_ADDR: usize = 0x0801_F000;
+
+/// v2 boot support: the metadata page is program-only from the app's side.
+/// JUMP:BOOTLOADER programs the request word; the healthy main loop
+/// programs the health word of the boot record the core claimed at launch.
+/// Both are single-word programs (~100 µs stall) — bounded, unlike the
+/// erase the v1 path used.
+#[cfg(feature = "v2-boot")]
+mod v2 {
+    use crate::benchvolt_wait_for_flash_ready;
+    use boot_shared::metadata;
+
+    const FLASH_BASE: usize = 0x4002_2000;
+    const KEYR: *mut u32 = (FLASH_BASE + 0x04) as *mut u32;
+    const SR: *mut u32 = (FLASH_BASE + 0x0c) as *mut u32;
+    const CR: *mut u32 = (FLASH_BASE + 0x10) as *mut u32;
+    const SR_ERRORS: u32 = (1 << 2) | (1 << 4);
+    const SR_EOP: u32 = 1 << 5;
+    const CR_PG: u32 = 1 << 0;
+    const CR_LOCK: u32 = 1 << 7;
+
+    fn program_word(address: usize, value: u32) -> bool {
+        unsafe {
+            if !benchvolt_wait_for_flash_ready(SR) {
+                return false;
+            }
+            if core::ptr::read_volatile(CR) & CR_LOCK != 0 {
+                core::ptr::write_volatile(KEYR, 0x4567_0123);
+                core::ptr::write_volatile(KEYR, 0xcdef_89ab);
+            }
+            core::ptr::write_volatile(SR, SR_EOP | SR_ERRORS);
+            core::ptr::write_volatile(CR, core::ptr::read_volatile(CR) | CR_PG);
+            core::ptr::write_volatile(address as *mut u16, (value & 0xFFFF) as u16);
+            let first = benchvolt_wait_for_flash_ready(SR);
+            if first {
+                core::ptr::write_volatile((address + 2) as *mut u16, (value >> 16) as u16);
+            }
+            let ok = first
+                && benchvolt_wait_for_flash_ready(SR)
+                && core::ptr::read_volatile(SR) & SR_ERRORS == 0;
+            core::ptr::write_volatile(CR, (core::ptr::read_volatile(CR) & !CR_PG) | CR_LOCK);
+            ok && core::ptr::read_volatile(address as *const u32) == value
+        }
+    }
+
+    fn metadata_word(index: usize) -> u32 {
+        unsafe {
+            core::ptr::read_volatile((super::BOOT_METADATA_ADDR + index * 4) as *const u32)
+        }
+    }
+
+    /// Request updater mode for the next boot. Idempotent: an already
+    /// non-erased request word (including a torn one) already requests it.
+    pub(crate) fn request_bootloader() -> bool {
+        if metadata::updater_requested(metadata_word(metadata::OFF_REQUEST)) {
+            return true;
+        }
+        program_word(
+            super::BOOT_METADATA_ADDR + metadata::OFF_REQUEST * 4,
+            metadata::REQUEST_MARK,
+        )
+    }
+
+    /// Mark this boot's record healthy: the launching core programmed the
+    /// LAST attempt word (pair-strided); its health word follows it.
+    pub(crate) fn mark_boot_healthy() -> bool {
+        let mut last_attempt: Option<usize> = None;
+        let mut index = metadata::OFF_RECORDS;
+        while index + 1 < metadata::WORDS {
+            if metadata_word(index) == metadata::ERASED {
+                break;
+            }
+            last_attempt = Some(index);
+            index += 2;
+        }
+        let Some(attempt) = last_attempt else {
+            // No record claimed (e.g. fresh metadata layouts) — nothing to do.
+            return true;
+        };
+        if metadata_word(attempt + 1) == metadata::HEALTH_WORD {
+            return true;
+        }
+        program_word(
+            super::BOOT_METADATA_ADDR + (attempt + 1) * 4,
+            metadata::HEALTH_WORD,
+        )
+    }
+}
+
+#[cfg(feature = "v2-boot")]
+pub(crate) use v2::{mark_boot_healthy, request_bootloader};
 const FLASH_PAGE_SIZE: usize = 2_048;
 pub(crate) const SETTINGS_SLOTS: usize = FLASH_PAGE_SIZE / RECORD_SIZE;
 

@@ -17,6 +17,7 @@ ACK = 0x06
 CMD_START = 0x01
 CMD_DATA = 0x02
 CMD_END = 0x03
+CMD_BOOT = 0x04
 CMD_INFO = 0x10
 CHUNK = 60
 
@@ -37,8 +38,9 @@ def expect_ack(s: serial.Serial, what: str) -> None:
 
 
 def main() -> None:
-    port, path = sys.argv[1], sys.argv[2]
-    section = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    port, path = args[0], args[1]
+    section = int(args[2]) if len(args) > 2 else 0
     data = open(path, "rb").read()
 
     s = serial.Serial(port, 115200, timeout=5)
@@ -67,6 +69,11 @@ def main() -> None:
     s.write(bytes([CMD_END]) + crc32(data).to_bytes(4, "little"))
     expect_ack(s, "END")
     print("committed (CRC verified, descriptor programmed)")
+
+    if "--boot" in sys.argv:
+        s.write(bytes([CMD_BOOT]))
+        expect_ack(s, "BOOT")
+        print("rebooting into the committed image")
 
 
 if __name__ == "__main__":

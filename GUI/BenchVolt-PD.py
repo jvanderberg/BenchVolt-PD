@@ -20,6 +20,7 @@ CMD_DATA = 0x02
 CMD_END = 0x03
 CMD_JUMP_ONLY = 0x04
 CMD_ERASE_CRC = 0x05
+CMD_INFO = 0x10  # v2 boot-core identity probe
 
 ACK = b'\x06'
 NACK = b'\x15'
@@ -27,6 +28,8 @@ CHUNK_SIZE = 60
 
 MAIN_APP_ADDR = 0x08008000
 PARAM_PAGE_ADDR = 0x0801F800
+V2_APP_ADDR = 0x08005000  # v2 boot chain app partition
+V2_SEC_APP = 0  # sectioned-protocol section id: application
 
 
 def calculate_stm32_crc32(data: bytes) -> int:
@@ -215,10 +218,69 @@ class BenchVoltUI(ctk.CTk):
         # Start process in background
         threading.Thread(target=self.smart_upload_sequence, args=(port, self.fw_filepath), daemon=True).start()
 
+    @staticmethod
+    def _fw_image_target(firmware_data):
+        """'v1' or 'v2' from the image's reset vector, None if neither."""
+        if len(firmware_data) < 8:
+            return None
+        entry = struct.unpack_from("<I", firmware_data, 4)[0] & ~1
+        if V2_APP_ADDR <= entry < MAIN_APP_ADDR:
+            return "v2"
+        if MAIN_APP_ADDR <= entry < 0x0801F000:
+            return "v1"
+        return None
+
+    @staticmethod
+    def _probe_v2(ser):
+        """Identify a v2 device: 'core' (boot core), 'app' (v2 test app), or
+        None (v1 bootloader / no v2 endpoint). The v1 bootloader NACKs or
+        ignores the INFO byte, so the probe is harmless."""
+        ser.reset_input_buffer()
+        ser.write(bytes([CMD_INFO]))
+        reply = ser.read(12)
+        if reply[:4] == b"BV2C":
+            return "core"
+        if reply[:4] == b"BV2A":
+            return "app"
+        return None
+
+    def _wait_for_port(self, port, timeout_s):
+        """Wait for `port` to (re)appear; fall back to the first usbmodem-ish
+        port that shows up. Returns the port path or None."""
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            available = [p.device for p in serial.tools.list_ports.comports()]
+            if port in available:
+                return port
+            time.sleep(1)
+        available = [p.device for p in serial.tools.list_ports.comports()]
+        candidates = [p for p in available if "usbmodem" in p or "ttyACM" in p]
+        return candidates[0] if candidates else None
+
+    def _find_migrator(self, filepath):
+        candidates = [
+            os.path.join(os.path.dirname(filepath), "migrator.bin"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrator.bin"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "..", "Firmware", "Rust", "boot-v2", "migrator.bin"),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return os.path.abspath(candidate)
+        return None
+
     def smart_upload_sequence(self, port, filepath):
         try:
             self.log_fw_msg("==================================================")
             self.log_fw_msg("[SMART UPLOAD] Checking device state...")
+
+            with open(filepath, "rb") as f:
+                firmware_data = f.read()
+            image_target = self._fw_image_target(firmware_data)
+            if image_target is None:
+                self.log_fw_msg("! ERROR: file is not a BenchVolt firmware image.")
+                return
+            self.log_fw_msg(f"-> Selected image targets the {image_target} boot layout.")
 
             in_app_mode = False
 
@@ -245,19 +307,123 @@ class BenchVoltUI(ctk.CTk):
                     pass
 
             if in_app_mode:
-                self.log_fw_msg("-> Waiting for USB Port to re-enumerate (2 seconds)...")
-                time.sleep(2)  # Time for MCU to reset and enter bootloader
-                self.log_fw_msg("-> Device ready in Bootloader mode. Starting upload...")
+                self.log_fw_msg("-> Waiting for the updater to re-enumerate...")
+                time.sleep(2)
+                port = self._wait_for_port(port, 20) or port
             else:
                 self.log_fw_msg("-> Device did not respond to App commands.")
-                self.log_fw_msg("-> Assuming it's already in Bootloader mode. Starting upload...")
+                self.log_fw_msg("-> Assuming an updater is already running.")
 
-            # Run original upload function
-            self.upload_firmware(port, filepath)
+            # Identify which updater is on the wire.
+            with serial.Serial(port, 115200, timeout=3) as ser:
+                time.sleep(0.3)
+                mode = self._probe_v2(ser)
+            if mode == "app":
+                self.log_fw_msg("! ERROR: a v2 application is running but refused "
+                                "JUMP:BOOTLOADER. Reconnect and retry.")
+                return
+            self.log_fw_msg(f"-> Updater protocol: {'v2 sectioned' if mode == 'core' else 'v1 legacy'}.")
 
+            if mode == "core" and image_target == "v2":
+                self.upload_firmware_v2(port, firmware_data)
+            elif mode is None and image_target == "v1":
+                self.upload_firmware(port, filepath)
+            elif mode is None and image_target == "v2":
+                self.migrate_then_upload(port, filepath, firmware_data)
+            else:
+                self.log_fw_msg(f"! ERROR: {image_target} image cannot be flashed over the "
+                                f"{'v2' if mode == 'core' else 'v1'} protocol. Wrong file?")
         except Exception as e:
             self.log_fw_msg(f"! SMART UPLOAD ERROR: {e}")
+        finally:
             self.after(0, lambda: self.fw_btn.configure(state="normal", text="START SMART UPDATE"))
+
+    def migrate_then_upload(self, port, filepath, firmware_data):
+        """One-time v1 -> v2 migration: flash the migrator through the stock
+        bootloader, let it install the v2 boot chain, then flash the v2
+        application over the sectioned protocol."""
+        migrator = self._find_migrator(filepath)
+        if migrator is None:
+            self.log_fw_msg("! ERROR: this device still has the v1 bootloader and needs a")
+            self.log_fw_msg("         one-time migration, but migrator.bin was not found")
+            self.log_fw_msg("         next to the firmware file. Get it from the release.")
+            return
+        self.log_fw_msg("==================================================")
+        self.log_fw_msg("[MIGRATION] Installing the v2 boot chain (one time).")
+        self.log_fw_msg("  *** DO NOT UNPLUG OR POWER OFF THE DEVICE. ***")
+        self.log_fw_msg("  Use a mains-powered supply, not a power bank.")
+        self.upload_firmware(port, migrator)
+        self.log_fw_msg("[MIGRATION] Migrator flashed; the device is rewriting its")
+        self.log_fw_msg("            boot pages and will reboot. Waiting...")
+        time.sleep(8)
+        port = self._wait_for_port(port, 30)
+        if port is None:
+            self.log_fw_msg("! ERROR: device did not come back. If it re-appears later,")
+            self.log_fw_msg("         simply retry — the migration resumes automatically.")
+            return
+        with serial.Serial(port, 115200, timeout=3) as ser:
+            time.sleep(0.3)
+            mode = self._probe_v2(ser)
+        if mode != "core":
+            self.log_fw_msg("! ERROR: v2 boot core did not answer after migration; retry.")
+            return
+        self.log_fw_msg("[MIGRATION] v2 boot core is up. Flashing the application...")
+        self.upload_firmware_v2(port, firmware_data)
+
+    def upload_firmware_v2(self, port, firmware_data):
+        """Sectioned v2 upload: START carries the section id, END commits the
+        in-partition descriptor, and a BOOT command launches the new image."""
+        try:
+            file_size = len(firmware_data)
+            calculated_crc = calculate_stm32_crc32(firmware_data)
+            self.log_fw_msg("--------------------------------------------------")
+            self.log_fw_msg("[V2 STEP 1] PREPARATION")
+            self.log_fw_msg(f"         File Size    : {file_size} Bytes")
+            self.log_fw_msg(f"         Target Addr  : {hex(V2_APP_ADDR)}")
+            self.log_fw_msg(f"         Python CRC32 : {hex(calculated_crc)}")
+
+            ser = serial.Serial(port, 115200, timeout=15)
+            time.sleep(0.3)
+
+            self.log_fw_msg("[V2 STEP 2] ERASING APPLICATION SECTION")
+            ser.write(struct.pack("<BIB", CMD_START, file_size, V2_SEC_APP))
+            if ser.read(1) != ACK:
+                self.log_fw_msg("! ERROR: no ACK for START/erase. Aborting.")
+                ser.close()
+                return
+            self.log_fw_msg("         -> ACK. Section erased.")
+
+            self.log_fw_msg("[V2 STEP 3] WRITING DATA")
+            sent_bytes = 0
+            for i in range(0, file_size, CHUNK_SIZE):
+                chunk = firmware_data[i:i + CHUNK_SIZE]
+                ser.write(struct.pack("<BH", CMD_DATA, len(chunk)) + chunk)
+                if ser.read(1) != ACK:
+                    self.log_fw_msg(f"! ERROR: ACK failure at offset {sent_bytes}.")
+                    ser.close()
+                    return
+                sent_bytes += len(chunk)
+                self.set_fw_progress(sent_bytes / file_size)
+
+            self.log_fw_msg("[V2 STEP 4] VERIFY & COMMIT (descriptor last)")
+            ser.write(struct.pack("<BI", CMD_END, calculated_crc))
+            if ser.read(1) != ACK:
+                self.log_fw_msg("! ERROR: CRC verification failed; device stays in updater.")
+                ser.close()
+                self.set_fw_progress(0.0)
+                return
+            self.log_fw_msg("         -> Committed. CRC verified, descriptor sealed.")
+
+            self.log_fw_msg("[V2 STEP 5] REBOOTING INTO THE NEW FIRMWARE")
+            ser.write(bytes([CMD_JUMP_ONLY]))
+            if ser.read(1) == ACK:
+                self.log_fw_msg("         -> Device is rebooting. Update complete!")
+                self.set_fw_progress(1.0)
+            else:
+                self.log_fw_msg("         -> No reboot ACK; power-cycle the device.")
+            ser.close()
+        except Exception as e:
+            self.log_fw_msg(f"! CRITICAL V2 UPLOAD ERROR: {e}")
 
     def upload_firmware(self, port, filepath):
         try:

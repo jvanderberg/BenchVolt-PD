@@ -2,6 +2,7 @@
 """Flash a BenchVolt application through the hardened CDC bootloader."""
 
 import argparse
+import os
 import struct
 import time
 from pathlib import Path
@@ -13,6 +14,12 @@ ACK = b"\x06"
 
 APP_ORIGIN = 0x0800_8000
 SETTINGS_ORIGIN = 0x0801_F000
+if os.environ.get("BENCHVOLT_LAYOUT") == "v2":
+    # v2 boot chain: app partition base, capacity ending at the in-partition
+    # descriptor (validation only — v2 devices are flashed with the
+    # sectioned protocol, not this uploader).
+    APP_ORIGIN = 0x0800_5000
+    SETTINGS_ORIGIN = 0x0801_EFC0
 
 # The stock bootloader receives one 64-byte USB CDC packet at a time. The
 # three-byte DATA header leaves 61 bytes; 60 also keeps every write aligned.

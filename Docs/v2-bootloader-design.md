@@ -360,6 +360,15 @@ prefer a mains-powered charger, not a power bank" for the migration step.
   is still tearing down the stock bootloader's device gets counted as an
   enumeration failure against the port, and macOS starts abandoning
   attaches after SET_ADDRESS.
+- M2 verified end-to-end on hardware, USB only (no SWD): factory state
+  (stock bootloader + v1 firmware flashed over the legacy protocol) →
+  JUMP:BOOTLOADER → `migrator.bin` via the legacy protocol → migrator
+  installs trampoline + both cores and resets → golden updater (`BV2C`) →
+  v2 application (built with the `v2-boot` feature, 13.4 KiB free vs 1.5)
+  over the sectioned protocol → CMD_BOOT → app runs, marks its boot record
+  healthy, and its JUMP:BOOTLOADER (request word) + re-upload + relaunch
+  round-trip works. The GUI's smart-update flow implements this sequence
+  with image-vs-device layout matching as the stage-confusion guard.
 - M1 verified end-to-end on hardware (stock bootloader replaced on the bench
   unit; full-flash backup in `boot-v2/backups/`): trampoline flag dispatch to
   golden and slot B; app upload over the sectioned protocol (20/20 soak);

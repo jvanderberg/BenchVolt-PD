@@ -10,6 +10,10 @@ publish = false
 [features]
 default = ["firmware"]
 firmware = []
+# Build for the v2 boot architecture (Docs/v2-bootloader-design.md): app
+# partition at 0x08005000, JUMP:BOOTLOADER programs the metadata request
+# word, and the main loop marks its boot record healthy.
+v2-boot = ["dep:boot-shared"]
 
 [[bin]]
 name = "benchvolt-pd"
@@ -19,6 +23,7 @@ required-features = ["firmware"]
 [dependencies]
 heapless = "0.8.0"
 reducto = "0.1.0"
+boot-shared = { path = "../boot-v2/crates/boot-shared", optional = true }
 
 [target.'cfg(target_arch = "arm")'.dependencies]
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }

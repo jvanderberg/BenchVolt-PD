@@ -90,6 +90,21 @@ pub fn run_boot_core(allow_core: bool) -> ! {
                     continue;
                 }
                 let cmd = packet[0];
+                if cmd == crate::protocol::CMD_BOOT {
+                    usb.send(&[crate::protocol::ACK]);
+                    // Drain the ACK (host polls it within a frame or two),
+                    // then reset; the trampoline takes it from there.
+                    for _ in 0..2_400_000 {
+                        core::hint::spin_loop();
+                    }
+                    unsafe {
+                        cortex_m::asm::dsb();
+                        core::ptr::write_volatile(0xE000_ED0Cusize as *mut u32, 0x05FA_0004);
+                    }
+                    loop {
+                        core::hint::spin_loop();
+                    }
+                }
                 if cmd == crate::protocol::CMD_INFO {
                     let info = crate::protocol::cmd_info();
                     usb.send(&info);

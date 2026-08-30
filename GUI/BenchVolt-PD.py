@@ -174,6 +174,10 @@ class BenchVoltUI(ctk.CTk):
         ctk.CTkLabel(fw_frame, text="Caution: Device will reboot automatically. Do not disconnect USB during update.",
                      font=ctk.CTkFont(size=10)).pack(pady=(0, 10))
 
+
+        # Device controls stay locked until a verified BenchVolt is connected.
+        self._set_device_controls_enabled(False)
+
     def browse_fw_file(self):
         filename = filedialog.askopenfilename(title="Select Firmware Binary",
                                               filetypes=(("Binary", "*.bin"), ("All files", "*.*")))
@@ -201,6 +205,11 @@ class BenchVoltUI(ctk.CTk):
         port = self.port_option_menu.get()
         if port == "No Port Found" or not port:
             self.log_fw_msg("! ERROR: Please select a valid COM port.")
+            return
+        if not self._port_is_benchvolt(port):
+            self.log_fw_msg(f"! ERROR: {port} is not a BenchVolt device")
+            self.log_fw_msg("         (wrong port selected — refresh and pick the one")
+            self.log_fw_msg("         whose USB identity is 0483:5740).")
             return
         if not self.fw_filepath or not os.path.exists(self.fw_filepath):
             self.log_fw_msg("! ERROR: Please select a valid firmware (.bin) file.")
@@ -1397,6 +1406,30 @@ class BenchVoltUI(ctk.CTk):
         arb_entry.delete("0.0", "end")
         arb_entry.insert("0.0", ",".join(lines))
 
+
+    BENCHVOLT_USB_ID = (0x0483, 0x5740)
+
+    def _port_is_benchvolt(self, port):
+        """True when the selected port enumerates with the BenchVolt USB
+        identity (shared by the application, the stock bootloader, and the
+        v2 boot cores). Blocks uploads aimed at debug probes etc."""
+        for candidate in serial.tools.list_ports.comports():
+            if candidate.device == port:
+                return (candidate.vid, candidate.pid) == self.BENCHVOLT_USB_ID
+        return False
+
+    def _set_device_controls_enabled(self, enabled, parent=None):
+        """Recursively enable/disable the Main Control tab's widgets."""
+        if parent is None:
+            parent = self.tab_main
+        state = "normal" if enabled else "disabled"
+        for child in parent.winfo_children():
+            try:
+                child.configure(state=state)
+            except Exception:
+                pass
+            self._set_device_controls_enabled(enabled, child)
+
     def toggle_conn(self):
         selected_port = self.port_option_menu.get()
 
@@ -1405,11 +1438,21 @@ class BenchVoltUI(ctk.CTk):
                 return
 
             if self.remote.connect(selected_port):
+                # Only a device that identifies as a BenchVolt unlocks the
+                # controls; anything else (debug probe, random CDC port,
+                # a boot core awaiting firmware) is disconnected again.
+                identity = self.remote.query('*IDN?')
+                if not identity or "BenchVolt" not in identity:
+                    self.remote.disconnect()
+                    self.status_indicator.configure(
+                        text="NOT A BENCHVOLT (or updater mode)", text_color="orange")
+                    return
                 self.status_indicator.configure(text=f"CONNECTED ({selected_port})", text_color="#2ecc71")
                 self.connect_btn.configure(text="DISCONNECT", fg_color="#c0392b")
+                self._set_device_controls_enabled(True)
 
                 # 1. FIRST DO INITIAL QUERIES (Background loop sleeping)
-                print(f"Device Info: {self.remote.query('*IDN?')}")
+                print(f"Device Info: {identity}")
 
                 build_info = self.remote.get_build_date()
                 if build_info:
@@ -1433,6 +1476,7 @@ class BenchVoltUI(ctk.CTk):
             self.status_indicator.configure(text="DISCONNECTED", text_color="red")
             self.connect_btn.configure(text="CONNECT (USB)", fg_color="#2ecc71")
             self.fw_date_info.configure(text="--")
+            self._set_device_controls_enabled(False)
 
     def sync_output_switches_from_meas_all(self, parts):
         if len(parts) < 18:

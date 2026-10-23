@@ -12,3 +12,8 @@ Release/
 *.launch
 .metadata/__pycache__/
 __pycache__/
+
+# Build output, editor settings and device flash dumps
+Firmware/Rust/**/target/
+.vscode/
+Firmware/Rust/boot-v2/backups/

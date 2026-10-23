@@ -1,0 +1,1193 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc 3.10" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>BenchVolt-PD BOM</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      white-space: pre-wrap;
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <style>
+  :root{--bg:#f6f7f6;--surface:#fcfcfb;--ink:#101413;--ink2:#4d5552;--line:#dde2df;--chip:#eef1ef;
+   --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;}
+  @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#0f1211;--surface:#171b1a;--ink:#f1f4f2;--ink2:#b8c0bc;--line:#2a302e;--chip:#202624;}}
+  :root[data-theme="dark"]{color-scheme:dark;--bg:#0f1211;--surface:#171b1a;--ink:#f1f4f2;--ink2:#b8c0bc;--line:#2a302e;--chip:#202624;}
+  html,body{background:var(--bg);color:var(--ink)}
+  body{font-family:var(--sans);font-size:15px;line-height:1.55;max-width:1040px;margin:0 auto;padding:28px 16px 48px}
+  h1{font-size:24px} h2{font-size:17px;margin-top:2em;border-bottom:1px solid var(--line);padding-bottom:4px}
+  code{font-family:var(--mono);font-size:13px;background:var(--chip);padding:1px 4px;border-radius:3px}
+  table{display:table;width:auto;border-collapse:collapse;font-size:14px;background:var(--surface);margin:8px 0}
+  .tw{overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:5px 9px;text-align:left;vertical-align:top}
+  th{background:var(--chip)} td:first-child{font-variant-numeric:tabular-nums;white-space:nowrap}
+  </style>
+  <style>td:first-child{white-space:normal} a{color:#1c5cab} @media (prefers-color-scheme: dark){a{color:#6da7ec}}</style>
+</head>
+<body>
+<h1 id="benchvolt-pd-hardware-bom-r3-schematic">BenchVolt-PD hardware
+BOM (r3 schematic)</h1>
+<p>Source: <code>Schematics/USB_PowerSupply_r3.pdf</code> (Altium, 3
+sheets: main, BuckBoost.SchDoc, VbusTo3V3.SchDoc). No BOM file exists in
+the repo; transcribed 2026-09-27. Upstream schematic: <a
+href="https://github.com/jvanderberg/BenchVolt-PD/blob/main/Schematics/USB_PowerSupply_r3.pdf">USB_PowerSupply_r3.pdf</a>.
+Confidence: transcribed visually from the schematic; some values
+inferred (noted).</p>
+<p><strong>Contents:</strong> <a href="#key-facts">Key facts</a> · <a
+href="#volume-cost-summary">Volume cost summary</a> · <a
+href="#priced-bom-qty-1-vs-qty-100">Priced BOM</a> · <a
+href="#semiconductors">Full BOM by category</a> · <a
+href="#datasheets">Datasheets</a></p>
+<h2 id="key-facts">Key facts</h2>
+<ul>
+<li>MCU is <strong>STM32F070RBT6</strong> (LQFP64), 128 KiB flash / 16
+KiB RAM. (Earlier local notes said "CB"; schematic says RB.)</li>
+<li>USB PD negotiation done by <strong>STUSB4500QTR</strong> on
+bit-banged I²C at 0x28; MCU supervises only (F070 has no UCPD).</li>
+<li><strong>BuckBoost sheet is instantiated 3×</strong> (DC1, DC2,
+0.8–22V rail) — quantities below marked ×3; the schematic only shows one
+refdes set.</li>
+<li>DC1 programmed to 3.0 V (feeds 1.8/2.5 V LDOs), DC2 to 5.5 V (feeds
+3.3 V LDO and 0.5–5.5 V MIC69502) — both C firmware
+(<code>main.c</code>) and Rust (<code>power.rs</code>
+<code>rail_setpoint</code>). Third TPS55289 runs from VBUS_SINK directly
+→ 0.8–22 V CH5.</li>
+<li><strong>Display</strong>: ST7789 controller, 170×320 panel (firmware
+<code>src/startup.rs</code>:
+<code>Builder::st7789 ... with_display_size(170, 320)</code>, color
+inverted → IPS). Generic ~1.9" IPS SPI TFT module, 8-pin 2.54mm header
+J3 (GND,VCC,SCL,SDA,RES,DC,CS,BLK). SPI at 24 MHz; full frame ~106 KB
+&gt; 16 KB RAM so no framebuffer.</li>
+<li><strong>"LM29302R"</strong> is real: HTC Korea / Taejin LM29302R
+(LCSC C481680), 3A adj LDO TO-263-5, MIC29302 second-source, same
+pinout. Alternates: Microchip MIC29302AWU-TR ($1.83 / $1.11), UMW
+MIC29302WU ($0.86 / $0.53, 45k in stock).</li>
+<li>Rotary encoder is not on the schematic as a part; connects via J5
+(A/B/C with C61–C63 debounce caps).</li>
+<li><strong>Retail: $179 on Crowd Supply</strong> (confirmed
+2026-09-27).</li>
+</ul>
+<h2 id="volume-cost-summary">Volume cost summary</h2>
+<p>Figures use 100-piece unit pricing (LCSC/JLCPCB, 2026-09-27), so real
+1k+ builds would be somewhat lower (not separately priced).</p>
+<ul>
+<li>ICs/semis $25.23 · passives $16.70 · connectors/mech $5.81 · display
+$2 (est) · 4-layer PCB ≈150×70 mm $2.50 (est) → <strong>about $52 bare
+board + parts</strong></li>
+<li>Assembly (JLC PCBA, est) $3–5 · enclosure (5 laser-cut acrylic
+panels + machined 162×77×10 mm aluminium base, est) $12–20 · encoder +
+knob ≈$1–2</li>
+<li><strong>Complete unit ≈$70–80</strong> before
+shipping/duties/labor/margin → ≈2.2–2.5× markup at $179.</li>
+<li>Biggest drivers: 3× TPS55289 ($3.94 ea, $11.82), 24× 10µF/50V 1206
+MLCC ($6.72), MIC69502WR ($3.60), USB-C XUBF-0336-24B02 ($2.50).</li>
+<li>Thin LCSC stock at time of check: STL6P3LLH6, EEHZA1H680P,
+MIC69502WR, LM29302R.</li>
+</ul>
+<h2 id="priced-bom-qty-1-vs-qty-100">Priced BOM (qty 1 vs qty 100)</h2>
+<p>I priced the BenchVolt-PD board at about <strong>$74 per board at
+quantity 1</strong> and <strong>$52 per board at quantity 100</strong>.
+That covers parts, the display and a bare 4-layer PCB, but not assembly
+or the enclosure. The ICs and passives were looked up on LCSC through
+JLCPCB's parts search on 2026-09-27. The display, PCB, banana jacks,
+headers and shunt resistors are estimates.</p>
+<p>DigiKey and Mouser mostly blocked automated fetching, so the table
+uses LCSC prices. The two DigiKey qty-1 prices I did get (2026-09-27):
+STM32F070RBT6 $4.59 (LCSC $2.04) and MIC69502WR $3.82 (LCSC $3.76). The
+ICs would cost roughly 1.3–2× more from DigiKey or Mouser.</p>
+<p>"LM29302R" is a real part number: HTC Korea / Taejin LM29302R (LCSC
+C481680). It is a 3A adjustable LDO in TO-263-5, a second-source of
+Microchip's MIC29302 with the same pinout. You can swap in the Microchip
+MIC29302AWU-TR ($1.83 / $1.11) or the UMW MIC29302WU ($0.86 / $0.53, 45k
+in stock).</p>
+<p>"L" = looked up, "E" = estimate. Prices are USD per unit at qty 1 and
+qty 100 of that part, and "Ext" columns are cost per board.</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Qty/bd</th>
+<th>@1</th>
+<th>@100</th>
+<th>Ext @1</th>
+<th>Ext @100</th>
+<th>Src</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>STM32F070RBT6</td>
+<td>1</td>
+<td>2.04</td>
+<td>1.28</td>
+<td>2.04</td>
+<td>1.28</td>
+<td>L</td>
+</tr>
+<tr>
+<td>STUSB4500QTR</td>
+<td>1</td>
+<td>2.65</td>
+<td>1.78</td>
+<td>2.65</td>
+<td>1.78</td>
+<td>L</td>
+</tr>
+<tr>
+<td>TPS55289RYQR</td>
+<td>3</td>
+<td>5.21</td>
+<td>3.94</td>
+<td>15.63</td>
+<td>11.82</td>
+<td>L</td>
+</tr>
+<tr>
+<td>LM29302R (HTC)</td>
+<td>3</td>
+<td>1.16</td>
+<td>0.72</td>
+<td>3.48</td>
+<td>2.16</td>
+<td>L</td>
+</tr>
+<tr>
+<td>MIC69502WR</td>
+<td>1</td>
+<td>3.76</td>
+<td>3.60</td>
+<td>3.76</td>
+<td>3.60</td>
+<td>L</td>
+</tr>
+<tr>
+<td>MCP4725A0T-E/CH</td>
+<td>1</td>
+<td>0.94</td>
+<td>0.64</td>
+<td>0.94</td>
+<td>0.64</td>
+<td>L</td>
+</tr>
+<tr>
+<td>AP64060WU-7</td>
+<td>1</td>
+<td>0.59</td>
+<td>0.35</td>
+<td>0.59</td>
+<td>0.35</td>
+<td>L</td>
+</tr>
+<tr>
+<td>TLV77533PDBVR</td>
+<td>1</td>
+<td>0.09</td>
+<td>0.07</td>
+<td>0.09</td>
+<td>0.07</td>
+<td>L</td>
+</tr>
+<tr>
+<td>INA180A2IDBVR</td>
+<td>6</td>
+<td>0.19</td>
+<td>0.15</td>
+<td>1.14</td>
+<td>0.90</td>
+<td>L</td>
+</tr>
+<tr>
+<td>TMP1075DGKR</td>
+<td>1</td>
+<td>0.42</td>
+<td>0.26</td>
+<td>0.42</td>
+<td>0.26</td>
+<td>L</td>
+</tr>
+<tr>
+<td>STL6P3LLH6</td>
+<td>1</td>
+<td>0.96</td>
+<td>0.57</td>
+<td>0.96</td>
+<td>0.57</td>
+<td>L</td>
+</tr>
+<tr>
+<td>P4SMAJ6.0ADF-13</td>
+<td>4</td>
+<td>0.31</td>
+<td>0.24</td>
+<td>1.24</td>
+<td>0.96</td>
+<td>L</td>
+</tr>
+<tr>
+<td>P4SMAJ24ADF-13</td>
+<td>1</td>
+<td>0.27</td>
+<td>0.26</td>
+<td>0.27</td>
+<td>0.26</td>
+<td>L</td>
+</tr>
+<tr>
+<td>ESDA25P35-1U1M</td>
+<td>2</td>
+<td>0.19</td>
+<td>0.15</td>
+<td>0.38</td>
+<td>0.30</td>
+<td>L</td>
+</tr>
+<tr>
+<td>ESDA25W</td>
+<td>2</td>
+<td>0.14</td>
+<td>0.11</td>
+<td>0.28</td>
+<td>0.22</td>
+<td>L</td>
+</tr>
+<tr>
+<td>LEDs 0603</td>
+<td>6</td>
+<td>0.012</td>
+<td>0.010</td>
+<td>0.07</td>
+<td>0.06</td>
+<td>L</td>
+</tr>
+<tr>
+<td><strong>ICs / semis subtotal</strong></td>
+<td></td>
+<td></td>
+<td></td>
+<td><strong>33.94</strong></td>
+<td><strong>25.23</strong></td>
+<td></td>
+</tr>
+<tr>
+<td>FXL1360-4R7-M</td>
+<td>3</td>
+<td>0.60</td>
+<td>0.34</td>
+<td>1.80</td>
+<td>1.02</td>
+<td>L</td>
+</tr>
+<tr>
+<td>TMS322512ALM-100MTAA</td>
+<td>1</td>
+<td>0.33</td>
+<td>0.26</td>
+<td>0.33</td>
+<td>0.26</td>
+<td>L</td>
+</tr>
+<tr>
+<td>FBMH1608HM221-T</td>
+<td>1</td>
+<td>0.045</td>
+<td>0.037</td>
+<td>0.04</td>
+<td>0.04</td>
+<td>L</td>
+</tr>
+<tr>
+<td>NX3225GD 8 MHz crystal</td>
+<td>1</td>
+<td>0.34</td>
+<td>0.27</td>
+<td>0.34</td>
+<td>0.27</td>
+<td>L</td>
+</tr>
+<tr>
+<td>EEHZA1H680P 68µF</td>
+<td>3</td>
+<td>0.58</td>
+<td>0.35</td>
+<td>1.74</td>
+<td>1.05</td>
+<td>L</td>
+</tr>
+<tr>
+<td>EEHZK1V101XP 100µF</td>
+<td>3</td>
+<td>0.84</td>
+<td>0.56</td>
+<td>2.52</td>
+<td>1.68</td>
+<td>L</td>
+</tr>
+<tr>
+<td>TCJB106M035R0200 tantalum</td>
+<td>3</td>
+<td>0.98</td>
+<td>0.75</td>
+<td>2.94</td>
+<td>2.25</td>
+<td>L</td>
+</tr>
+<tr>
+<td>CL31B106KBHNNNE 10µF/50V 1206</td>
+<td>24</td>
+<td>0.35</td>
+<td>0.28</td>
+<td>8.40</td>
+<td>6.72</td>
+<td>L</td>
+</tr>
+<tr>
+<td>0.1µF 0603 GCJ188</td>
+<td>23</td>
+<td>0.055</td>
+<td>0.046</td>
+<td>1.26</td>
+<td>1.06</td>
+<td>L</td>
+</tr>
+<tr>
+<td>0.1µF 0402 GRM155</td>
+<td>24</td>
+<td>0.010</td>
+<td>0.010</td>
+<td>0.24</td>
+<td>0.24</td>
+<td>L</td>
+</tr>
+<tr>
+<td>1µF 0603 GRT188</td>
+<td>12</td>
+<td>0.080</td>
+<td>0.066</td>
+<td>0.96</td>
+<td>0.79</td>
+<td>L</td>
+</tr>
+<tr>
+<td>Other MLCCs (2.2µF, 4.7µF, 10n, 4.7n, 100p, 8p)</td>
+<td>14</td>
+<td>—</td>
+<td>—</td>
+<td>0.66</td>
+<td>0.56</td>
+<td>L</td>
+</tr>
+<tr>
+<td>10 mΩ shunts (package assumed)</td>
+<td>9</td>
+<td>0.08</td>
+<td>0.06</td>
+<td>0.72</td>
+<td>0.54</td>
+<td>E</td>
+</tr>
+<tr>
+<td>Resistors 0603 1% (about 24 values)</td>
+<td>76</td>
+<td>0.003</td>
+<td>0.003</td>
+<td>0.23</td>
+<td>0.23</td>
+<td>L/E</td>
+</tr>
+<tr>
+<td><strong>Passives subtotal</strong></td>
+<td></td>
+<td></td>
+<td></td>
+<td><strong>22.18</strong></td>
+<td><strong>16.70</strong></td>
+<td></td>
+</tr>
+<tr>
+<td>XUBF-0336-24B02 USB-C</td>
+<td>1</td>
+<td>3.63</td>
+<td>2.50</td>
+<td>3.63</td>
+<td>2.50</td>
+<td>L</td>
+</tr>
+<tr>
+<td>XKB8080-Z switch</td>
+<td>1</td>
+<td>0.18</td>
+<td>0.14</td>
+<td>0.18</td>
+<td>0.14</td>
+<td>L</td>
+</tr>
+<tr>
+<td>TS-1145A-D-B reset switch</td>
+<td>1</td>
+<td>0.12</td>
+<td>0.10</td>
+<td>0.12</td>
+<td>0.10</td>
+<td>L</td>
+</tr>
+<tr>
+<td>Headers J2–J7 + 2 jumper caps</td>
+<td>set</td>
+<td>0.47</td>
+<td>0.37</td>
+<td>0.47</td>
+<td>0.37</td>
+<td>L/E</td>
+</tr>
+<tr>
+<td>4 mm banana jacks</td>
+<td>6</td>
+<td>0.80</td>
+<td>0.40</td>
+<td>4.80</td>
+<td>2.40</td>
+<td>E</td>
+</tr>
+<tr>
+<td>M3 standoffs/screws</td>
+<td>6</td>
+<td>0.10</td>
+<td>0.05</td>
+<td>0.60</td>
+<td>0.30</td>
+<td>E</td>
+</tr>
+<tr>
+<td><strong>Connectors / mechanical subtotal</strong></td>
+<td></td>
+<td></td>
+<td></td>
+<td><strong>9.80</strong></td>
+<td><strong>5.81</strong></td>
+<td></td>
+</tr>
+<tr>
+<td><strong>Display:</strong> ST7789 1.9" 170×320 IPS SPI, 8-pin</td>
+<td>1</td>
+<td>3.00</td>
+<td>2.00</td>
+<td><strong>3.00</strong></td>
+<td><strong>2.00</strong></td>
+<td>E</td>
+</tr>
+<tr>
+<td><strong>PCB:</strong> 4-layer, about 150×70 mm</td>
+<td>1</td>
+<td>5.00</td>
+<td>2.50</td>
+<td><strong>5.00</strong></td>
+<td><strong>2.50</strong></td>
+<td>E</td>
+</tr>
+<tr>
+<td><strong>Grand total per board</strong></td>
+<td></td>
+<td></td>
+<td></td>
+<td><strong>$73.92</strong></td>
+<td><strong>$52.24</strong></td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<p>About 60% of the parts cost is three components: the three TPS55289
+buck-boosts (~$15.60), the 24 × 10µF/50V 1206 MLCCs (~$8.40, 12¢ more
+each than any smaller cap) and the USB-C connector.</p>
+<p><strong>Assumptions and caveats</strong></p>
+<ul>
+<li><strong>Qty-1 small-part pricing:</strong> at quantity 1, LCSC's
+minimum-order strips make the cheap parts cost more in practice.
+Resistors come in strips of 100 per value, which adds roughly $8–10 of
+extra stock to a one-off build.</li>
+<li><strong>Qty-100 column:</strong> it uses each part's 100-piece
+price. For 100 boards you'd buy 300–2,400 of many parts, so the real
+figure would come out slightly lower.</li>
+<li><strong>PCB:</strong> size is inferred from the aluminium base in
+<code>Enclosure/</code> (162×77 mm). The $5 at qty 1 is JLCPCB's typical
+5-board 4-layer order (about $20–30) divided by 5; a single board still
+costs the whole order. About $2.50 per board at 100 is an estimate.</li>
+<li><strong>Display:</strong> TZT's store lists the 8-pin module at
+$1.80, and AliExpress listings run about $3–4; I used $3 and $2.</li>
+<li><strong>Banana jacks:</strong> generic 4 mm binding posts. Pomona
+safety jacks would add about $15–25 per board.</li>
+<li><strong>Thin stock at LCSC:</strong> STL6P3LLH6 (1 in stock),
+EEHZA1H680P (1), MIC69502WR (0; the -TR version is $7.59) and LM29302R
+(8). A clone or second source may be needed.</li>
+<li><strong>Inferred values:</strong> the tantalum value (10µF/35V) and
+the resistor/shunt packages are not stated on the schematic.</li>
+</ul>
+<p><strong>Assembly (estimate, not in the totals):</strong> at JLCPCB, a
+batch of 5 boards would cost about $25 in setup and stencil plus about
+$3 for each unique extended part. With about 40 of those, that's roughly
+$30 per board. At 100 boards it drops to about $3–5 per board.
+Hand-soldering the through-hole parts is extra.</p>
+<p><strong>Excluded:</strong></p>
+<ul>
+<li><strong>Enclosure:</strong> 5 laser-cut 3 mm acrylic panels plus a
+machined 162×77×10 mm aluminium base, from the STL files. Rough guess:
+about $40–70 at qty 1 and about $12–20 at 100.</li>
+<li><strong>Rotary encoder and knob:</strong> the README mentions an
+encoder, but it isn't on the schematic. A Bourns PEC11R is about $2.70 /
+$1.67 on LCSC, a generic EC11 about $0.30, and a knob about $0.50.</li>
+<li><strong>Shipping, duties and tariffs.</strong></li>
+</ul>
+<p>Sources:</p>
+<ul>
+<li>LCSC/JLCPCB parts search, 2026-09-27</li>
+<li><a
+href="https://www.digikey.com/en/products/result?keywords=STM32F070RBT6">DigiKey
+STM32F070RBT6</a> and <a
+href="https://www.digikey.com/en/products/result?keywords=MIC69502WR">MIC69502WR</a>
+search pages</li>
+<li><a
+href="https://www.tme.com/in/en/details/lm29302r-tt/ldo-adjustable-voltage-regulators/taejin-technology-htc-korea/lm29302r/">TME:
+LM29302R</a> and <a
+href="https://datasheet.lcsc.com/lcsc/2112131830_HGSEMI-LM29302S-TR_C316693.pdf">HGSEMI
+LM29302 datasheet</a></li>
+<li><a href="https://www.tztstore.com/goods/show-6316.html">TZT 1.9"
+170×320 module</a> and <a
+href="https://www.aliexpress.com/item/1005004609840890.html">AliExpress
+1.9" 170×320 listing</a></li>
+<li><a
+href="https://jlcpcb.com/blog/special-discount-on-quality-4-layers-pcbs">JLCPCB
+4-layer pricing blog</a></li>
+</ul>
+<h2 id="semiconductors">Semiconductors</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>Qty</th>
+<th>Ref</th>
+<th>Part</th>
+<th>Function</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>B11</td>
+<td>STM32F070RBT6</td>
+<td>MCU</td>
+</tr>
+<tr>
+<td>1</td>
+<td>B2</td>
+<td>STUSB4500QTR</td>
+<td>USB-C PD sink controller</td>
+</tr>
+<tr>
+<td>3</td>
+<td>U5×3</td>
+<td>TPS55289RYQR</td>
+<td>I²C buck-boost (DC1, DC2, 0.8–22V)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>B3,B4,B5</td>
+<td>LM29302R (HTC Korea)</td>
+<td>3.3/2.5/1.8V adj LDOs</td>
+</tr>
+<tr>
+<td>1</td>
+<td>U1</td>
+<td>MIC69502WR</td>
+<td>0.5–5.5V adj LDO</td>
+</tr>
+<tr>
+<td>1</td>
+<td>B1</td>
+<td>MCP4725A0T-E/CH</td>
+<td>DAC trimming 0.5–5.5V rail (I²C 0x60)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>B7</td>
+<td>AP64060WU-7</td>
+<td>VUSB→3.8V buck</td>
+</tr>
+<tr>
+<td>1</td>
+<td>U2</td>
+<td>TLV77533PDBVR</td>
+<td>3.3V LDO for MCU</td>
+</tr>
+<tr>
+<td>6</td>
+<td>B6,B9,B12–B15</td>
+<td>INA180A2IDBVR</td>
+<td>Current sense amps</td>
+</tr>
+<tr>
+<td>1</td>
+<td>B10</td>
+<td>TMP1075DGKR</td>
+<td>Temp sensor (I²C 0x48)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>Q1</td>
+<td>STL6P3LLH6</td>
+<td>P-FET VBUS sink switch</td>
+</tr>
+<tr>
+<td>4</td>
+<td>D1,D4,D6,D7</td>
+<td>P4SMAJ6.0ADF-13</td>
+<td>TVS on LDO rails</td>
+</tr>
+<tr>
+<td>1</td>
+<td>D9</td>
+<td>P4SMAJ24ADF-13</td>
+<td>TVS on 0.8–22V</td>
+</tr>
+<tr>
+<td>2</td>
+<td>D2,D8</td>
+<td>ESDA25P35-1U1M</td>
+<td>ESD (VBUS, NRST)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>D3,D5</td>
+<td>ESDA25W</td>
+<td>ESD (CC, USB D±)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>LD1–LD3, LD4×3</td>
+<td>LEDs green/blue/red + red fault per buck-boost</td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="magnetics--crystal--switches">Magnetics / crystal /
+switches</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>Qty</th>
+<th>Ref</th>
+<th>Part</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>3</td>
+<td>L1×3</td>
+<td>FXL1360-4R7-M (4.7µH)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>L2</td>
+<td>TMS322512ALM-100MTAA (10µH)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>FB1</td>
+<td>FBMH1608HM221-T</td>
+</tr>
+<tr>
+<td>1</td>
+<td>X1</td>
+<td>NX3225GD-8MHZ-STD-CRA-3</td>
+</tr>
+<tr>
+<td>1</td>
+<td>S1</td>
+<td>TS-1145A-D-B (reset)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>S2</td>
+<td>XKB8080-Z (USB side select)</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="capacitors">Capacitors</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>Qty</th>
+<th>Value</th>
+<th>MPN</th>
+<th>Refs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>23</td>
+<td>0.1µF 50V 0603</td>
+<td>Murata GCJ188R71H104KA12D</td>
+<td>C1,C6,C7,C24,C27,C37,C40,C42,C44,C46,C48,C49,C51,C53,C55–C63</td>
+</tr>
+<tr>
+<td>24</td>
+<td>0.1µF 50V 0402</td>
+<td>Murata GRM155R71H104ME14D</td>
+<td>(C3,C12,C16,C19,C28,C29,C36,C43)×3</td>
+</tr>
+<tr>
+<td>24</td>
+<td>10µF 50V 1206</td>
+<td>Samsung CL31B106KBHNNNE</td>
+<td>C8,C13,C14,C20,C22,C23,C47,C52,C54,(C5,C10,C31–C33)×3</td>
+</tr>
+<tr>
+<td>3</td>
+<td>10µF 35V tantalum B</td>
+<td>Kyocera AVX TCJB106M035R0200</td>
+<td>C9,C15,C21 (value inferred — unlabeled polarized)</td>
+</tr>
+<tr>
+<td>12</td>
+<td>1µF 50V 0603</td>
+<td>Murata GRT188R61H105ME13D</td>
+<td>C17,C18,C50,(C11,C30,C35)×3</td>
+</tr>
+<tr>
+<td>1</td>
+<td>2.2µF 50V 1206</td>
+<td>Murata GCM31CR71H225KA55L</td>
+<td>C45</td>
+</tr>
+<tr>
+<td>3</td>
+<td>4.7µF 16V 0603</td>
+<td>Murata GRT188R61C475KE13D</td>
+<td>C2×3</td>
+</tr>
+<tr>
+<td>3</td>
+<td>68µF electrolytic</td>
+<td>Panasonic EEHZA1H680P</td>
+<td>C4×3</td>
+</tr>
+<tr>
+<td>3</td>
+<td>100µF electrolytic</td>
+<td>Panasonic EEHZK1V101XP</td>
+<td>C34×3</td>
+</tr>
+<tr>
+<td>3</td>
+<td>0.01µF 0402</td>
+<td>TDK CGA2B3X7R1H103K050BB</td>
+<td>C41×3</td>
+</tr>
+<tr>
+<td>3</td>
+<td>4.7nF 0402</td>
+<td>TDK CGA2B2X7R1H472K050BA</td>
+<td>C39×3</td>
+</tr>
+<tr>
+<td>3</td>
+<td>100pF 0402</td>
+<td>TDK CGA2B2C0G1H101J050BA</td>
+<td>C38×3</td>
+</tr>
+<tr>
+<td>2</td>
+<td>8pF 0603</td>
+<td>FH 0603CG8R0C500NT</td>
+<td>C25,C26</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="resistors-packagetolerance-unspecified">Resistors
+(package/tolerance unspecified)</h2>
+<p>10mΩ shunt ×9 (R2,R4,R9,R15,R22,R31,R20×3); 10Ω ×6 ((R24,R34)×3);
+100Ω ×4 (R61,R66,R69,R70); 1k ×19; 1.1k ×1 (R28); 2.2k ×4 (R33,R37×3);
+4.7k ×6 (I²C pullups R51–53,R56–58); 5.36k ×1; 5.76k ×2; 6.04k ×1; 6.8k
+×3; 6.98k ×1; 9.31k ×1; 10k ×6; 10.7k ×1; 11.5k ×1; 22k ×1; 22.1k ×1;
+24.3k ×1; 27.4k ×3; 49.9k ×3; 84.5k ×1; 100k ×4 (R63,R18×3); 150k ×3; 0Ω
+×2 (R42,R68); DNP R67,R71.</p>
+<h2 id="connectors--mechanical">Connectors / mechanical</h2>
+<p>J1 XUBF-0336-24B02 USB-C (5A/48V, USB3.1); J3 1×8 2.54mm display
+header; ST7789 170×320 display module; J2 7-pin SWD+USART3; J4 2×13
+header; J5 1×5 header (encoder); J6,J7 2×2 LDO-bypass ("Hacky Mode")
+jumpers; 6 banana jacks (1.8V, 2.5V, 3.3V, ADJ_LOW, ADJ_HIGH, GND);
+MH1–MH6 M3; net tie AGND–GND ×3.</p>
+<h2 id="not-on-schematic">Not on schematic</h2>
+<p>Enclosure (acrylic + aluminium base, STLs in
+<code>Enclosure/</code>), knob/rotary encoder part, fasteners.</p>
+<h2 id="datasheets">Datasheets</h2>
+<p>I found and checked datasheets for all 22 parts, and all of them are
+in English or bilingual. Every TI, Microchip, Diodes, HTC Korea, NDK,
+Newhaven and Adafruit link downloaded as a real PDF. ST's site timed out
+for every request and TDK's returned 403, so those links are canonical
+manufacturer paths taken from search results and marked "blocked".</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>Part</th>
+<th>Maker</th>
+<th>Datasheet</th>
+<th>Verified</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>STM32F070RBT6</td>
+<td>ST</td>
+<td><a
+href="https://www.st.com/resource/en/datasheet/stm32f070rb.pdf">link</a></td>
+<td>blocked (not fetch-verified)</td>
+</tr>
+<tr>
+<td>STUSB4500QTR</td>
+<td>ST</td>
+<td><a
+href="https://www.st.com/resource/en/datasheet/stusb4500.pdf">link</a></td>
+<td>blocked (not fetch-verified)</td>
+</tr>
+<tr>
+<td>TPS55289RYQR</td>
+<td>TI</td>
+<td><a
+href="https://www.ti.com/lit/ds/symlink/tps55289.pdf">link</a></td>
+<td>yes</td>
+</tr>
+<tr>
+<td>LM29302R</td>
+<td>HTC Korea / Taejin</td>
+<td><a
+href="https://www.htckorea.co.kr/Datasheet/VLDO/LM2930x.pdf">link</a></td>
+<td>yes (English; covers LM29300/29301/29302)</td>
+</tr>
+<tr>
+<td>MIC29302 (reference/alternate)</td>
+<td>Microchip</td>
+<td><a
+href="http://ww1.microchip.com/downloads/en/DeviceDoc/MIC2915x-30x-50x-75x-High-Current-Low-Dropout-Regulators-DS20005685B.pdf">link</a></td>
+<td>yes (family datasheet DS20005685B)</td>
+</tr>
+<tr>
+<td>MIC69502WR</td>
+<td>Microchip</td>
+<td><a
+href="https://ww1.microchip.com/downloads/aemDocuments/documents/APID/ProductDocuments/DataSheets/MIC69502-5A-Low-VIN-Low-VOUT-%CE%BCCap-LDO-Regulator-DS20006836.pdf">link</a></td>
+<td>yes</td>
+</tr>
+<tr>
+<td>MCP4725A0T-E/CH</td>
+<td>Microchip</td>
+<td><a
+href="https://ww1.microchip.com/downloads/en/devicedoc/22039d.pdf">link</a></td>
+<td>yes</td>
+</tr>
+<tr>
+<td>AP64060WU-7</td>
+<td>Diodes Inc</td>
+<td><a
+href="https://www.diodes.com/datasheet/download/AP64060_AP64062.pdf">link</a></td>
+<td>yes</td>
+</tr>
+<tr>
+<td>TLV77533PDBVR</td>
+<td>TI</td>
+<td><a href="https://www.ti.com/lit/ds/symlink/tlv775.pdf">link</a></td>
+<td>yes</td>
+</tr>
+<tr>
+<td>INA180A2IDBVR</td>
+<td>TI</td>
+<td><a href="https://www.ti.com/lit/ds/symlink/ina180.pdf">link</a></td>
+<td>yes</td>
+</tr>
+<tr>
+<td>TMP1075DGKR</td>
+<td>TI</td>
+<td><a
+href="https://www.ti.com/lit/ds/symlink/tmp1075.pdf">link</a></td>
+<td>yes</td>
+</tr>
+<tr>
+<td>STL6P3LLH6</td>
+<td>ST</td>
+<td><a
+href="https://www.st.com/resource/en/datasheet/stl6p3llh6.pdf">link</a></td>
+<td>blocked (not fetch-verified)</td>
+</tr>
+<tr>
+<td>P4SMAJ6.0ADF-13 / P4SMAJ24ADF-13</td>
+<td>Diodes Inc</td>
+<td><a
+href="https://www.diodes.com/datasheet/download/P4SMAJ5.0ADF-P4SMAJ85ADF.pdf">link</a></td>
+<td>yes (series 5.0 to 85 V, covers both)</td>
+</tr>
+<tr>
+<td>ESDA25P35-1U1M</td>
+<td>ST</td>
+<td><a
+href="https://www.st.com/resource/en/datasheet/esda25p35-1u1m.pdf">link</a></td>
+<td>blocked (not fetch-verified)</td>
+</tr>
+<tr>
+<td>ESDA25W</td>
+<td>ST</td>
+<td><a
+href="https://www.st.com/resource/en/datasheet/esdaxxxwx.pdf">link</a></td>
+<td>blocked (not fetch-verified; ESDAxxxWx family)</td>
+</tr>
+<tr>
+<td>FXL1360-4R7-M</td>
+<td>Cjiang (Changjiang Microelectronics)</td>
+<td><a href="https://www.lcsc.com/datasheet/C526021.pdf">link</a></td>
+<td>fallback-LCSC (English, some Chinese headers)</td>
+</tr>
+<tr>
+<td>TMS322512ALM-100MTAA</td>
+<td>TDK</td>
+<td><a
+href="https://product.tdk.com/system/files/dam/doc/product/inductor/inductor/smd/catalog/inductor_commercial_power_tms322512alm_en.pdf">link</a></td>
+<td>blocked (403; product page: <a
+href="https://product.tdk.com/en/search/inductor/inductor/smd/info?part_no=TMS322512ALM-100MTAA">link</a>)</td>
+</tr>
+<tr>
+<td>NX3225GD-8MHZ-STD-CRA-3</td>
+<td>NDK</td>
+<td><a
+href="https://www.ndk.com/images/products/catalog/c_NX3225GD_e.pdf">link</a></td>
+<td>yes (series catalog)</td>
+</tr>
+<tr>
+<td>NX3225GD-8MHZ-STD-CRA-3 (exact-part spec)</td>
+<td>NDK</td>
+<td><a href="https://www.lcsc.com/datasheet/C889706.pdf">link</a></td>
+<td>fallback-LCSC (English NDK spec for STD-CRA-3)</td>
+</tr>
+<tr>
+<td>XUBF-0336-24B02</td>
+<td>Lian Xin Technology</td>
+<td><a href="https://www.lcsc.com/datasheet/C7529553.pdf">link</a></td>
+<td>fallback-LCSC (bilingual drawing, see note)</td>
+</tr>
+<tr>
+<td>XKB8080-Z</td>
+<td>XKB Connection</td>
+<td><a href="https://www.lcsc.com/datasheet/C318860.pdf">link</a></td>
+<td>fallback-LCSC (English drawing and specs)</td>
+</tr>
+<tr>
+<td>TS-1145A-D-B</td>
+<td>XKB Connection</td>
+<td><a href="https://www.lcsc.com/datasheet/C18198078.pdf">link</a></td>
+<td>fallback-LCSC (English, Chinese in parentheses)</td>
+</tr>
+<tr>
+<td>ST7789V controller</td>
+<td>Sitronix (hosted by Newhaven)</td>
+<td><a
+href="https://newhavendisplay.com/content/datasheets/ST7789V.pdf">link</a></td>
+<td>yes (English; not Sitronix's own server)</td>
+</tr>
+<tr>
+<td>1.9" 170x320 IPS module (representative)</td>
+<td>Adafruit #5394</td>
+<td><a
+href="https://cdn-learn.adafruit.com/downloads/pdf/adafruit-1-9-color-ips-tft-display.pdf">link</a></td>
+<td>yes (English guide; product page <a
+href="https://www.adafruit.com/product/5394">link</a>)</td>
+</tr>
+</tbody>
+</table></div>
+<p>Notes:</p>
+<ul>
+<li><strong>LCSC links:</strong> the
+<code>lcsc.com/datasheet/Cxxxx.pdf</code> pages are viewer wrappers.
+Each one loads a real PDF from <code>datasheet.lcsc.com</code>, and I
+downloaded and read each of those PDFs to check the language.</li>
+<li><strong>XUBF-0336-24B02:</strong> this is a mechanical drawing only,
+and the title block is bilingual (Chinese with English in parentheses).
+The dimensions and notes are English, so it's usable, but there's no
+fully English datasheet. Lian Xin has no website of its own that I could
+find.</li>
+<li><strong>ESDA25W:</strong> ST only publishes this as a family
+datasheet (ESDAxxxWx).</li>
+</ul>
+<p><strong>No datasheet found:</strong></p>
+<ul>
+<li>None of the parts is missing a datasheet, and none is
+Chinese-only.</li>
+<li>The Taejin/HTC Korea LM29302R is the only LM29302 source I found,
+and it is in English. LCSC also carries a different second source,
+HGSEMI's LM29302S, which I did not use.</li>
+<li>The 1.9" module has no single official spec. The Adafruit guide
+stands in for the generic ST7789 170x320 panels, and BuyDisplay's
+ER-TFTM019 is another option I did not fetch.</li>
+</ul>
+</body>
+</html>

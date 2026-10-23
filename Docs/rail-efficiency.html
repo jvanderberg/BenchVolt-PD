@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BenchVolt PD Rail Efficiency</title>
+
+<style>
+:root{
+ --bg:#f6f7f6; --surface:#fcfcfb; --ink:#101413; --ink2:#4d5552; --ink3:#7a837f; --line:#dde2df; --line2:#c9d0cc;
+ --accent:#1c5cab; --good:#1f7a4d; --warn:#a15c07; --chip:#eef1ef;
+ --tip-bg:#101413; --tip-ink:#f6f7f6;
+ --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
+ --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){color-scheme:dark;
+ --bg:#0f1211; --surface:#171b1a; --ink:#f1f4f2; --ink2:#b8c0bc; --ink3:#8c9591; --line:#2a302e; --line2:#3a423f;
+ --accent:#6da7ec; --good:#5cc592; --warn:#e5a54a; --chip:#202624; --tip-bg:#f1f4f2; --tip-ink:#101413;}}
+:root[data-theme="dark"]{color-scheme:dark;
+ --bg:#0f1211; --surface:#171b1a; --ink:#f1f4f2; --ink2:#b8c0bc; --ink3:#8c9591; --line:#2a302e; --line2:#3a423f;
+ --accent:#6da7ec; --good:#5cc592; --warn:#e5a54a; --chip:#202624; --tip-bg:#f1f4f2; --tip-ink:#101413;}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto;padding-inline:20px;padding-block:28px 48px;display:grid;gap:32px}
+h1,h2,h3{text-wrap:balance;margin:0;line-height:1.2}
+h1{font-size:24px;font-weight:700}
+h2{font-size:17px;font-weight:700}
+h3{font-size:15px;font-weight:600}
+p{margin:0;max-width:68ch}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3)}
+header{display:grid;gap:12px}
+.meta{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font-family:var(--mono);font-size:12px;background:var(--chip);border:1px solid var(--line);border-radius:4px;padding:3px 8px;color:var(--ink2)}
+section{display:grid;gap:16px}
+.lede{color:var(--ink2)}
+.findings{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.finding{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:14px 16px;display:grid;gap:6px;align-content:start}
+.finding .num{font-family:var(--mono);font-size:22px;font-weight:500;color:var(--accent);font-variant-numeric:tabular-nums}
+.finding p{font-size:14px;color:var(--ink2)}
+.tablebox{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:6px}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:9px 14px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+th{font-weight:600;color:var(--ink2);font-size:12.5px;border-bottom:1px solid var(--line2);background:var(--chip)}
+td{border-bottom:1px solid var(--line);font-family:var(--mono);font-size:13.5px}
+tr:last-child td{border-bottom:0}
+th:first-child,td:first-child{text-align:left;font-family:var(--sans);font-size:14px}
+td.hi{color:var(--good);font-weight:500}
+td.lo{color:var(--warn);font-weight:500}
+.note{font-size:13px;color:var(--ink3)}
+.maps{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:28px;align-items:start}
+.map{display:grid;gap:10px}
+.map .sub{font-size:13.5px;color:var(--ink2)}
+.grid{display:grid;gap:2px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.grid .ax{font-size:12px;color:var(--ink3);display:flex;align-items:center;justify-content:center}
+.grid .ay{font-size:12px;color:var(--ink2);display:flex;align-items:center;justify-content:flex-end;padding-right:8px}
+.cell{border-radius:4px;min-height:40px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;cursor:default;outline-offset:2px;position:relative}
+.cell:hover,.cell:focus-visible{outline:2px solid var(--ink)}
+.axtitle{font-size:12px;color:var(--ink3);text-align:center}
+.legend{display:grid;gap:6px;max-width:420px}
+.legend .bar{height:12px;border-radius:3px;background:linear-gradient(90deg,#30123b,#4662d7,#36aaf9,#1ae4b6,#72fe5e,#c8ef34,#faba39,#f66b19,#ca2a04,#7a0403)}
+.legend .ticks{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12px;color:var(--ink3)}
+#tip{position:fixed;pointer-events:none;background:var(--tip-bg);color:var(--tip-ink);font-family:var(--mono);font-size:12.5px;line-height:1.5;padding:8px 10px;border-radius:5px;z-index:10;max-width:280px}
+ul.notes{margin:0;padding-left:18px;display:grid;gap:6px;color:var(--ink2);font-size:14px;max-width:72ch}
+@media (max-width:480px){.cell{min-height:34px;font-size:11.5px}}
+</style>
+</head>
+<body>
+
+
+<div class="wrap">
+ <h1>BenchVolt PD Rail Efficiency</h1>
+
+ <section>
+  <h2>Efficiency, adjustable outputs</h2>
+  <div class="legend" aria-hidden="true"><div class="bar"></div><div class="ticks"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div></div>
+  <div class="maps">
+   <div class="map"><h3>CH4 (LDO)</h3><div class="grid" id="map4" role="grid" aria-label="CH4 efficiency heat map"></div><div class="axtitle">Load current (A)</div></div>
+   <div class="map"><h3>CH5 (buck-boost)</h3><div class="grid" id="map5" role="grid" aria-label="CH5 efficiency heat map"></div><div class="axtitle">Load current (A)</div><div class="note">* Set to 22 V, delivers 21.3 V.</div></div>
+  </div>
+ </section>
+
+ <section>
+  <h2>Efficiency, fixed outputs</h2>
+  <div class="tablebox"><table id="fixed"></table></div>
+ </section>
+
+ <section>
+  <h2>Voltage droop at the terminals</h2>
+  <div class="tablebox"><table id="droop"></table></div>
+  <div class="note">Measured with the load's remote sense on the BenchVolt binding posts. Output resistance = voltage drop ÷ current step. The front panel reading is taken at the regulator, so it shows only part of the drop.</div>
+ </section>
+
+ <section>
+  <h2>Front panel vs. measured, 2.5 A</h2>
+  <div class="tablebox"><table id="accuracy"></table></div>
+ </section>
+
+</div>
+<div id="tip" hidden></div>
+
+<script>
+const DATA={"1": [{"v": null, "base": 0.77, "bvIdle": 1.8, "pts": [{"a": 0.25, "lv": 1.788, "li": 0.251, "bv": 1.798, "bi": 0.278, "pin": 1.72, "eff": 47.1, "effAll": 26.0, "bvEff": 52.6}, {"a": 0.5, "lv": 1.777, "li": 0.5, "bv": 1.79, "bi": 0.557, "pin": 2.64, "eff": 47.7, "effAll": 33.7, "bvEff": 53.5}, {"a": 1, "lv": 1.755, "li": 1.0, "bv": 1.79, "bi": 1.116, "pin": 4.44, "eff": 47.8, "effAll": 39.5, "bvEff": 54.4}, {"a": 1.5, "lv": 1.732, "li": 1.5, "bv": 1.79, "bi": 1.675, "pin": 6.14, "eff": 48.5, "effAll": 42.4, "bvEff": 55.9}, {"a": 2, "lv": 1.71, "li": 2.0, "bv": 1.782, "bi": 2.238, "pin": 7.9, "eff": 48.0, "effAll": 43.3, "bvEff": 56.0}, {"a": 2.5, "lv": 1.688, "li": 2.5, "bv": 1.78, "bi": 2.804, "pin": 9.74, "eff": 47.1, "effAll": 43.3, "bvEff": 55.7}]}], "2": [{"v": null, "base": 0.77, "bvIdle": 2.494, "pts": [{"a": 0.25, "lv": 2.483, "li": 0.251, "bv": 2.49, "bi": 0.268, "pin": 1.7, "eff": 66.8, "effAll": 36.7, "bvEff": 71.6}, {"a": 0.5, "lv": 2.472, "li": 0.5, "bv": 2.49, "bi": 0.534, "pin": 2.62, "eff": 66.5, "effAll": 47.1, "bvEff": 71.5}, {"a": 1, "lv": 2.45, "li": 1.0, "bv": 2.49, "bi": 1.073, "pin": 4.44, "eff": 66.7, "effAll": 55.2, "bvEff": 72.7}, {"a": 1.5, "lv": 2.428, "li": 1.5, "bv": 2.48, "bi": 1.612, "pin": 6.15, "eff": 67.7, "effAll": 59.3, "bvEff": 74.3}, {"a": 2, "lv": 2.404, "li": 2.0, "bv": 2.48, "bi": 2.15, "pin": 7.92, "eff": 67.2, "effAll": 60.7, "bvEff": 74.5}, {"a": 2.5, "lv": 2.364, "li": 2.5, "bv": 2.46, "bi": 2.697, "pin": 9.76, "eff": 65.7, "effAll": 60.6, "bvEff": 73.8}]}], "3": [{"v": null, "base": 0.73, "bvIdle": 3.3, "pts": [{"a": 0.25, "lv": 3.314, "li": 0.251, "bv": 3.3, "bi": 0.261, "pin": 2.43, "eff": 49.0, "effAll": 34.2, "bvEff": 50.8}, {"a": 0.5, "lv": 3.302, "li": 0.5, "bv": 3.3, "bi": 0.518, "pin": 3.98, "eff": 50.9, "effAll": 41.5, "bvEff": 52.7}, {"a": 1, "lv": 3.277, "li": 1.0, "bv": 3.3, "bi": 1.041, "pin": 7.16, "eff": 51.0, "effAll": 45.8, "bvEff": 53.4}, {"a": 1.5, "lv": 3.252, "li": 1.5, "bv": 3.3, "bi": 1.563, "pin": 10.23, "eff": 51.4, "effAll": 47.7, "bvEff": 54.3}, {"a": 2, "lv": 3.227, "li": 2.0, "bv": 3.3, "bi": 2.086, "pin": 13.36, "eff": 51.1, "effAll": 48.3, "bvEff": 54.5}, {"a": 2.5, "lv": 3.203, "li": 2.5, "bv": 3.3, "bi": 2.614, "pin": 16.54, "eff": 50.7, "effAll": 48.4, "bvEff": 54.6}]}], "4": [{"v": 5, "base": 0.79, "bvIdle": 5.04, "pts": [{"a": 0.5, "lv": 5.027, "li": 0.5, "bv": 5.04, "bi": 0.521, "pin": 4.03, "eff": 77.5, "effAll": 62.3, "bvEff": 80.9}, {"a": 1, "lv": 5.006, "li": 1.0, "bv": 5.04, "bi": 1.038, "pin": 7.2, "eff": 78.0, "effAll": 69.5, "bvEff": 81.5}, {"a": 1.5, "lv": 4.984, "li": 1.5, "bv": 5.04, "bi": 1.554, "pin": 10.24, "eff": 79.1, "effAll": 73.0, "bvEff": 82.9}, {"a": 2.5, "lv": 4.941, "li": 2.5, "bv": 5.036, "bi": 2.591, "pin": 16.5, "eff": 78.6, "effAll": 74.9, "bvEff": 83.0}]}, {"v": 4, "base": 0.79, "bvIdle": 4.05, "pts": [{"a": 0.5, "lv": 4.03, "li": 0.5, "bv": 4.05, "bi": 0.52, "pin": 4.02, "eff": 62.3, "effAll": 50.1, "bvEff": 65.2}, {"a": 1, "lv": 4.01, "li": 1.0, "bv": 4.05, "bi": 1.038, "pin": 7.19, "eff": 62.7, "effAll": 55.8, "bvEff": 65.7}, {"a": 1.5, "lv": 3.99, "li": 1.501, "bv": 4.05, "bi": 1.553, "pin": 10.23, "eff": 63.5, "effAll": 58.5, "bvEff": 66.7}, {"a": 2.5, "lv": 3.949, "li": 2.5, "bv": 4.042, "bi": 2.589, "pin": 16.48, "eff": 62.9, "effAll": 59.9, "bvEff": 66.7}]}, {"v": 3, "base": 0.78, "bvIdle": 3.048, "pts": [{"a": 0.5, "lv": 3.032, "li": 0.5, "bv": 3.05, "bi": 0.52, "pin": 3.99, "eff": 47.2, "effAll": 38.0, "bvEff": 49.4}, {"a": 1, "lv": 3.013, "li": 1.0, "bv": 3.05, "bi": 1.035, "pin": 7.17, "eff": 47.1, "effAll": 42.0, "bvEff": 49.4}, {"a": 1.5, "lv": 2.994, "li": 1.5, "bv": 3.05, "bi": 1.55, "pin": 10.22, "eff": 47.6, "effAll": 44.0, "bvEff": 50.1}, {"a": 2.5, "lv": 2.955, "li": 2.5, "bv": 3.05, "bi": 2.587, "pin": 16.49, "eff": 47.0, "effAll": 44.8, "bvEff": 50.2}]}, {"v": 2, "base": 0.79, "bvIdle": 2.05, "pts": [{"a": 0.5, "lv": 2.033, "li": 0.5, "bv": 2.05, "bi": 0.52, "pin": 4.03, "eff": 31.3, "effAll": 25.2, "bvEff": 32.9}, {"a": 1, "lv": 2.015, "li": 1.0, "bv": 2.05, "bi": 1.034, "pin": 7.16, "eff": 31.6, "effAll": 28.1, "bvEff": 33.3}, {"a": 1.5, "lv": 1.997, "li": 1.5, "bv": 2.05, "bi": 1.553, "pin": 10.2, "eff": 31.8, "effAll": 29.4, "bvEff": 33.8}, {"a": 2.5, "lv": 1.959, "li": 2.5, "bv": 2.05, "bi": 2.588, "pin": 16.48, "eff": 31.2, "effAll": 29.7, "bvEff": 33.8}]}, {"v": 1, "base": 0.79, "bvIdle": 1.05, "pts": [{"a": 0.5, "lv": 1.032, "li": 0.5, "bv": 1.05, "bi": 0.516, "pin": 4.01, "eff": 16.1, "effAll": 12.9, "bvEff": 16.9}, {"a": 1, "lv": 1.014, "li": 1.0, "bv": 1.05, "bi": 1.034, "pin": 7.17, "eff": 15.9, "effAll": 14.1, "bvEff": 17.0}, {"a": 1.5, "lv": 0.997, "li": 1.5, "bv": 1.05, "bi": 1.55, "pin": 10.22, "eff": 15.9, "effAll": 14.6, "bvEff": 17.3}, {"a": 2.5, "lv": 0.951, "li": 2.5, "bv": 1.05, "bi": 2.586, "pin": 16.46, "eff": 15.2, "effAll": 14.4, "bvEff": 17.3}]}], "5": [{"v": 22, "base": 0.7, "bvIdle": 21.318, "pts": [{"a": 0.5, "lv": 21.282, "li": 0.5, "bv": 21.312, "bi": 0.519, "pin": 12.51, "eff": 90.0, "effAll": 85.0, "bvEff": 93.6}, {"a": 1, "lv": 21.18, "li": 1.0, "bv": 21.23, "bi": 1.039, "pin": 23.7, "eff": 92.1, "effAll": 89.4, "bvEff": 95.9}, {"a": 1.5, "lv": 21.154, "li": 1.5, "bv": 21.23, "bi": 1.555, "pin": 35.05, "eff": 92.4, "effAll": 90.6, "bvEff": 96.1}, {"a": 2.5, "lv": 21.104, "li": 2.5, "bv": 21.218, "bi": 2.593, "pin": 58.01, "eff": 92.1, "effAll": 91.0, "bvEff": 96.0}]}, {"v": 20, "base": 0.69, "bvIdle": 20.062, "pts": [{"a": 0.5, "lv": 20.004, "li": 0.5, "bv": 20.032, "bi": 0.52, "pin": 11.53, "eff": 92.2, "effAll": 86.7, "bvEff": 96.1}, {"a": 1, "lv": 19.915, "li": 1.0, "bv": 19.962, "bi": 1.039, "pin": 22.34, "eff": 92.0, "effAll": 89.2, "bvEff": 95.8}, {"a": 1.5, "lv": 19.889, "li": 1.5, "bv": 19.96, "bi": 1.557, "pin": 33.02, "eff": 92.3, "effAll": 90.4, "bvEff": 96.1}, {"a": 2.5, "lv": 19.839, "li": 2.5, "bv": 19.952, "bi": 2.593, "pin": 54.64, "eff": 91.9, "effAll": 90.8, "bvEff": 95.9}]}, {"v": 16, "base": 0.7, "bvIdle": 16.05, "pts": [{"a": 0.5, "lv": 16.031, "li": 0.5, "bv": 16.05, "bi": 0.519, "pin": 9.45, "eff": 91.6, "effAll": 84.8, "bvEff": 95.2}, {"a": 1, "lv": 15.923, "li": 1.0, "bv": 15.97, "bi": 1.037, "pin": 18.15, "eff": 91.3, "effAll": 87.7, "bvEff": 94.9}, {"a": 1.5, "lv": 15.897, "li": 1.5, "bv": 15.964, "bi": 1.555, "pin": 26.76, "eff": 91.5, "effAll": 89.1, "bvEff": 95.3}, {"a": 2.5, "lv": 15.848, "li": 2.5, "bv": 15.956, "bi": 2.592, "pin": 43.95, "eff": 91.6, "effAll": 90.1, "bvEff": 95.6}]}, {"v": 12, "base": 0.7, "bvIdle": 12.06, "pts": [{"a": 0.5, "lv": 12.026, "li": 0.5, "bv": 12.042, "bi": 0.517, "pin": 7.49, "eff": 88.5, "effAll": 80.2, "bvEff": 91.6}, {"a": 1, "lv": 11.931, "li": 1.0, "bv": 11.97, "bi": 1.035, "pin": 14.09, "eff": 89.1, "effAll": 84.7, "bvEff": 92.5}, {"a": 1.5, "lv": 11.906, "li": 1.5, "bv": 11.96, "bi": 1.553, "pin": 20.43, "eff": 90.5, "effAll": 87.4, "bvEff": 94.1}, {"a": 2.5, "lv": 11.856, "li": 2.5, "bv": 11.956, "bi": 2.593, "pin": 33.56, "eff": 90.2, "effAll": 88.3, "bvEff": 94.3}]}, {"v": 8, "base": 0.7, "bvIdle": 8.055, "pts": [{"a": 0.5, "lv": 8.034, "li": 0.5, "bv": 8.038, "bi": 0.517, "pin": 5.26, "eff": 88.1, "effAll": 76.4, "bvEff": 91.2}, {"a": 1, "lv": 7.944, "li": 1.0, "bv": 7.97, "bi": 1.036, "pin": 9.81, "eff": 87.2, "effAll": 81.0, "bvEff": 90.6}, {"a": 1.5, "lv": 7.919, "li": 1.5, "bv": 7.96, "bi": 1.555, "pin": 14.11, "eff": 88.6, "effAll": 84.2, "bvEff": 92.3}, {"a": 2.5, "lv": 7.869, "li": 2.5, "bv": 7.96, "bi": 2.591, "pin": 22.94, "eff": 88.4, "effAll": 85.7, "bvEff": 92.7}]}, {"v": 5, "base": 0.7, "bvIdle": 5.065, "pts": [{"a": 0.5, "lv": 5.029, "li": 0.5, "bv": 5.032, "bi": 0.516, "pin": 3.69, "eff": 84.0, "effAll": 68.1, "bvEff": 86.8}, {"a": 1, "lv": 4.979, "li": 1.0, "bv": 5.012, "bi": 1.035, "pin": 6.51, "eff": 85.7, "effAll": 76.5, "bvEff": 89.3}, {"a": 1.5, "lv": 4.919, "li": 1.5, "bv": 4.97, "bi": 1.551, "pin": 9.3, "eff": 85.8, "effAll": 79.4, "bvEff": 89.6}, {"a": 2.5, "lv": 4.868, "li": 2.5, "bv": 4.958, "bi": 2.592, "pin": 14.96, "eff": 85.3, "effAll": 81.3, "bvEff": 90.1}]}, {"v": 3.3, "base": 0.7, "bvIdle": 3.36, "pts": [{"a": 0.5, "lv": 3.326, "li": 0.5, "bv": 3.33, "bi": 0.517, "pin": 2.78, "eff": 80.0, "effAll": 59.8, "bvEff": 82.9}, {"a": 1, "lv": 3.289, "li": 1.0, "bv": 3.32, "bi": 1.035, "pin": 4.69, "eff": 82.4, "effAll": 70.1, "bvEff": 86.2}, {"a": 1.5, "lv": 3.22, "li": 1.5, "bv": 3.26, "bi": 1.552, "pin": 6.52, "eff": 83.1, "effAll": 74.2, "bvEff": 87.1}, {"a": 2.5, "lv": 3.169, "li": 2.5, "bv": 3.255, "bi": 2.588, "pin": 10.39, "eff": 81.7, "effAll": 76.2, "bvEff": 87.0}]}, {"v": 2, "base": 0.7, "bvIdle": 2.065, "pts": [{"a": 0.5, "lv": 2.029, "li": 0.5, "bv": 2.03, "bi": 0.516, "pin": 2.04, "eff": 75.7, "effAll": 49.7, "bvEff": 78.3}, {"a": 1, "lv": 1.988, "li": 1.0, "bv": 2.01, "bi": 1.036, "pin": 3.28, "eff": 77.1, "effAll": 60.7, "bvEff": 80.8}, {"a": 1.5, "lv": 1.922, "li": 1.5, "bv": 1.96, "bi": 1.554, "pin": 4.43, "eff": 77.3, "effAll": 65.0, "bvEff": 81.6}, {"a": 2.5, "lv": 1.871, "li": 2.5, "bv": 1.95, "bi": 2.59, "pin": 7.0, "eff": 74.3, "effAll": 66.8, "bvEff": 80.2}]}, {"v": 1, "base": 0.72, "bvIdle": 1.085, "pts": [{"a": 0.5, "lv": 1.034, "li": 0.5, "bv": 1.04, "bi": 0.516, "pin": 1.72, "eff": 51.7, "effAll": 30.1, "bvEff": 53.7}, {"a": 1, "lv": 0.988, "li": 1.0, "bv": 1.01, "bi": 1.035, "pin": 2.32, "eff": 61.8, "effAll": 42.6, "bvEff": 65.4}, {"a": 1.5, "lv": 0.924, "li": 1.5, "bv": 0.965, "bi": 1.552, "pin": 2.85, "eff": 65.1, "effAll": 48.6, "bvEff": 70.4}, {"a": 2.5, "lv": 0.872, "li": 2.5, "bv": 0.95, "bi": 2.59, "pin": 4.36, "eff": 60.0, "effAll": 50.1, "bvEff": 67.7}]}]};
+const RAMP=['#30123b','#4145ab','#4675ed','#39a2fc','#1bcfd4','#24eca6','#61fc6c','#a4fc3b','#d1e834','#f3c63a','#fe9b2d','#f36315','#d93806','#b11901','#7a0403'];
+const color=e=>RAMP[Math.max(0,Math.min(RAMP.length-1,Math.round(e/100*(RAMP.length-1))))];
+const inkFor=e=>{const i=Math.round(e/100*(RAMP.length-1));return (i<=3||i>=12)?'#ffffff':'#111111';};
+const tip=document.getElementById('tip');
+function showTip(el,ev){const d=JSON.parse(el.dataset.p);tip.innerHTML=`<b>${d.v} V set · ${d.a} A</b><br>Efficiency ${d.eff}%<br>Load ${d.lv.toFixed(3)} V × ${d.li.toFixed(3)} A<br>BenchVolt ${d.bv.toFixed(3)} V × ${d.bi.toFixed(3)} A<br>USB input ${d.pin.toFixed(2)} W`;tip.hidden=false;
+ const r=el.getBoundingClientRect(),x=ev&&ev.clientX?ev.clientX:r.right,y=ev&&ev.clientY?ev.clientY:r.top;
+ tip.style.left=Math.min(x+14,innerWidth-tip.offsetWidth-8)+'px';tip.style.top=Math.max(8,y-tip.offsetHeight-10)+'px';}
+function heat(id,sweeps){
+ const el=document.getElementById(id),amps=sweeps[0].pts.map(p=>p.a),rows=[...sweeps].sort((a,b)=>b.v-a.v);
+ el.style.gridTemplateColumns=`auto repeat(${amps.length},minmax(48px,1fr))`;
+ for(const s of rows){
+  const lab=document.createElement('div');lab.className='ay';lab.textContent=s.v+' V'+(id==='map5'&&s.v===22?' *':'');el.append(lab);
+  for(const a of amps){const p=s.pts.find(q=>q.a===a),c=document.createElement('div');c.className='cell';c.tabIndex=0;c.setAttribute('role','gridcell');
+   c.style.background=color(p.eff);c.style.color=inkFor(p.eff);c.textContent=Math.round(p.eff)+'%';c.dataset.p=JSON.stringify({...p,v:s.v});
+   c.setAttribute('aria-label',`${s.v} volts, ${a} amps: ${p.eff} percent efficient`);
+   c.addEventListener('mousemove',e=>showTip(c,e));c.addEventListener('mouseleave',()=>tip.hidden=true);
+   c.addEventListener('focus',()=>showTip(c));c.addEventListener('blur',()=>tip.hidden=true);el.append(c);}
+ }
+ el.append(Object.assign(document.createElement('div'),{className:'ax'}));
+ for(const a of amps)el.append(Object.assign(document.createElement('div'),{className:'ax',textContent:a}));
+}
+heat('map4',DATA[4]);heat('map5',DATA[5]);
+
+const fixed=[[1,'1.8 V',3.0],[2,'2.5 V',3.0],[3,'3.3 V',5.5]];
+const amps=DATA[1][0].pts.map(p=>p.a);
+let h=`<thead><tr><th>Output</th><th>Feed rail</th><th>Ceiling</th>${amps.map(a=>`<th>${a} A</th>`).join('')}<th>USB in @ 2.5 A</th><th>Terminal V, 0.25 → 2.5 A</th></tr></thead><tbody>`;
+for(const [ch,name,feed] of fixed){const s=DATA[ch][0],P=s.pts,nom=parseFloat(name);
+ h+=`<tr><td>CH${ch} · ${name}</td><td>${feed.toFixed(1)} V</td><td>${(nom/feed*100).toFixed(0)}%</td>${P.map(p=>`<td>${p.eff.toFixed(1)}%</td>`).join('')}<td>${P.at(-1).pin.toFixed(1)} W</td><td>${P[0].lv.toFixed(3)} → ${P.at(-1).lv.toFixed(3)} V</td></tr>`;}
+document.getElementById('fixed').innerHTML=h+'</tbody>';
+
+const at=(ch,v)=>{const s=v==null?DATA[ch][0]:DATA[ch].find(x=>x.v===v);return s.pts.find(p=>p.a===2.5);};
+const acc=[[1,'CH1 · 1.8 V',null],[2,'CH2 · 2.5 V',null],[3,'CH3 · 3.3 V',null],[4,'CH4 @ 3 V',3],[5,'CH5 @ 12 V',12]];
+let a=`<thead><tr><th>Output</th><th>Front panel</th><th>At the terminals</th><th>Current error</th><th>Power overstated by</th></tr></thead><tbody>`;
+for(const [ch,name,v] of acc){const p=at(ch,v),ie=(p.bi/p.li-1)*100,pe=(p.bv*p.bi/(p.lv*p.li)-1)*100;
+ a+=`<tr><td>${name}</td><td>${p.bv.toFixed(3)} V × ${p.bi.toFixed(3)} A</td><td>${p.lv.toFixed(3)} V × ${p.li.toFixed(3)} A</td><td class="${ie>6?'lo':''}">+${ie.toFixed(1)}%</td><td class="${pe>10?'lo':''}">+${pe.toFixed(1)}%</td></tr>`;}
+document.getElementById('accuracy').innerHTML=a+'</tbody>';
+
+const dr=[];
+for(const [ch,name,feed] of fixed){const P=DATA[ch][0].pts;dr.push([`CH${ch} · ${name}`,parseFloat(name),P[0],P.at(-1)]);}
+for(const ch of [4,5])for(const s of [...DATA[ch]].sort((x,y)=>x.v-y.v)){dr.push([`CH${ch} @ ${s.v} V`,s.v,s.pts[0],s.pts.at(-1)]);}
+let r=`<thead><tr><th>Output</th><th>Set</th><th>Terminal V, light load</th><th>Terminal V, 2.5 A</th><th>Droop</th><th>Output resistance</th><th>Front panel at 2.5 A</th></tr></thead><tbody>`;
+for(const [name,set,lo,hi] of dr){const d=(1-hi.lv/lo.lv)*100,rout=(lo.lv-hi.lv)/(hi.li-lo.li)*1000;
+ r+=`<tr><td>${name}</td><td>${set.toFixed(set<10?2:1)} V</td><td>${lo.lv.toFixed(3)} V @ ${lo.li.toFixed(2)} A</td><td>${hi.lv.toFixed(3)} V</td><td class="${d>5?'lo':''}">${d.toFixed(1)}%</td><td>${rout.toFixed(0)} mΩ</td><td>${hi.bv.toFixed(3)} V</td></tr>`;}
+document.getElementById('droop').innerHTML=r+'</tbody>';
+</script>
+
+</body>
+</html>
